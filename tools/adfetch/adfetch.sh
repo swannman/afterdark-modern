@@ -14,6 +14,10 @@
 #                                   [--progress] [--cleanup-downloads]
 #
 #   AD_ASSETS_DIR        destination assets root (default: ~/Library/Application Support/AfterDarkModern/assets)
+#   AD_TOOLS_DIR         directory holding the extraction tools (unar + hfsutils'
+#                        hmount/hcd/hls/hcopy/humount); prepended to PATH. The .app
+#                        sets it to its own bundled Contents/Helpers/bin so a
+#                        downloaded app needs nothing installed. Unset = plain PATH.
 #   AD_CACHE_DIR         where the big raw downloads land (default: $ASSETS/.adfetch-downloads).
 #                        --cache / AD_CACHE_DIR lets the app keep the re-downloadable
 #                        ISO/img under ~/Library/Caches instead of Application Support.
@@ -72,31 +76,47 @@ CUR_PHASE=""; CUR_PCT=0
 progress(){ CUR_PHASE="$1"; CUR_PCT="$2"; [ "$PROGRESS" = 1 ] && printf 'PROGRESS phase=%s pct=%s\n' "$1" "$2" || true; }
 progress_bytes(){ [ "$PROGRESS" = 1 ] && printf 'PROGRESS phase=%s pct=%s bytes=%s\n' "$1" "$2" "$3" || true; }
 
+# A bundled copy of the extraction tools (AfterDark.app/Contents/Helpers/bin)
+# wins over anything installed, so the app's behaviour doesn't depend on what
+# happens to be on the user's machine. Dev/CLI runs leave AD_TOOLS_DIR unset and
+# keep using PATH (Homebrew).
+if [ -n "${AD_TOOLS_DIR:-}" ] && [ -d "$AD_TOOLS_DIR" ]; then
+  PATH="$AD_TOOLS_DIR:$PATH"; export PATH
+fi
+
 command -v unar >/dev/null || die "need 'unar' (brew install unar)"
 command -v curl >/dev/null || die "need 'curl'"
 [ -f "$CONF" ] || die "missing $CONF"
 
-# hfsutils (hmount/hcopy/humount) is only needed for the hfsimg2/hfsiso modes
-# (reading Internet Archive Mac disk images); checked lazily in unpack_hfs so a
-# direct-StuffIt run doesn't require it.
+# hfsutils (hmount/hcd/hls/hcopy/humount) is only needed for the hfsimg2/hfsiso
+# modes (reading Internet Archive Mac disk images); checked lazily in unpack_hfs
+# so a direct-StuffIt run doesn't require it.
 need_hfsutils(){
-  command -v hmount >/dev/null && command -v hcopy >/dev/null && command -v humount >/dev/null \
-    || die "need hfsutils (hmount/hcopy/humount) to read Internet Archive HFS disk images — brew install hfsutils"
+  local t
+  for t in hmount hcd hls hcopy humount; do
+    command -v "$t" >/dev/null \
+      || die "need hfsutils ($t) to read Internet Archive HFS disk images — brew install hfsutils"
+  done
 }
 # shellcheck disable=SC1090
 source "$CONF"
+# manifest_rows / md5of / zero_rsrc_pad — a shell-only manifest reader, so this
+# script (which ships inside the .app) needs no python3.
+# shellcheck source=manifest.sh
+source "$HERE/manifest.sh"
+MANIFEST="$HERE/assets.manifest.json"
+[ -f "$MANIFEST" ] || die "missing $MANIFEST"
 
 DL="${CACHE:-$ASSETS/.adfetch-downloads}"
 mkdir -p "$ASSETS" "$DL"
 
 # md5 of the two reference StuffIt archives, straight from the manifest.
-AD9_REF_MD5="$(python3 -c "import json;print(next(a['md5'] for a in json.load(open('$HERE/assets.manifest.json'))['sourceArchives'] if a['path'].endswith('AD9v11fullpackage.sit')))")"
-DLX_REF_MD5="$(python3 -c "import json;print(next(a['md5'] for a in json.load(open('$HERE/assets.manifest.json'))['sourceArchives'] if a['path'].endswith('After_Dark_Deluxe_4.1.sit')))")"
-
-md5of(){ md5 -q "$1" 2>/dev/null || md5sum "$1" 2>/dev/null | awk '{print $1}'; }
-
-# _filesize <path> — portable byte size (BSD stat on macOS, GNU stat elsewhere).
-_filesize(){ stat -f%z "$1" 2>/dev/null || stat -c%s "$1" 2>/dev/null || echo 0; }
+ref_archive_md5(){
+  manifest_rows "$MANIFEST" sourceArchives path md5 \
+    | awk -F"$MANIFEST_FS" -v want="$1" 'index($1, want) && index($1, want) == length($1) - length(want) + 1 {print $2}'
+}
+AD9_REF_MD5="$(ref_archive_md5 AD9v11fullpackage.sit)"
+DLX_REF_MD5="$(ref_archive_md5 After_Dark_Deluxe_4.1.sit)"
 
 # download <url> <dest>  — resumable; supports file:// (copy) and http(s). In
 # --progress mode an http download runs a background size-poller that emits
@@ -114,7 +134,7 @@ download(){
         local ph="$CUR_PHASE" pc="$CUR_PCT"
         ( while :; do
             sleep 1
-            [ -f "$dest" ] && progress_bytes "$ph" "$pc" "$(_filesize "$dest")"
+            [ -f "$dest" ] && progress_bytes "$ph" "$pc" "$(filesize "$dest")"
           done ) & poller=$!
       fi
       curl -fL -C - --retry 3 -o "$dest" "$url" \
@@ -206,24 +226,36 @@ unpack_hfs(){
 place_pool(){
   local pool="$1" family="$2" dest_root="$3" shared_substr="${4:-}"
   local ok=0 missing=0 name rel
-  while IFS=$'\t' read -r name rel; do
+  while IFS="$MANIFEST_FS" read -r name rel; do
     [ -n "$name" ] || continue
     local src="$pool/$name" dest="$dest_root/$rel"
     if [ ! -e "$src" ]; then missing=$((missing + 1)); warn "IA pool: missing '$name'"; continue; fi
     mkdir -p "$(dirname "$dest")"
     cp -p "$src" "$dest"
     ok=$((ok + 1))
-  done < <(python3 -c "
-import json, os
-man = json.load(open('$HERE/assets.manifest.json'))
-rows = [e['path'] for e in man['moduleAssets'] if e['family'] == '$family']
-if '$shared_substr':
-    rows += [s['path'] for s in man['sharedLibraries'] if '$shared_substr' in s['label']]
-for path in rows:
-    rel = path[:-len('/..namedfork/rsrc')] if path.endswith('/..namedfork/rsrc') else path
-    print(os.path.basename(rel) + '\t' + rel)
-")
+  done < <(pool_wants "$family" "$shared_substr")
   log "placed $ok from IA pool ($missing missing) — $family"
+}
+
+# pool_wants <family> [shared_label_substr]  — emit "<pool filename><FS><relative
+# dest path>" for every fork the manifest lists for that family (plus the
+# matching shared library). A fork's dest is its file path with the
+# /..namedfork/rsrc suffix dropped: the flat pool holds whole files (both forks),
+# and cp -p carries the resource fork along.
+pool_wants(){
+  local family="$1" shared_substr="${2:-}" p rel
+  {
+    manifest_rows "$MANIFEST" moduleAssets family path \
+      | awk -F"$MANIFEST_FS" -v fam="$family" '$1 == fam {print $2}'
+    if [ -n "$shared_substr" ]; then
+      manifest_rows "$MANIFEST" sharedLibraries label path \
+        | awk -F"$MANIFEST_FS" -v want="$shared_substr" 'index($1, want) {print $2}'
+    fi
+  } | while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    rel="${p%/..namedfork/rsrc}"
+    printf '%s%s%s\n' "${rel##*/}" "$MANIFEST_FS" "$rel"
+  done
 }
 
 # zero_rsrc_header <fork-path>  — zero resource-fork bytes 16-255 (the fixed
@@ -233,21 +265,9 @@ for path in rows:
 # extraction-tool buffer bytes there. Canonicalizing it here means adfetch's
 # output is deterministic regardless of source (reference StuffIt or the IA
 # disk image) -- see assets.manifest.json's 'note' and sources.conf for the
-# investigation that established this.
-zero_rsrc_header(){
-  local f="$1"
-  [ -f "$f" ] || return 0
-  python3 -c "
-import sys
-path = sys.argv[1]
-with open(path, 'r+b') as fh:
-    data = bytearray(fh.read())
-    end = min(256, len(data))
-    for i in range(16, end):
-        data[i] = 0
-    fh.seek(0); fh.write(data); fh.truncate()
-" "$f"
-}
+# investigation that established this. (zero_rsrc_pad lives in manifest.sh,
+# shared with the verifier's md5Canonical check.)
+zero_rsrc_header(){ zero_rsrc_pad "$1"; }
 
 # canonicalize_ad9_tree <After Dark 4.0 folder>  — canonicalize the resource
 # fork of every item placed there (module files + the shared-lib item, if
@@ -385,7 +405,7 @@ log "verifying against manifest ..."
 # In --progress mode keep stdout clean (PROGRESS lines only) by sending the
 # verifier's own report to the log stream (stderr) and quieting the per-file list.
 VERIFY_QUIET=""; [ "$PROGRESS" = 1 ] && VERIFY_QUIET="--quiet"
-if python3 "$HERE/verify_manifest.py" "$ASSETS" --adhost-dir "$VERIFY_ADHOST_DIR" $VERIFY_QUIET 1>&$_logfd; then
+if bash "$HERE/verify_manifest.sh" "$ASSETS" --adhost-dir "$VERIFY_ADHOST_DIR" $VERIFY_QUIET 1>&$_logfd; then
   log "DONE — all needed forks present and byte-identical to the reference build."
   # Drop the big re-downloadable raw sources once the tree is verified good.
   if [ "$CLEANUP" = 1 ] && [ "$VERIFY_ONLY" = 0 ]; then

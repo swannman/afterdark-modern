@@ -46,9 +46,15 @@ different source); it's harmless to repeat.
 
 ## Use
 
-1. `brew install unar` (StuffIt / disk-image extraction that preserves resource forks).
-   If you'll use the Internet Archive fallbacks, also `brew install hfsutils`
-   (adfetch checks for this and tells you if it's missing).
+1. Get the extraction tools on PATH: `brew install unar hfsutils` (`unar` does
+   StuffIt / disk-image extraction preserving resource forks; hfsutils'
+   `hmount`/`hcd`/`hls`/`hcopy`/`humount` read the Internet Archive HFS images).
+   adfetch checks for these and tells you which is missing.
+   Prefer not to use Homebrew? `tools/get_extractors.sh` builds both from source
+   into `third_party/extractors/bin`; point `AD_TOOLS_DIR` at that directory and
+   adfetch will use it ahead of PATH. That is exactly what AfterDark.app does —
+   it bundles those binaries, so a downloaded app needs no Homebrew at all.
+   Nothing else is required beyond macOS itself (no `python3`).
 2. Edit `sources.conf` — point `AD9_URL` / `DLX_URL` at your source (a direct
    StuffIt URL, a `file:///…/local.sit`, or leave blank to use the documented
    Internet Archive disk-image fallbacks).
@@ -127,7 +133,9 @@ open directly.
 | `adfetch.sh` | download → extract → place shared libs → verify |
 | `sources.conf` | where each source comes from + how to unpack it |
 | `assets.manifest.json` | md5 of every needed fork (generated from the reference build) |
-| `verify_manifest.py` | standalone manifest checker (`verify_manifest.py <assets_root>`) |
+| `manifest.sh` | shared shell helpers: manifest reader, md5, resource-fork canonicalization |
+| `verify_manifest.sh` | manifest checker adfetch runs, and the one bundled in the app (no python3) |
+| `verify_manifest.py` | the same checker in python, kept for dev use; output is byte-identical |
 
 ## Regenerating the manifest
 
@@ -136,5 +144,5 @@ manifest from a known-good populated tree:
 
 ```bash
 # (script lives in this dir; see the header of assets.manifest.json)
-python3 verify_manifest.py "$AD_ASSETS_DIR"     # confirm current state first
+./verify_manifest.sh "$AD_ASSETS_DIR"           # confirm current state first
 ```

@@ -35,3 +35,4 @@ tools/adhost/adhost68k_*.cc
 third_party/
 assets/
 *.dSYM/
+third_party/extractors/

@@ -32,7 +32,8 @@ final class LineBuffer: @unchecked Sendable {
 //   * extracted tree (kept):        ~/Library/Application Support/AfterDarkModern/assets
 //   * raw downloads (re-fetchable):  ~/Library/Caches/AfterDarkModern
 //                                    deleted after a successful verify.
-//   * bundled tools (adfetch + py):  inside the .app (Contents/Helpers), read-only.
+//   * bundled tools (adfetch +
+//     unar/hfsutils):                inside the .app (Contents/Helpers), read-only.
 @MainActor
 public final class FirstRunManager: ObservableObject {
     public enum Stage: Equatable {
@@ -106,17 +107,25 @@ public final class FirstRunManager: ObservableObject {
     // MARK: - Tool detection
     // A GUI app launched from /Applications inherits a minimal PATH (no Homebrew),
     // so we search known locations directly rather than trusting $PATH. Order:
-    // bundled helpers first (future-proof for a vendored+signed build), then the
-    // usual Homebrew/system bins.
+    // the tools we bundle and sign ourselves first, then Homebrew/system bins for
+    // a dev checkout run outside a built .app.
     nonisolated private static let toolSearchDirs: [String] = {
         var dirs: [String] = []
-        if let helpers = Bundle.main.url(forResource: "Helpers", withExtension: nil)?.path {
-            dirs.append("\(helpers)/bin")
-        }
-        dirs += ["\(Bundle.main.bundlePath)/Contents/Helpers/bin",
-                 "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+        if let bundled = bundledToolsDir { dirs.append(bundled) }
+        dirs += ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/sbin"]
         return dirs
     }()
+
+    // make_app.sh puts unar + hfsutils here; nil when running from a dev build
+    // that isn't a .app bundle.
+    nonisolated static let bundledToolsDir: String? = toolsDir(inBundleAt: Bundle.main.bundlePath)
+
+    // unar is the marker: if it isn't there and runnable, this isn't a bundle
+    // that carries its own extraction tools.
+    nonisolated static func toolsDir(inBundleAt bundlePath: String) -> String? {
+        let dir = "\(bundlePath)/Contents/Helpers/bin"
+        return FileManager.default.isExecutableFile(atPath: "\(dir)/unar") ? dir : nil
+    }
 
     nonisolated static func locate(_ tool: String) -> String? {
         let fm = FileManager.default
@@ -127,11 +136,12 @@ public final class FirstRunManager: ObservableObject {
         return nil
     }
 
-    // The IA fetch path needs unar (unpack) + hfsutils (read the HFS/ISO images).
-    // curl + python3 are also required by adfetch. Returns a user-facing guidance
-    // string if any are missing, else nil.
+    // The IA fetch path needs unar (unpack) + hfsutils (read the HFS/ISO images);
+    // curl comes with macOS. A built .app carries all of them in
+    // Contents/Helpers/bin, so this only ever fires for a dev run outside the
+    // bundle. Returns a user-facing guidance string if any are missing, else nil.
     private func missingTools() -> String? {
-        let need = ["unar", "hmount", "hcopy", "humount", "curl", "python3"]
+        let need = ["unar", "hmount", "hcd", "hls", "hcopy", "humount", "curl"]
         let absent = need.filter { Self.locate($0) == nil }
         guard !absent.isEmpty else { return nil }
         // Map the missing binaries back to their Homebrew formulae.
@@ -139,8 +149,8 @@ public final class FirstRunManager: ObservableObject {
         for t in absent {
             switch t {
             case "unar": formulae.insert("unar")
-            case "hmount", "hcopy", "humount": formulae.insert("hfsutils")
-            default: break   // curl/python3 ship with macOS/CLT; can't brew-install cleanly
+            case "hmount", "hcd", "hls", "hcopy", "humount": formulae.insert("hfsutils")
+            default: break   // curl ships with macOS; can't brew-install cleanly
             }
         }
         let missingList = absent.joined(separator: ", ")
@@ -206,6 +216,10 @@ public final class FirstRunManager: ObservableObject {
         env["AD_ASSETS_DIR"] = assetsRoot
         env["AD_CACHE_DIR"] = cacheDir
         env["ADFETCH_USE_IA"] = "1"   // Internet Archive sources (content-verified)
+        // Point adfetch at the tools we bundle and sign, which it puts ahead of
+        // everything on PATH — the app's extraction must not depend on what the
+        // user happens to have installed.
+        if let bundled = Self.bundledToolsDir { env["AD_TOOLS_DIR"] = bundled }
         // Give the child a PATH that actually contains Homebrew + the tools we
         // located, since a GUI-launched app's PATH is minimal.
         var pathDirs = Self.toolSearchDirs

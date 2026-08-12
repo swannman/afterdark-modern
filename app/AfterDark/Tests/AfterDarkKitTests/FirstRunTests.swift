@@ -71,4 +71,25 @@ final class FirstRunTests: XCTestCase {
         fm.createFile(atPath: bare.appendingPathComponent(".adfetch-complete").path, contents: Data("ok".utf8))
         XCTAssertTrue(mgr2.assetsPresent(), "sentinel is a sufficient present marker")
     }
+
+    func testBundledToolsDirFoundOnlyWhenItHoldsAnExecutableUnar() throws {
+        // make_app.sh bundles the extraction tools at Contents/Helpers/bin, and
+        // that path is what the downloader gets as AD_TOOLS_DIR — so a bundle
+        // without a runnable unar there must report nothing rather than a dir
+        // that would silently fall back to whatever is installed.
+        let fm = FileManager.default
+        let bundle = fm.temporaryDirectory.appendingPathComponent("adfr-\(UUID().uuidString).app")
+        let bin = bundle.appendingPathComponent("Contents/Helpers/bin")
+        try fm.createDirectory(at: bin, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: bundle) }
+
+        XCTAssertNil(FirstRunManager.toolsDir(inBundleAt: bundle.path), "no unar yet")
+
+        let unar = bin.appendingPathComponent("unar")
+        fm.createFile(atPath: unar.path, contents: Data("#!/bin/sh\n".utf8))
+        XCTAssertNil(FirstRunManager.toolsDir(inBundleAt: bundle.path), "present but not executable")
+
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: unar.path)
+        XCTAssertEqual(FirstRunManager.toolsDir(inBundleAt: bundle.path), bin.path)
+    }
 }
