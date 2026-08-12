@@ -342,11 +342,18 @@ public final class EmulatedHost {
         env["ADSTREAMIDX"] = "1"
         // Static recipe env.
         for (k, v) in recipe.env { env[k] = v }
+        // addm 744: arm the authentic Duration-cycle safety net on BOTH hosts.
+        // ADAUTORESTART is dead in the 68K host as of addm 701 (see adhost68k.cc
+        // ~line 12848: "ADAUTORESTART no longer arms a cycle"); the real lever is
+        // ADCYCLE (adhost68k.cc ~line 12859, adhost.cc ~line 3354 — both hosts read
+        // it). Without this, a module that faults to black (e.g. Flying Toasters,
+        // P0-1 in the visual census) stays black forever in the app. Unconditional
+        // for both viewer and saver, PPC and 68K.
+        env["ADCYCLE"] = "1"
         // Family/lane defaults.
         if module.family == .k68 {
             env["ADTICKRATE"] = "120"
             env["ADMAXTRAPS"] = "4000000000"
-            env["ADAUTORESTART"] = "1"
             // No disk risk with streaming: pipe backpressure paces the host and
             // SIGPIPE reaps any orphan. Let finite savers run effectively forever;
             // the terminationHandler respawns any that self-exit.
