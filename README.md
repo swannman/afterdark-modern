@@ -36,9 +36,11 @@ cd tools/adhost && make && cd ../..
 cd app/AfterDark && swift run AfterDark
 ```
 
-The download needs `brew install unar hfsutils` (the archive.org sources are
-StuffIt/HFS images). For headless work without the app, run
-`tools/adfetch/adfetch.sh` directly — same tool, same downloads.
+The `.app` bundle is self-contained — `make_app.sh` builds the extraction tools
+(via `tools/get_extractors.sh`) and bundles them, so a distributed app needs no
+Homebrew. For `swift run` / headless work, either run `tools/get_extractors.sh`
+once or `brew install unar hfsutils`; `tools/adfetch/adfetch.sh` does the same
+download the app does.
 
 ## Testing an emulator rewrite
 
