@@ -1,19 +1,24 @@
-# AfterDark (native app)
+# AfterDark (app)
 
-SwiftUI + SpriteKit macOS app. A sidebar module picker; the selected module runs
-in a resizable / fullscreen-capable window. Flying Toasters is implemented with
-the real decoded sprites; other modules show a placeholder for now.
+SwiftUI macOS app + a headless renderer. A sidebar module picker; the selected
+module runs in a resizable / fullscreen-capable window. Every module runs the
+**real emulated After Dark code** through `EmulatedHost` (which drives the
+`tools/adhost` hosts); there is no bespoke reimplementation.
 
 ## Run it
 ```
 cd app/AfterDark
-./make_app.sh          # builds AfterDark.app (a real launchable bundle)
-open AfterDark.app     # pick a module in the sidebar; resize / green-button fullscreen
+swift run AfterDark     # first launch shows the asset-download gate, then the picker
+# or a standalone bundle:
+./make_app.sh && open AfterDark.app
 ```
-A bare `swift run` won't show a window (SwiftUI needs an .app bundle) — use `make_app.sh`.
+First run downloads the original assets (see the top-level README, *Assets*).
 
 ## Targets
-- **AfterDarkKit** — scenes, sprite loader, decoded sprite resources.
+- **AfterDarkKit** — `EmulatedHost` (drives a host, streams/decodes frames), the
+  catalog loader, `FirstRunManager` (first-run asset download), the module views.
 - **AfterDark** — the SwiftUI app.
-- **adrender** — headless Metal renderer (`adrender <module> <outPrefix> <w> <h> <t0,t1,…>`),
-  used to verify/preview scenes without a display.
+- **adrender** — headless renderer / verifier. `adrender <module> <outPrefix> <w> <h>
+  <t0,t1,…>` renders frames; `adrender --smoke <module> <secs>` drives a module
+  through the full `EmulatedHost` pipeline and reports frames (recipe resolution +
+  host path check); `adrender --verify` sanity-checks the catalog + recipes.

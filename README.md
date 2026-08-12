@@ -98,7 +98,9 @@ ADSCREENW=512 ADSCREENH=384 ADFBHASH=1 ADFRAMES=200 \
 cd app/AfterDark
 .build/release/adrender --smoke 68k-bogglins 20      # -> framesConsumed=N OK
 
-# the GUI app (needs a bundle; SwiftUI won't show a window under bare `swift run`):
+# the GUI app — first launch shows the download gate, then the module picker:
+swift run AfterDark
+# or build a standalone .app bundle (for install / the screensaver path):
 ./make_app.sh && open AfterDark.app
 ```
 
