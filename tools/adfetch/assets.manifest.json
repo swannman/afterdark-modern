@@ -1,0 +1,844 @@
+{
+ "assetsRootRelative": true,
+ "note": "md5 of the exact forks the hosts read; paths relative to AD_ASSETS_DIR. PPC rsrc forks (all 19 modules + AD4 Library) also carry md5Canonical: the md5 after zeroing resource-fork bytes 16-255 (the fixed 240-byte 'reserved for system use' pad before resource DATA begins at byte 256, per Inside Macintosh). That region is scratch space no Mac tool ever reads; naive copy/archive tools leave leftover buffer garbage there, which varies by distribution even when the actual resource content is identical. 'md5' matches only the exact reference build (AD9v11fullpackage.sit); 'md5Canonical' matches any build whose resources decode identically, including the Internet Archive AfterDark40.img fallback -- confirmed by direct resource_dasm decode diff (0 bytes differ across every decoded resource) against a full extraction of that image for 18 of the 19 PPC modules + the AD4 Library in a later full sweep, and separately for Flying Toasters! in an earlier 6-module sample (both zero-diff); Flying Toasters! was added to this manifest afterward using the same canonicalization mechanism. adfetch.sh canonicalizes (zeroes that pad) every PPC rsrc fork it places, from either source, so a fresh fetch's md5 always equals md5Canonical; md5 (the pre-canonicalization reference-build hash) is kept so already-populated trees from before this change still verify without re-fetching.",
+ "sourceArchives": [
+  {
+   "path": "AD9v11fullpackage.sit",
+   "md5": "87df3906d21651ed6bf8c8d0541efc75",
+   "size": 18590024
+  },
+  {
+   "path": "deluxe/After_Dark_Deluxe_4.1.sit",
+   "md5": "f5d5c0fc9d8805812d0e68c97315aa78",
+   "size": 27208024
+  }
+ ],
+ "sharedLibraries": [
+  {
+   "label": "After Dark 4.0 Shared (data fork) -> ADShared40.pef",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/After Dark 4.0 Shared",
+   "md5": "17c4ef51c986410747b70d73b664858e",
+   "size": 355009
+  },
+  {
+   "label": "After Dark 4.0 Library (rsrc fork) -> AD4Library.rsrc",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/Module Resources/After Dark 4.0 Library/..namedfork/rsrc",
+   "md5": "696e9cb6818897054a15a6ef037f4cbc",
+   "size": 433540,
+   "md5Canonical": "2fe8f98dd14084f52cf2319067a0e815"
+  }
+ ],
+ "moduleAssets": [
+  {
+   "module": "68k-art-critic",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Art Critic/..namedfork/rsrc",
+   "md5": "61189360e1a563f777fe53a030975a9f",
+   "size": 1360621
+  },
+  {
+   "module": "68k-bogglins",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Bogglins/..namedfork/rsrc",
+   "md5": "66df6bb5544e22c8fd73a27bf57dc0d2",
+   "size": 203169
+  },
+  {
+   "module": "68k-boris",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Boris/..namedfork/rsrc",
+   "md5": "ce08c8c9bc09fca7d001790704ce2c14",
+   "size": 192254
+  },
+  {
+   "module": "68k-bugs",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Bugs/..namedfork/rsrc",
+   "md5": "412749ad68d27ef403e3443ae810da82",
+   "size": 148575
+  },
+  {
+   "module": "68k-can-of-worms",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Can of Worms/..namedfork/rsrc",
+   "md5": "af903e53ffadfbee5d8a650105f2b830",
+   "size": 9273
+  },
+  {
+   "module": "68k-clocks",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Clocks/..namedfork/rsrc",
+   "md5": "fa432bbdbf7d2181fab5aa3f3554a63d",
+   "size": 142622
+  },
+  {
+   "module": "68k-confetti-factory",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Confetti Factory/..namedfork/rsrc",
+   "md5": "43eb77f9d9df99ba6387db714a61f53c",
+   "size": 59221
+  },
+  {
+   "module": "68k-cyb3r-w-t",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/CYb3r W@t/..namedfork/rsrc",
+   "md5": "4d2f7f7a118566b348468cffd78fa454",
+   "size": 1198557
+  },
+  {
+   "module": "68k-daredevil-dan",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Daredevil Dan/..namedfork/rsrc",
+   "md5": "6a42c29ec522265a0e4a0d6a4e74ae1a",
+   "size": 129107
+  },
+  {
+   "module": "68k-dominoes",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Dominoes/..namedfork/rsrc",
+   "md5": "b5667b39d27c8cbaa8b08439f15de93f",
+   "size": 92384
+  },
+  {
+   "module": "68k-down-the-drain",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Down the Drain/..namedfork/rsrc",
+   "md5": "8c01228147a3c8be25af785d32298498",
+   "size": 8871
+  },
+  {
+   "module": "68k-draw-morph",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Draw Morph/..namedfork/rsrc",
+   "md5": "68d724940ec9ec79567705f62b41354b",
+   "size": 78347
+  },
+  {
+   "module": "68k-einstein",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Einstein/..namedfork/rsrc",
+   "md5": "8c9eedb078c3c4a17624103f64819595",
+   "size": 66171
+  },
+  {
+   "module": "68k-fish-world",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Fish World/..namedfork/rsrc",
+   "md5": "e113d07f7c7cf928a5c04baf45a63de3",
+   "size": 1689324
+  },
+  {
+   "module": "68k-fractal-forest",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Fractal Forest/..namedfork/rsrc",
+   "md5": "17e84ca3e33560734a449b479ab31641",
+   "size": 43752
+  },
+  {
+   "module": "68k-frost-fire",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Frost & Fire/..namedfork/rsrc",
+   "md5": "58c759827a5c45d318d8c4faa93e4412",
+   "size": 11741
+  },
+  {
+   "module": "68k-geobounce",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/GeoBounce/..namedfork/rsrc",
+   "md5": "1717f58dafb44a8cce528a2560573395",
+   "size": 23523
+  },
+  {
+   "module": "68k-globe",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Globe/..namedfork/rsrc",
+   "md5": "98ad152e0aead2a29a0f20e08aad04b0",
+   "size": 61810
+  },
+  {
+   "module": "68k-guernsey-madness",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Guernsey Madness/..namedfork/rsrc",
+   "md5": "aef792eec06834d81369020cd3abd64b",
+   "size": 952725
+  },
+  {
+   "module": "68k-life-all",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Life & All/..namedfork/rsrc",
+   "md5": "7011f9059dc2103fc95d9a3213203d52",
+   "size": 830216
+  },
+  {
+   "module": "68k-magic-turtle",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Magic Turtle/..namedfork/rsrc",
+   "md5": "8ea948eb7a9ffdd04d08439bebda22ed",
+   "size": 148367
+  },
+  {
+   "module": "68k-mandelbrot",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Mandelbrot/..namedfork/rsrc",
+   "md5": "c3495f4e47cbdda2a1e4682cfaa1c395",
+   "size": 16458
+  },
+  {
+   "module": "68k-marbles",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Marbles/..namedfork/rsrc",
+   "md5": "7a39603d564c8c630c6a0b294ed64beb",
+   "size": 33847
+  },
+  {
+   "module": "68k-marbles-bang",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Marbles!/..namedfork/rsrc",
+   "md5": "69efcbcad5afc80e7e2fca73e94a48c9",
+   "size": 833414
+  },
+  {
+   "module": "68k-meadow",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Meadow/..namedfork/rsrc",
+   "md5": "c786b54475087e96c324298bb9a9c5bd",
+   "size": 24893
+  },
+  {
+   "module": "68k-messages-4-0",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Messages 4.0/..namedfork/rsrc",
+   "md5": "7c98d9e6d1282d5756dc66181bf9d855",
+   "size": 1446944
+  },
+  {
+   "module": "68k-modern-art",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Modern Art/..namedfork/rsrc",
+   "md5": "b764148e9a4d7d22993576c8cee28e89",
+   "size": 39209
+  },
+  {
+   "module": "68k-mowin-man",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Mowin' Man/..namedfork/rsrc",
+   "md5": "3320fbbd74375e7b0a97df1d58bc3dfd",
+   "size": 53498
+  },
+  {
+   "module": "68k-nirvana",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Nirvana/..namedfork/rsrc",
+   "md5": "393f0a8cfd6c5e3ea0a9598b7661b398",
+   "size": 36135
+  },
+  {
+   "module": "68k-nocturnes",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Nocturnes/..namedfork/rsrc",
+   "md5": "86220c1b45f07056144ac0a2cb022805",
+   "size": 26000
+  },
+  {
+   "module": "68k-nonsense",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Nonsense/..namedfork/rsrc",
+   "md5": "4546fe514d4d99a9952ad91197241d45",
+   "size": 18715
+  },
+  {
+   "module": "68k-om-appliances",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/OM Appliances/..namedfork/rsrc",
+   "md5": "a318f77a4549e0eab5f88ab960354887",
+   "size": 60122
+  },
+  {
+   "module": "68k-pearls",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Pearls/..namedfork/rsrc",
+   "md5": "cba3b443772cd9168f613ae66c41e335",
+   "size": 23396
+  },
+  {
+   "module": "68k-photon",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Photon/..namedfork/rsrc",
+   "md5": "ded5880de29e1cd3a3c39a78ef5dcd00",
+   "size": 5326
+  },
+  {
+   "module": "68k-punch-out",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Punch Out/..namedfork/rsrc",
+   "md5": "8f990f6568e970c5c1532f5f815bd12c",
+   "size": 23825
+  },
+  {
+   "module": "68k-puzzle",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Puzzle/..namedfork/rsrc",
+   "md5": "2e836e39f2aa494b4cdd46ace4ea0894",
+   "size": 8426
+  },
+  {
+   "module": "68k-rain",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Rain/..namedfork/rsrc",
+   "md5": "564709186d536d506f61af2922c86a50",
+   "size": 6173
+  },
+  {
+   "module": "68k-rebound",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Rebound/..namedfork/rsrc",
+   "md5": "a42fc3c0ca3e27f7b880298bb59ec147",
+   "size": 17755
+  },
+  {
+   "module": "68k-rock-paper-scissors",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Rock Paper Scissors/..namedfork/rsrc",
+   "md5": "07d88cd29eb77a2c6b15064875a146ce",
+   "size": 2239725
+  },
+  {
+   "module": "68k-rodger-dodger",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Rodger Dodger/..namedfork/rsrc",
+   "md5": "5e1d33c49dd009e163430d9d51df4a9a",
+   "size": 949089
+  },
+  {
+   "module": "68k-rose",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Rose/..namedfork/rsrc",
+   "md5": "d3393acdcdc9e6c034e0b4a2431e1b44",
+   "size": 7967
+  },
+  {
+   "module": "68k-satori",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Satori/..namedfork/rsrc",
+   "md5": "68e2543ae8623588ba53ae2fc1adcc5d",
+   "size": 10193
+  },
+  {
+   "module": "68k-shadow-agents",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Shadow Agents/..namedfork/rsrc",
+   "md5": "7d927eaf7dc580c13324796c83ff16c9",
+   "size": 1188646
+  },
+  {
+   "module": "68k-shapes",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Shapes/..namedfork/rsrc",
+   "md5": "49ec50b17f2eea6fde99e060e4d3a903",
+   "size": 2779
+  },
+  {
+   "module": "68k-slow-burn",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Slow Burn/..namedfork/rsrc",
+   "md5": "390a765d0a812d821ccdbe14c42d69d7",
+   "size": 103256
+  },
+  {
+   "module": "68k-snake",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Snake/..namedfork/rsrc",
+   "md5": "5ac3c000d4077e855e4286ac80f3216a",
+   "size": 18055
+  },
+  {
+   "module": "68k-spheres",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Spheres/..namedfork/rsrc",
+   "md5": "7eddffd6e92408fe281b846d2b1f4237",
+   "size": 8858
+  },
+  {
+   "module": "68k-spin-brush",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Spin Brush/..namedfork/rsrc",
+   "md5": "f290d37be7baec1dbd9b0f3e20443e07",
+   "size": 23785
+  },
+  {
+   "module": "68k-spiral-gyra",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Spiral Gyra/..namedfork/rsrc",
+   "md5": "928b40c14017cfa2814f96b5aacc5853",
+   "size": 8555
+  },
+  {
+   "module": "68k-spotlight",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Spotlight/..namedfork/rsrc",
+   "md5": "12945591de14ca193aa352a421afcb27",
+   "size": 11776
+  },
+  {
+   "module": "68k-stained-glass",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Stained Glass/..namedfork/rsrc",
+   "md5": "1871befe650e5a250df0b04679938342",
+   "size": 19648
+  },
+  {
+   "module": "68k-strange-attractors",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Strange Attractors/..namedfork/rsrc",
+   "md5": "8f07249421491da8ca8530162212cefd",
+   "size": 10087
+  },
+  {
+   "module": "68k-string-theory",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/String Theory/..namedfork/rsrc",
+   "md5": "85e7a0b7471b7f3b36e66819840daedb",
+   "size": 6411
+  },
+  {
+   "module": "68k-sunburst",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Sunburst/..namedfork/rsrc",
+   "md5": "a290456cb57bf27fdde87a2e009fbe1b",
+   "size": 8321
+  },
+  {
+   "module": "68k-super-guy",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Super Guy/..namedfork/rsrc",
+   "md5": "7f3996d5d69706c269fdffcd36653ee1",
+   "size": 1489671
+  },
+  {
+   "module": "68k-time-flies",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Time Flies/..namedfork/rsrc",
+   "md5": "88a40d1d2136c8b30ccb54663c1a65d1",
+   "size": 1249963
+  },
+  {
+   "module": "68k-tunnel",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Tunnel/..namedfork/rsrc",
+   "md5": "1ac89f6f232a188fc9431e5df2396c10",
+   "size": 10793
+  },
+  {
+   "module": "68k-vertigo",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Vertigo/..namedfork/rsrc",
+   "md5": "1927f795780aef9ec51b08897550db03",
+   "size": 8410
+  },
+  {
+   "module": "68k-warp",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Warp!/..namedfork/rsrc",
+   "md5": "1a21b9103424ddd4eba0ef7fc03aeca8",
+   "size": 6204
+  },
+  {
+   "module": "68k-zooommm",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Zooommm!/..namedfork/rsrc",
+   "md5": "f641bef381d0590e1a20722e540b8c96",
+   "size": 17785
+  },
+  {
+   "module": "68k-zot",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Zot!/..namedfork/rsrc",
+   "md5": "3e050d113d0174a9b8a79603fe017242",
+   "size": 16433
+  },
+  {
+   "module": "ppc-art-critic",
+   "family": "PPC",
+   "kind": "data",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Art Critic",
+   "md5": "ddc33d8a1d2c4fecd4db458a4208ac41",
+   "size": 115824
+  },
+  {
+   "module": "ppc-art-critic",
+   "family": "PPC",
+   "kind": "rsrc",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Art Critic/..namedfork/rsrc",
+   "md5": "61189360e1a563f777fe53a030975a9f",
+   "size": 1360621,
+   "md5Canonical": "f9a19dd2068ce06b74d03bc209b5f447"
+  },
+  {
+   "module": "ppc-bad-dog",
+   "family": "PPC",
+   "kind": "data",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Bad Dog!",
+   "md5": "cb9f27e3bed84401b52ef978bc302f31",
+   "size": 130085
+  },
+  {
+   "module": "ppc-bad-dog",
+   "family": "PPC",
+   "kind": "rsrc",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Bad Dog!/..namedfork/rsrc",
+   "md5": "dc93d74ad34d6e923669c842ba459075",
+   "size": 1523613,
+   "md5Canonical": "52a8cd9e70067881a7d1ed40ad148bbe"
+  },
+  {
+   "module": "ppc-cyb3r-w-t",
+   "family": "PPC",
+   "kind": "data",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/CYb3r W@t",
+   "md5": "1db7668cb62c0c4a0ea5fb4aa9d8efa8",
+   "size": 28150
+  },
+  {
+   "module": "ppc-cyb3r-w-t",
+   "family": "PPC",
+   "kind": "rsrc",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/CYb3r W@t/..namedfork/rsrc",
+   "md5": "4d2f7f7a118566b348468cffd78fa454",
+   "size": 1198557,
+   "md5Canonical": "029fd27062a81b50f176343ae75a671c"
+  },
+  {
+   "module": "ppc-fish-world",
+   "family": "PPC",
+   "kind": "data",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Fish World",
+   "md5": "3d4e09bc9b70987ed286812a57cabc76",
+   "size": 29589
+  },
+  {
+   "module": "ppc-fish-world",
+   "family": "PPC",
+   "kind": "rsrc",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Fish World/..namedfork/rsrc",
+   "md5": "e113d07f7c7cf928a5c04baf45a63de3",
+   "size": 1689324,
+   "md5Canonical": "c1fd65925160e67c6ce8b7cf5fdd4bcb"
+  },
+  {
+   "module": "ppc-flying-toasters",
+   "family": "PPC",
+   "kind": "data",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Flying Toasters!",
+   "md5": "b2b45b203716df7aa0808f4022b8f1e9",
+   "size": 90967
+  },
+  {
+   "module": "ppc-flying-toasters",
+   "family": "PPC",
+   "kind": "rsrc",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Flying Toasters!/..namedfork/rsrc",
+   "md5": "9e91ac8adfe72f2328d19174f2ca312a",
+   "size": 1885983,
+   "md5Canonical": "e36a06a184b8fb14004f80e9611c3532"
+  },
+  {
+   "module": "ppc-guernsey-madness",
+   "family": "PPC",
+   "kind": "data",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Guernsey Madness",
+   "md5": "9752f0ad3b698d83c316aaadc0660da1",
+   "size": 28619
+  },
+  {
+   "module": "ppc-guernsey-madness",
+   "family": "PPC",
+   "kind": "rsrc",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Guernsey Madness/..namedfork/rsrc",
+   "md5": "aef792eec06834d81369020cd3abd64b",
+   "size": 952725,
+   "md5Canonical": "254b1393d294f152a8f93124d88ceb23"
+  },
+  {
+   "module": "ppc-life-all",
+   "family": "PPC",
+   "kind": "data",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Life & All",
+   "md5": "5603219cef57d2f9a8589447d7f990ed",
+   "size": 27437
+  },
+  {
+   "module": "ppc-life-all",
+   "family": "PPC",
+   "kind": "rsrc",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Life & All/..namedfork/rsrc",
+   "md5": "7011f9059dc2103fc95d9a3213203d52",
+   "size": 830216,
+   "md5Canonical": "38b8eea52fd7fdae0ded4a9b2554cb56"
+  },
+  {
+   "module": "ppc-magic-turtle",
+   "family": "PPC",
+   "kind": "data",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Magic Turtle",
+   "md5": "69e2f422b8968f91b58d8477c69dd10f",
+   "size": 52888
+  },
+  {
+   "module": "ppc-magic-turtle",
+   "family": "PPC",
+   "kind": "rsrc",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Magic Turtle/..namedfork/rsrc",
+   "md5": "8ea948eb7a9ffdd04d08439bebda22ed",
+   "size": 148367,
+   "md5Canonical": "932e71cb834393f3350c08000f3b4a26"
+  },
+  {
+   "module": "ppc-marbles",
+   "family": "PPC",
+   "kind": "data",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Marbles!",
+   "md5": "cfb5a6151c79417b9197eec90c032c4b",
+   "size": 47275
+  },
+  {
+   "module": "ppc-marbles",
+   "family": "PPC",
+   "kind": "rsrc",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Marbles!/..namedfork/rsrc",
+   "md5": "69efcbcad5afc80e7e2fca73e94a48c9",
+   "size": 833414,
+   "md5Canonical": "824ef7b21decb3928cf0d08d2d5aaf8e"
+  },
+  {
+   "module": "ppc-out-n-about",
+   "family": "PPC",
+   "kind": "data",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Out \u2019n About",
+   "md5": "d64fb8740d66db755b3a9aada215d0ba",
+   "size": 55618
+  },
+  {
+   "module": "ppc-out-n-about",
+   "family": "PPC",
+   "kind": "rsrc",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Out \u2019n About/..namedfork/rsrc",
+   "md5": "5f0c1d8e4dd103c950e160fc4daec5e5",
+   "size": 918939,
+   "md5Canonical": "2675800b12e8d068442ea892c0028538"
+  },
+  {
+   "module": "ppc-points-of-view",
+   "family": "PPC",
+   "kind": "data",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Points of View",
+   "md5": "56f3e5c0e0aa6b75655bab869c8e09ae",
+   "size": 55939
+  },
+  {
+   "module": "ppc-points-of-view",
+   "family": "PPC",
+   "kind": "rsrc",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Points of View/..namedfork/rsrc",
+   "md5": "2bee85c6f5955e0fbfd4907627132040",
+   "size": 797720,
+   "md5Canonical": "802df628c2ef4e97127a5ce36b109ddf"
+  },
+  {
+   "module": "ppc-psycho-deli",
+   "family": "PPC",
+   "kind": "data",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Psycho Deli",
+   "md5": "396f62e1c6dc97611c009b0bf1994b6f",
+   "size": 29308
+  },
+  {
+   "module": "ppc-psycho-deli",
+   "family": "PPC",
+   "kind": "rsrc",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Psycho Deli/..namedfork/rsrc",
+   "md5": "5dd896f3338c998542fa134215b6056e",
+   "size": 28698,
+   "md5Canonical": "a5884f1a459cdc4723ba1be2f659c71f"
+  },
+  {
+   "module": "ppc-rainforest",
+   "family": "PPC",
+   "kind": "data",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Rainforest",
+   "md5": "2dc916cbff6776d30f0bce35ce6c956f",
+   "size": 33841
+  },
+  {
+   "module": "ppc-rainforest",
+   "family": "PPC",
+   "kind": "rsrc",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Rainforest/..namedfork/rsrc",
+   "md5": "b75fa40b8ffc7509bb8d969e9246525c",
+   "size": 804878,
+   "md5Canonical": "65db36a1dae1cc1c699033ede160b3ee"
+  },
+  {
+   "module": "ppc-rock-paper-scissors",
+   "family": "PPC",
+   "kind": "data",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Rock Paper Scissors",
+   "md5": "70c2629900299d629bced76455e03be8",
+   "size": 137936
+  },
+  {
+   "module": "ppc-rock-paper-scissors",
+   "family": "PPC",
+   "kind": "rsrc",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Rock Paper Scissors/..namedfork/rsrc",
+   "md5": "07d88cd29eb77a2c6b15064875a146ce",
+   "size": 2239725,
+   "md5Canonical": "b97c0a05e6a2ed422e34e2f5c37b42e8"
+  },
+  {
+   "module": "ppc-rodger-dodger",
+   "family": "PPC",
+   "kind": "data",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Rodger Dodger",
+   "md5": "7b4aa60fd3bf36c428f53a0b4411e315",
+   "size": 59573
+  },
+  {
+   "module": "ppc-rodger-dodger",
+   "family": "PPC",
+   "kind": "rsrc",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Rodger Dodger/..namedfork/rsrc",
+   "md5": "5e1d33c49dd009e163430d9d51df4a9a",
+   "size": 949089,
+   "md5Canonical": "2e44f27c520ffb9b581d11f3fc7db5d8"
+  },
+  {
+   "module": "ppc-shadow-agents",
+   "family": "PPC",
+   "kind": "data",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Shadow Agents",
+   "md5": "fab2a64cd0fbd2dfa8db4fe0ec379c2d",
+   "size": 26235
+  },
+  {
+   "module": "ppc-shadow-agents",
+   "family": "PPC",
+   "kind": "rsrc",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Shadow Agents/..namedfork/rsrc",
+   "md5": "7d927eaf7dc580c13324796c83ff16c9",
+   "size": 1188646,
+   "md5Canonical": "680b635ef542c2e8ab9b924b81b25c2b"
+  },
+  {
+   "module": "ppc-super-guy",
+   "family": "PPC",
+   "kind": "data",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Super Guy",
+   "md5": "03cf27fb54f9b7c17644ebab018d3f39",
+   "size": 62717
+  },
+  {
+   "module": "ppc-super-guy",
+   "family": "PPC",
+   "kind": "rsrc",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Super Guy/..namedfork/rsrc",
+   "md5": "7f3996d5d69706c269fdffcd36653ee1",
+   "size": 1489671,
+   "md5Canonical": "7e296c3ea2894b077be1bbbc6bfad0bb"
+  },
+  {
+   "module": "ppc-swirling-magic",
+   "family": "PPC",
+   "kind": "data",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Swirling Magic",
+   "md5": "ebff4e3054c977f6d565506fb5d638c7",
+   "size": 44662
+  },
+  {
+   "module": "ppc-swirling-magic",
+   "family": "PPC",
+   "kind": "rsrc",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Swirling Magic/..namedfork/rsrc",
+   "md5": "9842470ac0f6fab7a21a94f4f55d255b",
+   "size": 59030,
+   "md5Canonical": "17d1b480e9889215affdb221c1fccbb9"
+  },
+  {
+   "module": "ppc-time-flies",
+   "family": "PPC",
+   "kind": "data",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Time Flies",
+   "md5": "0723e8f3cd60961e2dbac2d3fb76f2a9",
+   "size": 18337
+  },
+  {
+   "module": "ppc-time-flies",
+   "family": "PPC",
+   "kind": "rsrc",
+   "path": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Time Flies/..namedfork/rsrc",
+   "md5": "88a40d1d2136c8b30ccb54663c1a65d1",
+   "size": 1249963,
+   "md5Canonical": "5db15e573e9dcb6bd02e0717dae9cbd6"
+  }
+ ]
+}
