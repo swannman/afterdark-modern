@@ -1,24 +1,14 @@
 # AfterDark (app)
 
-SwiftUI macOS app + a headless renderer. A sidebar module picker; the selected
-module runs in a resizable / fullscreen-capable window. Every module runs the
-**real emulated After Dark code** through `EmulatedHost` (which drives the
-`tools/adhost` hosts); there is no bespoke reimplementation.
+SwiftUI macOS app: a sidebar module picker; the selected module runs in a
+resizable/fullscreen window. Every module runs the real emulated After Dark code
+via `EmulatedHost` (which drives the `tools/adhost` hosts).
 
-## Run it
+```bash
+swift run AfterDark          # first launch downloads assets, then the picker
+./make_app.sh                # or build a standalone AfterDark.app bundle
 ```
-cd app/AfterDark
-swift run AfterDark     # first launch shows the asset-download gate, then the picker
-# or a standalone bundle:
-./make_app.sh && open AfterDark.app
-```
-First run downloads the original assets (see the top-level README, *Assets*).
 
-## Targets
-- **AfterDarkKit** — `EmulatedHost` (drives a host, streams/decodes frames), the
-  catalog loader, `FirstRunManager` (first-run asset download), the module views.
-- **AfterDark** — the SwiftUI app.
-- **adrender** — headless renderer / verifier. `adrender <module> <outPrefix> <w> <h>
-  <t0,t1,…>` renders frames; `adrender --smoke <module> <secs>` drives a module
-  through the full `EmulatedHost` pipeline and reports frames (recipe resolution +
-  host path check); `adrender --verify` sanity-checks the catalog + recipes.
+Targets: **AfterDarkKit** (EmulatedHost, catalog, first-run download, views),
+**AfterDark** (the app), **adrender** (headless: `--smoke <module> <secs>` drives a
+module through the full pipeline; `--verify` checks the catalog/recipes).
