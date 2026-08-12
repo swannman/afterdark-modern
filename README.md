@@ -35,21 +35,6 @@ The hosts do **not** implement CPU emulation themselves — they link against
   the trap dispatch).
 - **`PPC32Emulator`** — same shape for PEF modules; see `adhost.cc`.
 
-**Correctness the hosts depend on** (a rewrite must match these semantics, or the
-corresponding modules regress). All of these are already fixed in **upstream
-`resource_dasm` master** (PRs #94–#97, merged) — so cloning upstream needs no
-patches; this list is what a *rewrite* has to get right:
-- 68K: `EXTB.L` decode, register-direct bitfield ops (`bfextu/bfexts/bftst/bfchg/
-  bfclr/bfffo/bfset/bfins`), and the `ADDX/SUBX` overflow (V) flag computed in a wide
-  enough type. `swap.w` **must set N/Z from the 32-bit result** (a stale-Z bug there
-  silently corrupts every CodeWarrior 32-bit divide, which drives most module colour
-  math).
-- PPC: `fctiw/fctiwz` saturate NaN operands (incl. negative saturation to
-  `0x80000000`).
-
-This repo ships **no emulator patches** — it does not vendor `resource_dasm` at all;
-you clone it (upstream, or your rewrite branch).
-
 ### Verifying a rewrite against the corpus
 
 The hosts are deterministic. Frame hashing is the emulator gate:
