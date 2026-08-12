@@ -71,10 +71,13 @@ cd third_party/resource_dasm && cmake -S . -B build -DCMAKE_PREFIX_PATH=../local
 # 2. the hosts
 cd tools/adhost && make && cd ../..
 
-# 3. assets — downloads the ORIGINAL modules + AD 4.0 shared libs (your responsibility)
-brew install unar
-#   edit tools/adfetch/sources.conf first (where to fetch from)
-tools/adfetch/adfetch.sh
+# 3. assets — the ORIGINAL modules + AD 4.0 shared libs (your responsibility to source)
+#   The GUI app fetches these automatically on first run (see "Run"); this manual
+#   step is the same tool for the headless/host workflow. Either way it downloads
+#   from the archive.org sources already set in tools/adfetch/sources.conf (edit to
+#   point elsewhere), which are HFS disk images — hence the extraction prerequisites:
+brew install unar hfsutils          # + curl, python3 (usually already present)
+tools/adfetch/adfetch.sh            # -> places ADShared40.pef + AD4Library.rsrc, extracts modules
 
 # 4. the app (optional; the hosts + adrender are enough to test the emulator)
 cd app/AfterDark && swift build
@@ -100,10 +103,13 @@ cd app/AfterDark
 ```
 
 The app's **first run** shows a consent/download gate (`FirstRunManager` →
-`adfetch`) and fetches assets to
-`~/Library/Application Support/AfterDarkModern/`; after that it lists the module
-roster from `app/AfterDark/Sources/AfterDarkKit/Resources/catalog.json` and runs
-each non-native module through `EmulatedHost`.
+the bundled `adfetch`) and fetches assets from archive.org to
+`~/Library/Application Support/AfterDarkModern/` — no manual `adfetch` needed.
+It first checks for the extraction tools (`unar`, `hfsutils`, `curl`, `python3`)
+and, if any are missing, shows guidance to `brew install` them (it can't install
+them for you). After the fetch it lists the module roster from
+`app/AfterDark/Sources/AfterDarkKit/Resources/catalog.json` and runs each module
+through `EmulatedHost`.
 
 ## Assets & licensing
 
