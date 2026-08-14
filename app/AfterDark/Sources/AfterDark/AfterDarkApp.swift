@@ -67,6 +67,13 @@ struct MainWindow: View {
                 // module list, not in a Setup sub-dialog, so it lives under the
                 // module list here rather than in the per-module inspector.
                 .safeAreaInset(edge: .bottom) { DurationBar(duration: duration) }
+                // Absorb settings/duration edits made in the saver's configure
+                // sheet whenever the user comes back to the app.
+                .onReceive(NotificationCenter.default.publisher(
+                    for: NSApplication.didBecomeActiveNotification)) { _ in
+                    settings.reloadFromDisk()
+                    duration.reloadFromDisk()
+                }
             } detail: {
                 if let m = selection {
                     ModuleDetail(module: m, settings: settings)

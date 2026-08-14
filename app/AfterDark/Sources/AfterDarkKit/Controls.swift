@@ -40,13 +40,52 @@ public struct ADControl: Identifiable, Hashable {
     }
 }
 
-// Persisted per-module control values ("<moduleId>.<controlId>" -> Int).
+// The app's single in-memory copy of the shared settings document (see
+// ADSharedSettings). Both stores below mutate THIS copy under one lock, so a
+// duration write can never clobber a control write with a stale document.
+enum ADSharedDocBox {
+    private static let lock = NSLock()
+    private static var doc = ADSharedSettings.loadForApp()
+    static func with<T>(_ f: (inout ADSharedSettings) -> T) -> T {
+        lock.lock(); defer { lock.unlock() }
+        let r = f(&doc)
+        ADSharedSettings.saveFromApp(doc)
+        return r
+    }
+    // Re-read from disk (absorbing saver-side edits); returns the merged document.
+    static func reload() -> ADSharedSettings {
+        lock.lock(); defer { lock.unlock() }
+        doc = ADSharedSettings.loadForApp()
+        return doc
+    }
+    static func snapshot() -> ADSharedSettings {
+        lock.lock(); defer { lock.unlock() }
+        return doc
+    }
+}
+
+// Persisted per-module control values ("<moduleId>.<controlId>" -> Int), backed by
+// the SHARED settings document so the app and AfterDark.saver see each other's
+// edits (newer edit wins, per module).
 public final class ADSettingsStore: ObservableObject {
     @Published public private(set) var values: [String: Int]
     private let defaultsKey = "ADModuleSettings"
 
     public init() {
-        values = (UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Int]) ?? [:]
+        // One-time migration: fold any pre-shared-document defaults into the
+        // document, then serve from the document from here on.
+        let legacy = (UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Int]) ?? [:]
+        let doc = ADSharedDocBox.with { doc in
+            if doc.values.isEmpty, !legacy.isEmpty {
+                for (k, v) in legacy {
+                    if let dot = k.firstIndex(of: ".") {
+                        doc.set(v, module: String(k[..<dot]), control: String(k[k.index(after: dot)...]))
+                    }
+                }
+            }
+            return doc
+        }
+        values = doc.values
     }
 
     private func key(_ module: ADModule, _ control: ADControl) -> String {
@@ -58,8 +97,16 @@ public final class ADSettingsStore: ObservableObject {
     }
 
     public func set(_ v: Int, for module: ADModule, control: ADControl) {
-        values[key(module, control)] = v
+        let doc = ADSharedDocBox.with { $0.set(v, module: module.id, control: control.id); return $0 }
+        values = doc.values
         UserDefaults.standard.set(values, forKey: defaultsKey)
+    }
+
+    // Absorb edits made in the screen saver's configure sheet (called on app
+    // activation; no-op when nothing changed).
+    public func reloadFromDisk() {
+        let doc = ADSharedDocBox.reload()
+        if doc.values != values { values = doc.values }
     }
 
     // Snapshot of a module's effective control values keyed by control id.
@@ -85,14 +132,33 @@ public final class ADDurationStore: ObservableObject {
             UserDefaults.standard.set(seconds, forKey: ADDuration.defaultsKey)
             EmulatedHost.durationSeconds = seconds
             ADGroupHandoff.publish()
+            // Don't re-stamp the document when the new value CAME from it.
+            if !reloading {
+                ADSharedDocBox.with { $0.setDuration(seconds) }
+            }
         }
     }
+    private var reloading = false
 
     public var stop: ADDuration.Stop { ADDuration.stop(forSeconds: seconds) }
 
     public init() {
-        seconds = ADDuration.sanitize(UserDefaults.standard.object(forKey: ADDuration.defaultsKey) as? Int)
+        // The shared document wins over the app-local default (it carries saver-side
+        // edits); fall back to the legacy defaults key, then the factory default.
+        let doc = ADSharedDocBox.snapshot()
+        seconds = ADDuration.sanitize(doc.durationSeconds
+            ?? UserDefaults.standard.object(forKey: ADDuration.defaultsKey) as? Int)
         // didSet does not run for the initial assignment, so arm the host explicitly.
         EmulatedHost.durationSeconds = seconds
+    }
+
+    // Absorb a Duration change made in the saver's configure sheet.
+    public func reloadFromDisk() {
+        let doc = ADSharedDocBox.reload()
+        if let d = doc.durationSeconds, ADDuration.sanitize(d) != seconds {
+            reloading = true
+            seconds = ADDuration.sanitize(d)
+            reloading = false
+        }
     }
 }

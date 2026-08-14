@@ -30,7 +30,7 @@ cp AfterDark-Info.plist "$OUT/Contents/Info.plist"
 
 # --- ADCShim C shim (shm_open ABI wrapper EmulatedHost imports) ---------------
 SDK="$(xcrun --show-sdk-path)"
-clang -c -O2 -isysroot "$SDK" -Icshim cshim/shim.c -o cshim/shim.o
+clang -c -O2 -isysroot "$SDK" -mmacosx-version-min=14.0 -Icshim cshim/shim.c -o cshim/shim.o
 
 # --- Compile the principal class + reused kit sources into the bundle Mach-O ---
 # EmulatedHost.swift + ADPaths.swift + ADDuration.swift are the app's own files,
@@ -47,6 +47,7 @@ xcrun swiftc \
     "$KIT/EmulatedHost.swift" \
     "$KIT/ADPaths.swift" \
     "$KIT/ADDuration.swift" \
+    "$KIT/ADSharedSettings.swift" \
     ADSaverModel.swift \
     ADSaverView.swift \
     cshim/shim.o \

@@ -202,3 +202,56 @@ public enum ADSaverBootstrap {
         return nil
     }
 }
+
+// The saver's working copy of the shared settings document (ADSharedSettings —
+// compiled into this bundle from the app source tree). Loaded once per process,
+// mutated by the configure sheet, saved mirror-first (the appex container is always
+// writable; the primary write is best-effort and succeeds wherever the sandbox
+// allows it — the app absorbs the mirror either way).
+public final class ADSaverSettings {
+    public private(set) var doc: ADSharedSettings
+
+    public init() {
+        doc = ADSharedSettings.loadForSaver()
+    }
+
+    // Effective duration: shared document, else the app's sidecar publish, else the
+    // authentic factory default.
+    public func durationSeconds(sidecarFallback: Int?) -> Int {
+        ADDuration.sanitize(doc.durationSeconds ?? sidecarFallback)
+    }
+
+    // Effective control values for a module, keyed by control id (what EmulatedHost
+    // expects). Unset controls fall back to their factory defaults.
+    public func snapshot(for module: ADModule) -> [String: Int] {
+        var out: [String: Int] = [:]
+        for c in module.controls {
+            out[c.id] = doc.value(module: module.id, control: c.id) ?? c.defaultValue
+        }
+        return out
+    }
+
+    public func value(for module: ADModule, control: ADControl) -> Int {
+        doc.value(module: module.id, control: control.id) ?? control.defaultValue
+    }
+
+    public func set(_ v: Int, for module: ADModule, control: ADControl) {
+        doc.set(v, module: module.id, control: control.id)
+    }
+
+    public func resetModule(_ module: ADModule) {
+        doc.clearModule(module.id)
+    }
+
+    public func setDuration(_ seconds: Int) {
+        doc.setDuration(seconds)
+    }
+
+    public func save() {
+        ADSharedSettings.saveFromSaver(doc)
+    }
+
+    public func reload() {
+        doc = ADSharedSettings.loadForSaver()
+    }
+}
