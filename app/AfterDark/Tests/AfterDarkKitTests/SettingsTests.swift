@@ -129,3 +129,46 @@ final class SettingsTests: XCTestCase {
         XCTAssertTrue(bang.recipe!.rsrcPath.hasSuffix("Marbles!/..namedfork/rsrc"))
     }
 }
+
+// addm 796: pins the Duration ladder to the After Dark 4.0 control panel's
+// own resources (AD40_engine.rsrc: sUnt 500/503 labels, rsVl 503 pos->seconds map,
+// sVal 503 "Default Duration:" = 0x3C). These are RE'd values, not design choices —
+// a diff here means someone edited the ladder, not that a preference moved.
+final class DurationTests: XCTestCase {
+
+    func testLadderMatchesControlPanelResources() {
+        // rsVl 503, in slider order.
+        XCTAssertEqual(ADDuration.stops.map(\.seconds),
+                       [15, 30, 60, 120, 300, 600, 1800, 2700, 3600, 5400, 7200, 21600,
+                        ADDuration.forever])
+        // sUnt 500 (the resource literally named "Duration:"), verbatim — including
+        // the inconsistent punctuation on the first two stops.
+        XCTAssertEqual(ADDuration.stops.map(\.label),
+                       ["15 sec", "30 sec.", "1 min.", "2 min.", "5 min.", "10 min.",
+                        "30 min.", "45 min.", "1 hour", "1 h. 30 m.", "2 h.", "6 h.",
+                        "Forever!"])
+        XCTAssertEqual(ADDuration.label, "Duration:")
+    }
+
+    // sVal 503 = 0x3C. This is also the hosts' own ADCYCLESECS default, which is what
+    // makes an untouched preference a no-op.
+    func testFactoryDefaultIsOneMinute() {
+        XCTAssertEqual(ADDuration.defaultSeconds, 60)
+        XCTAssertEqual(ADDuration.stop(forSeconds: ADDuration.defaultSeconds).label, "1 min.")
+    }
+
+    // A hand-edited defaults plist or a stale sidecar must not put the host on a
+    // period the real control never offered.
+    func testSanitizeRejectsOffLadderValues() {
+        XCTAssertEqual(ADDuration.sanitize(nil), 60)
+        XCTAssertEqual(ADDuration.sanitize(45), 60)      // our old, inauthentic cadence
+        XCTAssertEqual(ADDuration.sanitize(0), 60)
+        XCTAssertEqual(ADDuration.sanitize(1800), 1800)
+        XCTAssertEqual(ADDuration.sanitize(ADDuration.forever), ADDuration.forever)
+    }
+
+    func testForeverIsNotAConfusableSecondCount() {
+        XCTAssertLessThan(ADDuration.forever, 0)
+        XCTAssertEqual(ADDuration.stop(forSeconds: ADDuration.forever).label, "Forever!")
+    }
+}

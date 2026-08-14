@@ -31,6 +31,22 @@ cd third_party/resource_dasm && cmake -S . -B build -DCMAKE_PREFIX_PATH=../local
 
 # hosts
 cd tools/adhost && make && cd ../..
+```
+
+**Emulator version note:** this project found several M68KEmulator defects and
+fixed them upstream — [PR #97](https://github.com/fuzziqersoftware/resource_dasm/pull/97)
+(merged) and [PR #100](https://github.com/fuzziqersoftware/resource_dasm/pull/100)
+(open: the shift, rotate, compare and swap opcode families, with a real-module
+reproducer for each). The hosts carry **no workarounds** for these defects, so
+without the fixes the affected modules render as the deficient emulator computes
+them (Satori's Pools/Mix/Random settings are the most visible). `adhost68k`
+probes the emulator at startup and, if any fix is missing, prints a warning
+naming each defect and the PR that fixes it, then runs anyway. Until PR #100
+merges, build `third_party/resource_dasm` from its PR branch
+(`gh pr checkout 100`) for fully correct output. The PowerPC host needs no
+patches — plain master is correct for it.
+
+```bash
 
 # app — first launch shows the asset-download gate, then the module picker
 cd app/AfterDark && swift run AfterDark

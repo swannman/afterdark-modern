@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""ppc-dasm — disassemble PEF code at adhost RUNTIME addresses.
+
+resource_dasm's m68kdasm already knows PowerPC (--ppc32) and PEF (--pef); what it
+does not know is where adhost maps each section (BASE_M=0x30000000 for a module,
+BASE_A=0x10000000 for ADShared40.pef).  Its --pef listing numbers every section
+from zero, so a PC seen in an adhost trace cannot be looked up directly.  This
+wrapper computes each section's runtime address exactly as PEFFile::load_into
+places them (skip total_size==0, page-align 0x1000 after each), then slices raw
+section bytes and hands them to `m68kdasm --ppc32 --start-address=<runtime>` so
+every address and branch target in the output is a real adhost address.
+
+  ppc-dasm <file.pef> --sections
+  ppc-dasm <file.pef> 30002584              # 0x200 bytes from that address
+  ppc-dasm <file.pef> 30002584:400          # explicit length
+  ppc-dasm <file.pef> 30002584 --func       # to the end of the function (blr/b out)
+  ppc-dasm <file.pef> --all                 # whole code section
+  ppc-dasm <file.pef> --info                # m68kdasm --pef (exports/imports/relocs)
+
+Section placement uses the system page size (0x4000 here), matching the host; --page
+overrides it.  Cross-check against adhost's own "module loaded: sec0=.. sec1=.." line.
+
+Options: --base ADDR (default 0x30000000), --lib (shorthand for --base 10000000).
+Packed (pattern-initialized) sections are reported but not sliced; use --info for
+their hex view.
+"""
+import os, subprocess, sys, struct
+
+M68KDASM = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "..", "third_party", "resource_dasm", "build", "m68kdasm")
+# load_into page-aligns each section with MemoryContext::get_page_size(), which is the
+# SYSTEM page size — 0x4000 on Apple Silicon, not 0x1000.  Getting this wrong puts every
+# section after the first (i.e. the TOC) at the wrong address.  --page overrides.
+PAGE = os.sysconf("SC_PAGESIZE")
+KINDS = {0: "code", 1: "unpacked-data", 2: "pattern-data", 3: "constant",
+         4: "loader", 5: "debug", 6: "exec-rw", 7: "except", 8: "traceback"}
+
+
+def sections(path, base, page=None):
+    """[(index, kind, file_off, packed_size, total_size, runtime_addr)] as load_into places them."""
+    page = page or PAGE
+    with open(path, "rb") as f:
+        blob = f.read()
+    if blob[:4] != b"Joy!":
+        sys.exit("not a PEF container (no Joy! tag): %s" % path)
+    nsec = struct.unpack_from(">H", blob, 0x20)[0]
+    out, addr = [], base
+    for i in range(nsec):
+        off = 40 + 28 * i
+        (default_addr, total, unpacked, packed, cont_off) = struct.unpack_from(">5I", blob, off + 4)
+        kind = blob[off + 24]
+        if total == 0:
+            out.append((i, kind, cont_off, packed, total, None))
+            continue
+        out.append((i, kind, cont_off, packed, total, addr))
+        addr = (addr + total + page - 1) & ~(page - 1)
+    return blob, out
+
+
+def find_section(secs, a):
+    for (i, kind, off, packed, total, rt) in secs:
+        if rt is not None and rt <= a < rt + total:
+            return (i, kind, off, packed, total, rt)
+    return None
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv:
+        sys.exit(__doc__)
+    path, base, spec, mode, page = None, 0x30000000, None, None, PAGE
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--base":
+            i += 1; base = int(argv[i], 16)
+        elif a == "--page":
+            i += 1; page = int(argv[i], 0)
+        elif a == "--lib":
+            base = 0x10000000
+        elif a in ("--sections", "--info", "--all", "--func"):
+            mode = a
+        elif a in ("--help", "-h"):
+            sys.exit(__doc__)
+        elif path is None:
+            path = a
+        else:
+            spec = a
+        i += 1
+    if path is None:
+        sys.exit(__doc__)
+
+    blob, secs = sections(path, base, page)
+
+    if mode == "--info":
+        os.execv(M68KDASM, [M68KDASM, "--pef", path])
+
+    if mode == "--sections" or (spec is None and mode is None):
+        print("%-28s base %08X" % (os.path.basename(path), base))
+        for (i, kind, off, packed, total, rt) in secs:
+            print("  sec %d  %-14s runtime %s  size %06X  packed %06X  file_off %06X"
+                  % (i, KINDS.get(kind, "kind%d" % kind),
+                     "%08X" % rt if rt is not None else "(empty)", total, packed, off))
+        return
+
+    if mode == "--all":
+        sec = next((s for s in secs if s[1] == 0 and s[5] is not None), None)
+        if sec is None:
+            sys.exit("no code section")
+        start, n = sec[5], sec[4]
+    else:
+        if ":" in spec:
+            astr, lstr = spec.split(":", 1)
+            start, n = int(astr, 16), int(lstr, 16)
+        else:
+            start, n = int(spec, 16), (0x4000 if mode == "--func" else 0x200)
+        sec = find_section(secs, start)
+        if sec is None:
+            sys.exit("address %08X is in no loaded section (try --sections / --base)" % start)
+        n = min(n, sec[5] + sec[4] - start)
+
+    (idx, kind, off, packed, total, rt) = sec
+    if packed != total and kind == 2:
+        sys.exit("section %d is pattern-initialized (packed); use --info for its hex view" % idx)
+    fstart = off + (start - rt)
+    data = blob[fstart:fstart + n]
+
+    if mode == "--func":
+        # Cut at the function's last instruction: the first blr that is not
+        # jumped over by a later-targeted forward branch we have already seen.
+        end, far = 0, 0
+        for k in range(0, len(data) - 3, 4):
+            w = struct.unpack_from(">I", data, k)[0]
+            pc = start + k
+            if (w & 0xFC000000) == 0x48000000 and not (w & 2):  # b/bl relative
+                d = w & 0x03FFFFFC
+                if d & 0x02000000:
+                    d -= 0x04000000
+                t = pc + d
+                if not (w & 1) and start <= t < start + len(data):
+                    far = max(far, t)
+            elif (w & 0xFC000000) == 0x40000000:  # bc
+                d = w & 0xFFFC
+                if d & 0x8000:
+                    d -= 0x10000
+                t = pc + d
+                if start <= t < start + len(data):
+                    far = max(far, t)
+            if w == 0x4E800020 and pc >= far:  # blr past every in-range branch target
+                end = k + 4
+                break
+        if end:
+            data = data[:end]
+
+    p = subprocess.run([M68KDASM, "--ppc32", "--start-address=%08X" % start],
+                       input=data, stdout=subprocess.PIPE)
+    sys.stdout.write(p.stdout.decode("utf-8", "replace"))
+
+
+main()

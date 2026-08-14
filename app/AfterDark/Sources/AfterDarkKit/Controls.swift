@@ -73,3 +73,30 @@ public final class ADSettingsStore: ObservableObject {
         return out
     }
 }
+
+// addm 796: the GLOBAL Duration preference (the control panel's own slider,
+// see ADDuration for the resource provenance). Unlike ADSettingsStore this is not
+// per-module — Duration belonged to the control panel, not to any module.
+//
+// Owns the three places the value has to land: the app's defaults domain (persistence),
+// EmulatedHost.durationSeconds (every host this process spawns from now on), and the
+// asset-handoff sidecar (how the .saver, in another process with another defaults
+// domain, learns the same number).
+public final class ADDurationStore: ObservableObject {
+    @Published public var seconds: Int {
+        didSet {
+            guard seconds != oldValue else { return }
+            UserDefaults.standard.set(seconds, forKey: ADDuration.defaultsKey)
+            EmulatedHost.durationSeconds = seconds
+            ADGroupHandoff.publish()
+        }
+    }
+
+    public var stop: ADDuration.Stop { ADDuration.stop(forSeconds: seconds) }
+
+    public init() {
+        seconds = ADDuration.sanitize(UserDefaults.standard.object(forKey: ADDuration.defaultsKey) as? Int)
+        // didSet does not run for the initial assignment, so arm the host explicitly.
+        EmulatedHost.durationSeconds = seconds
+    }
+}

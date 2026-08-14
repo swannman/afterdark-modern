@@ -27,6 +27,18 @@ public final class EmulatedHost {
     // adrender --verify-emulation's P8-fallback pass to exercise the stdout path.
     public static var shmEnabled = true
 
+    // addm 796: the user's Duration preference, in seconds, or
+    // ADDuration.forever for "Forever!" (never cycle). Applied by _buildEnv to every
+    // spawn from this point on.
+    //
+    // nil means "nobody expressed a preference" and leaves the shipped behaviour
+    // exactly as addm 744 set it (ADCYCLE=1, host default period 60 s). This is what
+    // keeps the HEADLESS paths out of it BY CONSTRUCTION: only the app (ADDurationStore)
+    // and the saver (ADSaverView.resolveSelection) ever assign this, so adrender and the
+    // verification harnesses — which build EmulatedHost directly and never touch it —
+    // spawn byte-identical environments to before this change.
+    public static var durationSeconds: Int?
+
     public let module: ADModule
     private let onFrame: (CGImage) -> Void
 
@@ -213,6 +225,9 @@ public final class EmulatedHost {
     // they can't interleave with a concurrent GO/SET write to the same fd. No-op if
     // the host isn't running (stdin pipe gone) — input is best-effort, never fatal.
     public func sendKey(keycode: Int, down: Bool) { _sendInput("KEY \(keycode) \(down ? 1 : 0)\n") }
+    // addm 797: retained as part of the addm-574 input protocol, but the app no
+    // longer drives caps through it — the host reads the real key itself under ADREALCAPS
+    // (see _buildEnv), which needs no focus and works in the screen-saver appex too.
     public func sendCaps(_ on: Bool) { _sendInput("CAPS \(on ? 1 : 0)\n") }
     public func sendMouse(x: Int, y: Int, button: Bool) { _sendInput("MOUSE \(x) \(y) \(button ? 1 : 0)\n") }
     private func _sendInput(_ line: String) {
@@ -339,6 +354,28 @@ public final class EmulatedHost {
         // indexed CGImage (no per-pixel work). A host that predates P8 simply emits
         // P6 and the reader auto-detects it per frame, so this is compat-safe.
         env["ADSTREAM"] = "1"
+        // addm 797: let the host read the REAL Caps-Lock key itself, once per
+        // frame. 19 catalog modules document a caps behaviour (Time Flies changes the clock
+        // type, Magic Turtle opens its edit window, Mandelbrot/Satori/Psycho Deli/Swirling
+        // Magic recolour); they poll it through the shared library's GetCapsLockChange(),
+        // which reads the low-memory Mac KeyMap the host already maintains. The host was
+        // always able to serve it — nothing was ever telling it what caps was doing.
+        //
+        // Host-side polling rather than an app->host input channel, because it needs no
+        // focus, no first responder, and no event delivery — so it works identically in the
+        // app pane and inside the screen-saver appex, and it survives host respawns and
+        // module cycling for free. The host uses CGEventSourceFlagsState's alphaShift bit,
+        // which is a modifier-state read: it triggers NO permission prompt (verified from a
+        // fresh binary path — zero com.apple.TCC log entries; see capslock_evidence.md).
+        // Default-off in the host, so headless/census runs stay byte-deterministic.
+        env["ADREALCAPS"] = "1"
+        // addm 801: seed the AD4 library's lagged-Fibonacci RNG per launch, the way a real
+        // Mac did — modules seed themselves with SRand(GetMilliseconds()) and real
+        // Microseconds() counted from BOOT (varied every launch); our virtual clock counts
+        // from process start (a constant), which made every "Random" pick identical across
+        // launches. App/saver only; headless and census paths never set this, so byte-exact
+        // baselines are untouched.
+        env["ADLIBRNGSEED"] = "random"
         env["ADSTREAMIDX"] = "1"
         // Static recipe env.
         for (k, v) in recipe.env { env[k] = v }
@@ -350,6 +387,25 @@ public final class EmulatedHost {
         // P0-1 in the visual census) stays black forever in the app. Unconditional
         // for both viewer and saver, PPC and 68K.
         env["ADCYCLE"] = "1"
+        // addm 796: ...and let the user set the PERIOD, the way the real
+        // control panel did. The hosts read ADCYCLESECS (adhost.cc ~3478,
+        // adhost68k.cc ~14328) and gate the whole cycle on ADNOCYCLE (adhost.cc ~3463,
+        // adhost68k.cc ~14308), so "Forever!" is expressed by disarming the cycle
+        // outright rather than by a huge period. Left alone (nil) the host keeps its
+        // own 60 s, which IS the factory default (sVal 503), so this is a no-op for a
+        // user who never touches the slider. The preference deliberately overrides an
+        // inherited ADCYCLESECS/ADNOCYCLE the same way the ADCYCLE=1 above already
+        // overrides the environment — where there is a UI, the UI is the truth.
+        if let secs = Self.durationSeconds {
+            if secs == ADDuration.forever {
+                env.removeValue(forKey: "ADCYCLE")
+                env.removeValue(forKey: "ADCYCLESECS")
+                env["ADNOCYCLE"] = "1"
+            } else {
+                env.removeValue(forKey: "ADNOCYCLE")
+                env["ADCYCLESECS"] = String(secs)
+            }
+        }
         // Family/lane defaults.
         if module.family == .k68 {
             env["ADTICKRATE"] = "120"
@@ -983,6 +1039,18 @@ public final class EmulatedHost {
 
     // The control env var (ADCVSET/ADCTRL) the next spawn would carry for the current
     // settings — lets a smoke assert the chosen value actually reaches the host.
+    // addm 796: the cycle levers the NEXT spawn would carry, straight out of
+    // the real _buildEnv — so a check can assert the Duration preference actually
+    // becomes host environment rather than assuming the plumbing works. Empty ADCYCLESECS
+    // + ADCYCLE=1 is the untouched-preference (host-default 60 s) state.
+    public var cycleEnvForCurrentPreference: [String: String] {
+        queue.sync {
+            guard let r = module.recipe else { return [:] }
+            let e = _buildEnv(r)
+            return e.filter { ["ADCYCLE", "ADCYCLESECS", "ADNOCYCLE"].contains($0.key) }
+        }
+    }
+
     var controlEnvForCurrentSettings: String? {
         queue.sync {
             guard let r = module.recipe else { return nil }

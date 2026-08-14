@@ -21,6 +21,7 @@
 #include <vector>
 #include <string>
 #include <array>
+#include <map>
 
 #include "Emulators/MemoryContext.hh"
 #include "Emulators/PPC32Emulator.hh"
@@ -86,6 +87,24 @@ int main(int argc, char** argv) {
   if (WIDTH <= 0 || WIDTH > 1024) WIDTH = 128;
   int CEL_H = rdat.size() >= 0x2C ? be16(rdat, 0x2A) : 0;
   if (CEL_H <= 0 || CEL_H > 1024) CEL_H = 0;   // 0 = fall back to the decoded height
+
+  // Per-cel dimensions. The Rdat box above is only a bank-wide fallback: Deluxe
+  // sprite banks carry each cel's OWN width/height in an 'IHDR' chunk (one per
+  // cel, keyed by cel index), and a bank's cels are NOT all the same width
+  // (e.g. Guernsey 24000: 68,114,117,121,165,173,177,172,176,180,182,188...).
+  // Decoding every cel at the bank width mis-strides all but the one cel that
+  // happens to match it. The chunk stream starts at 0x20; each chunk is
+  // tag(4) + flags16 + index16 + reserved32 + len16 @+14 (same field this file's
+  // CSTM loop below already reads) + data, and an IHDR's 12-byte data holds
+  // height at data+8 / width at data+0xA (i.e. chunk+0x18 / chunk+0x1A).
+  std::map<uint16_t, std::pair<int, int>> cel_dims;  // cel index -> (width, height)
+  for (size_t off = 0x20; off + 16 <= rlep.size();) {
+    uint16_t clen = be16(rlep, off + 14);
+    if (clen < 16 || off + clen > rlep.size()) break;
+    if (clen >= 0x1C && !rlep.compare(off, 4, "IHDR"))
+      cel_dims[be16(rlep, off + 6)] = {be16(rlep, off + 0x1A), be16(rlep, off + 0x18)};
+    off += clen;
+  }
 
   // --- Load the PEF ----------------------------------------------------------
   auto mem = make_shared<MemoryContext>();
@@ -168,6 +187,15 @@ int main(int argc, char** argv) {
   while ((pos = rlep.find("CSTM", pos)) != string::npos) {
     uint16_t clen = be16(rlep, pos + 14);
     if (clen < 16 || pos + clen > rlep.size()) break;
+    // This CSTM's own cel index (chunk+6, same field IHDR is keyed by) may have
+    // an IHDR entry with dimensions that differ from the bank-wide fallback —
+    // switch the strip blitter to them for this frame only.
+    auto dims = cel_dims.find(be16(rlep, pos + 6));
+    if (dims != cel_dims.end() && dims->second.first > 0 && dims->second.first <= 1024) {
+      WIDTH = dims->second.first;
+      CEL_H = dims->second.second;
+      mem->write_u16b(tag + 0x10, WIDTH);
+    }
     string bodystr = rlep.substr(pos + 16, clen - 16);
     pos += clen;
 

@@ -141,6 +141,103 @@ static bool ad_input_line(const char* s){
     if(getenv("ADINPUTLOG")) fprintf(stderr,"[input] MOUSE x=%d y=%d btn=%d\n",a,b,c); return true; }
   return false;
 }
+
+// ---- addm 801: OPT-IN SEEDING OF THE adxpl510 LIBRARY RNG ---------
+// WHAT THE RNG IS. A module's "Random" option does not roll Toolbox Random. It
+// cross-TOC-calls the shared library's own export RandInt__FUl (adxpl510
+// @1002A1C4), whose core @1002A140 is a 55-lag ADDITIVE LAGGED-FIBONACCI
+// generator living in four adxpl510 data-section globals (library TOC 0x10048000):
+//     TOC-0x254C uint32 tbl[55]     working state
+//     TOC-0x2470 uint32 master[55]  baked constant key
+//     TOC-0x2394 int16  i           \ lag cursors, reset to 24 / 0 on seeding
+//     TOC+0x0442 int16  j           /
+// Its single seeding entry point is the export SRand__FUi (@10029D74), which
+// refills tbl[k] = master[k] ^ (two draws of the library's ANSI LCG @1003781C)
+// and resets the cursors. Randomize__Fv / Set/GetFullSRand exist too, and the
+// library never calls any of them itself — seeding is the client's job.
+//
+// WHY EVERY LAUNCH REPLAYS ONE FIXED SEQUENCE. The MODULE is that client, and it
+// seeds from the clock inside its own INIT. Swirling Magic @300047E8 calls the
+// glue for XTimer::GetMilliseconds() and hands the result straight to SRand at
+// @300047F0, then makes its first "Random" style pick a few hundred instructions
+// later — all still inside main(selector=0). On a real Mac Microseconds() counts
+// from BOOT, so that seed was milliseconds of uptime: a different number every
+// launch. Our InterfaceLib:Microseconds serves a virtual clock whose origin is 0
+// at PROCESS START, and INIT happens at a fixed point in the startup sequence, so
+// the seed is a constant — measured 0x00000064 under ADNOWALLCLOCK (one call x
+// ADUSPERCALL) and 0x00000000 with the wall clock on (<1 ms elapsed at INIT).
+// Same seed, same stream, same picks, every launch. It is a host-clock-ORIGIN
+// artefact; neither the module nor the library is doing anything wrong.
+// (This also explains the negative sweeps already on file: ADFAKEEPOCH and
+// ADREALCLOCK move GetDateTime and ADRANDSEED moves InterfaceLib:Random — three
+// different generators, none of them this one.)
+//
+// THE LEVER. Opt-in, because the determinism is LOAD-BEARING: every byte-exact
+// PPC census baseline was recorded against that constant seed. Unset, not one
+// instruction below runs and output is byte-identical.
+//     ADLIBRNGSEED=<hex>   fixed reproducible seed (RE, bisecting a roll)
+//     ADLIBRNGSEED=random  true per-launch randomisation (arc4random)
+//     ADLIBRNGSEED=probe   report the RNG state, seed nothing (read-only)
+// Armed, it acts at exactly two points, both of which run the library's OWN
+// SRand code — the generator, the master key and the cursors are never written
+// by the host, only the seed ARGUMENT the machine's uptime would have supplied:
+//   (1) a host call to SRand(seed) before main(selector=0), which covers modules
+//       that never seed the library themselves; and
+//   (2) an argument override on the module's own SRand call. Point (2) is what
+//       actually decides the render: seeding earlier is overwritten by the
+//       module's INIT-time SRand, and seeding after INIT is too late for the
+//       first style pick — both measured, six seed values each, no change.
+static bool     g_librng_armed = false;
+static uint32_t g_librng_seed  = 0;
+static uint32_t g_librng_srand_pc = 0;   // adxpl510 SRand__FUi code entry, resolved at load
+
+// ---- addm 797: OPT-IN REAL HARDWARE CAPS-LOCK POLLING (ADREALCAPS=1) ------
+// The modules were already polling; the app just never told the host what caps was doing.
+// The consumer is PortableModule::GetCapsLockChange() in the AD 4.0 shared library, which
+// reads the low-memory Mac KeyMap (68K: 0x174 directly; PPC: via the TOC pointer, addm 612)
+// and edge-detects it. So the host only has to keep g_caps truthful and everything already
+// wired downstream fires. Instead of routing the state app->stdin, the host can simply ask
+// the OS what caps is doing right now — which also works when there is no app at all.
+//
+// WHICH API, AND WHY NOT THE OBVIOUS ONE (measured on this machine, not assumed):
+//   CGEventSourceKeyState(state, 0x39 /*kVK_CapsLock*/) DOES NOT WORK for caps. Caps-Lock is
+//   a LOCKING modifier: the physical key is not held down while the lock is engaged, so the
+//   per-key state read returns 0 even with caps ON. Verified by toggling caps via
+//   IOHIDSetModifierLockState and re-reading: keystate stayed 0 across the toggle.
+//   CGEventSourceFlagsState(...) & kCGEventFlagMaskAlphaShift IS correct and tracked the
+//   toggle exactly (flags 0x00000100 -> 0x00010100 -> 0x00000100).
+//
+// NO PERMISSION PROMPT (a hard user requirement; verified, not assumed): a modifier-FLAGS
+// read is not an event tap and is not a per-key query, so it does not engage the Input
+// Monitoring (kTCCServiceListenEvent) gate. Probed from a FRESH, never-before-run binary
+// path (TCC is keyed per-binary, so a fresh path is the case that would prompt):
+// zero entries in the com.apple.TCC subsystem log across both probes, no dialog, exit 0.
+// See scratchpad/capstcc/ (capsprobe.c, capstoggle.c) and capslock_evidence.md.
+//
+// DECLARED BY HAND, NOT #included: pulling in <ApplicationServices/...> would drag the real
+// Mac Rect/Point/GrafPort typedefs into a file that defines its OWN emulated versions of
+// those very types. Two C symbols with a documented ABI are all that is needed; link with
+// -framework ApplicationServices.
+extern "C" uint64_t CGEventSourceFlagsState(int32_t stateID);
+static const int32_t  kADCGCombinedSessionState = 0;          // kCGEventSourceStateCombinedSessionState
+static const uint64_t kADCGFlagMaskAlphaShift   = 0x00010000ULL; // kCGEventFlagMaskAlphaShift
+
+// Poll the real caps state and fold any CHANGE into exactly the state the "CAPS <0|1>"
+// stdin line sets. INERT BY CONSTRUCTION, three ways:
+//   1. off unless ADREALCAPS is set (the ADREALCLOCK pattern) -> census/headless untouched;
+//   2. even when armed, if the polled level equals g_caps NOTHING is written — so a run
+//      with caps off never sets g_input_seen, and with g_input_seen false the host never
+//      writes the KeyMap mirror. An armed run with caps off is byte-identical to an
+//      unarmed one;
+//   3. it only ever assigns the same three variables ad_input_line already assigns.
+static void ad_poll_real_caps(){
+  static const bool armed = getenv("ADREALCAPS")!=nullptr;
+  if(!armed) return;
+  bool rc = (CGEventSourceFlagsState(kADCGCombinedSessionState) & kADCGFlagMaskAlphaShift)!=0;
+  if(rc==g_caps) return;                       // no edge -> touch nothing at all
+  g_caps = rc; ad_km_set(kCapsKeycode, rc); g_input_seen = true;
+  if(getenv("ADINPUTLOG")) fprintf(stderr,"[input] REALCAPS=%d\n", rc?1:0);
+}
 // addm 607: UserInput ring globals, resolved once at startup from the AddKey TVector's TOC
 // (== the r2 the library methods use). 0 until resolved / until the module imports UserInput.
 static bool     g_keypump_on = false;      // gated on RD + ring resolved + !ADNOKEYPUMP
@@ -1801,7 +1898,10 @@ int main(int argc, char** argv){
         memcpy(g_shm,"ADSM",4);
         *(uint32_t*)(g_shm+4)=(uint32_t)H.fb_w; *(uint32_t*)(g_shm+8)=(uint32_t)H.fb_h;
         *(uint32_t*)(g_shm+12)=0; *(uint32_t*)(g_shm+16)=8;   // seq=0, format=8(indexed)
-        int afd=dup(1); if(afd>=0){ g_ackf=fdopen(afd,"wb"); freopen("/dev/null","w",stdout); }
+        // addm 792: FD_CLOEXEC so a cycle re-exec does not leak this descriptor. The
+        // restore below dup2()s it onto fd 1, and dup2 clears CLOEXEC on the copy, so the
+        // transport survives execv exactly once — as fd 1 — instead of once per generation.
+        int afd=dup(1); if(afd>=0){ fcntl(afd,F_SETFD,FD_CLOEXEC); g_ackf=fdopen(afd,"wb"); freopen("/dev/null","w",stdout); }
       }
     }
     if(!g_shm || !g_ackf) fprintf(stderr,"[adhost] ADSHM setup failed for '%s' (errno=%d %s) — using stdout stream\n",g_shmname,errno,strerror(errno));
@@ -1809,7 +1909,24 @@ int main(int argc, char** argv){
   const bool g_shm_on = (g_shm!=nullptr && g_ackf!=nullptr);
   if(g_shm_on) fprintf(stderr,"[adhost] ADSHM active: %s (%dx%d, %zu bytes)\n",g_shmname,H.fb_w,H.fb_h,g_shm_sz);
   FILE* streamf=nullptr;
-  if(getenv("ADSTREAM") && !g_shm_on){ int sfd=dup(1); if(sfd>=0){ streamf=fdopen(sfd,"wb"); freopen("/dev/null","w",stdout); } }
+  if(getenv("ADSTREAM") && !g_shm_on){
+    // *** addm 758 ***: the frame stream is throttled by the CONSUMER's pipe. Point it at a REGULAR
+    // FILE and nothing throttles it — the host writes frames as fast as it renders them (~1.4 GB/s
+    // measured, addm 748) and fills the disk in about a minute. Refuse that and name the fix;
+    // ADSTREAMFORCE=1 overrides. Pipes/sockets/ttys (the app's path — EmulatedHost.swift sets
+    // p.standardOutput = pipe) are untouched, and ADSHM never reaches this branch.
+    struct stat sst;
+    bool isreg = (fstat(1,&sst)==0) && S_ISREG(sst.st_mode);
+    if(isreg && !getenv("ADSTREAMFORCE")){
+      fprintf(stderr,"[adhost] ADSTREAM REFUSED: stdout is a regular file. This stream has no "
+                     "backpressure and writes ~1.4 GB/s (a 65 GB file in a minute). Pipe it to a "
+                     "consumer instead, or set ADSTREAMFORCE=1 to write the file anyway.\n");
+    } else {
+      if(isreg) fprintf(stderr,"[adhost] ADSTREAMFORCE: streaming to a regular file with NO "
+                               "backpressure (~1.4 GB/s) — watch your disk.\n");
+      int sfd=dup(1); if(sfd>=0){ fcntl(sfd,F_SETFD,FD_CLOEXEC); streamf=fdopen(sfd,"wb"); freopen("/dev/null","w",stdout); }   // addm 792: see the ack dup above
+    }
+  }
   bool stream_idx = getenv("ADSTREAMIDX")!=nullptr;
   // Snapshot palette+indices into the shm slot (zero-copy) + one 'F' ack byte.
   uint32_t g_shm_seq=0;
@@ -2265,6 +2382,15 @@ int main(int argc, char** argv){
     // rect (r5) into the screen-pixels object. Our host never wires the real
     // screen size into that rect, so force it to the framebuffer bounds so the
     // whole canvas/flying-area sizing downstream is correct. ESSENTIAL — always runs.
+    // addm 801: substitute the seed the module hands adxpl510's SRand.
+    // The module reads it from XTimer::GetMilliseconds(), which our virtual clock
+    // pins to a constant at INIT; this hands it the value a real machine's uptime
+    // would have given. Inert unless ADLIBRNGSEED is set.
+    if(g_librng_armed && pc==g_librng_srand_pc){
+      static long n=0;
+      fprintf(stderr,"[rngseed] SRand entry #%ld: seed %08X -> %08X\n",++n,r.r[3].u,g_librng_seed);
+      r.r[3].u = g_librng_seed;
+    }
     if(pc==0x1000E2E4 && !getenv("ADNOSCREENFIX")){
       // GetMonitorInfo__PortableModule convergence point: r29 = the output XR
       // pointer, bounds fully computed. Our emulated Mac has no real GrayRgn /
@@ -2718,20 +2844,60 @@ int main(int argc, char** argv){
   // the addm-619/713 kind — modules that latch at INIT now latch real values).
   // Compute the module's REAL control slots (from its sVal/mVal/xVal/bVal fork
   // resources, IDs 1000.., slot = ID-1000 — the same map the app uses) and the
-  // desired per-slot values (defaults=50, ADCTRL overrides). Shared by both the
-  // pre-INIT frame seed and the post-INIT array (re-)seed below.
+  // desired per-slot values (ADCTRL overrides). Shared by both the pre-INIT frame
+  // seed and the post-INIT array (re-)seed below.
+  //
+  // addm 789: those SAME resources carry each control's SHIPPED FACTORY
+  // VALUE — one big-endian short in the resource body (sVal=slider 0..100, mVal=popup
+  // 1-based, xVal=checkbox 0/1, bVal=radio/palette enum). The host used to keep only
+  // the resource's EXISTENCE and substitute a filler 50 for every slot, so a bare
+  // (or short) ADCTRL drive ran the module at 50-for-everything — a value no faceplate
+  // can produce for a popup/checkbox. That filler has produced four separate wrong
+  // verdicts from mis-driven probes (POV white background, RPS/Slow Burn, Rainforest's
+  // Background=50 "black screen", Psycho Deli). Default each REAL slot to its OWN
+  // factory value instead; slots with NO *Val resource keep 50 (the addm-721 seeding
+  // semantics for modules with no control resources at all). Verified against
+  // catalog.json corpus-wide: 230/230 controls agree (scratchpad/vd_xcheck.py).
+  //
+  // FIRST-WINS per slot, in sVal→mVal→xVal→bVal order, for the one module in the
+  // corpus whose slot carries two types (Swirling Magic: mVal 1002=9 popup "Palette"
+  // AND xVal 1002=1 checkbox "Magnify Pixies", both real, an inherent limit of the
+  // shared resource ID). That is exactly the tiling the 68K host's cvseed uses and
+  // exactly what EmulatedHost.swift's ADCTRL builder does, so all three agree on 9.
+  //
+  // Explicit ADCTRL still overrides, but only the entries actually GIVEN: a short
+  // ADCTRL now leaves its unspecified tail at the factory values rather than at 50
+  // (that alone repairs the census recipe `ADCTRL=100` for Rainforest, which drove
+  // slot 0=100 and left Background at the impossible 50). ADNOVALDEFAULTS=1 restores
+  // the filler-50 baseline exactly.
   int ctrl_defs[16]; for(int i=0;i<16;i++) ctrl_defs[i]=50;
-  if(const char* cs=getenv("ADCTRL")){ int i=0; const char* p=cs;
-    while(*p && i<16){ ctrl_defs[i++]=(int)strtol(p,nullptr,0); const char* c=strchr(p,','); if(!c)break; p=c+1; } }
   bool ctrl_valid[16]={false}; int ctrl_found=0;
+  const bool no_val_defaults = getenv("ADNOVALDEFAULTS")!=nullptr;
+  int val_defaulted=0;
   if(!H.res_files.empty()){
     static const uint32_t kValTypes[4] = {0x7356616C,0x6D56616C,0x7856616C,0x6256616C}; // sVal mVal xVal bVal
     for(uint32_t t : kValTypes){
       try { for(int16_t id : H.res_files[0].all_resources_of_type(t)){
-              int slot=(int)id-1000; if(slot>=0 && slot<16){ ctrl_valid[slot]=true; ctrl_found++; } } }
+              int slot=(int)id-1000; if(slot<0 || slot>=16) continue;
+              const bool first = !ctrl_valid[slot];
+              ctrl_valid[slot]=true; ctrl_found++;
+              if(!first || no_val_defaults) continue;
+              try { const std::string& d = H.res_files[0].get_resource(t,id)->data;
+                    if(d.size()>=2){
+                      ctrl_defs[slot]=(int)(int16_t)(((uint16_t)(uint8_t)d[0]<<8)|(uint8_t)d[1]);
+                      val_defaulted++; } }
+              catch(...) {}
+            } }
       catch(...) {}
     }
   }
+  if(val_defaulted){
+    fprintf(stderr,"[adhost] addm 789: %d slot(s) defaulted to the module's own factory value:",val_defaulted);
+    for(int i=0;i<16;i++) if(ctrl_valid[i]) fprintf(stderr," [%d]=%d",i,ctrl_defs[i]);
+    fprintf(stderr,"\n");
+  }
+  if(const char* cs=getenv("ADCTRL")){ int i=0; const char* p=cs;
+    while(*p && i<16){ ctrl_defs[i++]=(int)strtol(p,nullptr,0); const char* c=strchr(p,','); if(!c)break; p=c+1; } }
   auto seed_controls = [&](const char* phase, bool pre_init){
     uint32_t adxpl_tv = mem->get_symbol_addr("adxpl510:__initialize");
     uint32_t adxpl_toc = adxpl_tv ? mem->read_u32b(adxpl_tv + 4) : 0;
@@ -2773,7 +2939,8 @@ int main(int argc, char** argv){
     }
     g_ctrl_addr = ctrl;
     for(int i=0;i<16;i++) mem->write_u16b(ctrl + i*2, (uint16_t)ctrl_defs[i]);
-    fprintf(stderr,"[adhost] seeded control values @%08X (%s; defaults=50, ADCTRL to override)\n",ctrl,phase);
+    fprintf(stderr,"[adhost] seeded control values @%08X (%s; defaults=module factory *Val, 50 where "
+            "no *Val resource, ADCTRL to override)\n",ctrl,phase);
     // ---- addm 623: authentic control-array size clamp ----------------------
     // GetControlValue(idx) is an UNCHECKED flat read of this 16-short array. Real
     // After Dark sized the array to the module's ACTUAL controls and left the rest
@@ -2882,13 +3049,31 @@ int main(int argc, char** argv){
       mem->write_u8  (minfo+0x0B, 8);                    // curDepth (8bpp)
       mem->write_u32b(gmpb+0x08, minfo);                 // monitors ^MonitorsInfo
       mem->write_u8  (gmpb+0x0C, 1);                     // colorQDAvail
-      mem->write_u16b(gmpb+0x16, 0); mem->write_u16b(gmpb+0x18, 0);            // demoRect
-      mem->write_u16b(gmpb+0x1A, (uint16_t)H.fb_h); mem->write_u16b(gmpb+0x1C, (uint16_t)H.fb_w);
+      // demoRect: EMPTY is the authentic full-screen value, matching the 68K host.
+      // demoRect is the control-panel preview box. A saver running full-screen is not
+      // in a preview box, so the field must be an EMPTY Rect; a non-empty one means
+      // "you are previewing inside this box". Modules read it two ways and BOTH agree
+      // that empty == full-screen: (a) as an EmptyRect() boolean picking the
+      // full-screen branch (68K RE of Boris/Strange Attractors/Spotlight; full-screen
+      // bounds there collapse Boris d23->1 and Strange Attractors d233->1), and (b) as
+      // an EXCLUSION rect — Psycho Deli's DoDrawFrame passes demoRect by value
+      // (gmpb+0x16/+0x1A -> r4:r5, module code 30001DF8-30001E0C) into a per-element
+      // loop that calls PtInRect(point, demoRect) and SKIPS the per-style element draw
+      // when the point is INSIDE. Publishing the screen Rect here excluded the whole
+      // screen: measured 5056/5056 points inside, style-draw callback invoked 0 times,
+      // so PD's 11 Picture options all rendered byte-identically (the style setup ran
+      // and installed the right per-style callback — it was simply never called).
+      // Empty means "exclude nothing / draw everywhere".
+      const bool demo_full = getenv("ADGMDEMOFULL")!=nullptr;   // lever: legacy screen-Rect
+      mem->write_u16b(gmpb+0x16, 0); mem->write_u16b(gmpb+0x18, 0);            // demoRect topLeft
+      mem->write_u16b(gmpb+0x1A, demo_full?(uint16_t)H.fb_h:0);                //          bottom
+      mem->write_u16b(gmpb+0x1C, demo_full?(uint16_t)H.fb_w:0);                //          right
       mem->write_u32b(gmpb+0x1E, gmctx);                 // errorMessage scratch
       mem->write_u16b(gmpb+0x26, 0x0200);                // adVersion 2.0
       fprintf(stderr,"[adhost] addm727 authentic GMParamBlock: controlValues=[%d,%d,%d,%d] "
-              "monitors@%08X demoRect=(0,0,%d,%d)\n",
-              ctrl_defs[0],ctrl_defs[1],ctrl_defs[2],ctrl_defs[3],minfo,H.fb_h,H.fb_w);
+              "monitors@%08X demoRect=(0,0,%d,%d)%s\n",
+              ctrl_defs[0],ctrl_defs[1],ctrl_defs[2],ctrl_defs[3],minfo,
+              demo_full?H.fb_h:0, demo_full?H.fb_w:0, demo_full?" [ADGMDEMOFULL legacy]":" empty=full-screen");
     }
     uint32_t storeSlot = mem->allocate(4); mem->write_u32b(storeSlot, 0);   // char*** clientStorage
     uint32_t rgn = mem->allocate(0x10); mem->memset(rgn,0,0x10);
@@ -2954,9 +3139,23 @@ int main(int argc, char** argv){
       if(cb){ pd_frame = true;
         fprintf(stderr,"[adhost] GM real-palette armed (structural null-callback signal): TOC=%08X drawCB@+0x64c=%08X seed@+0xf0=%08X\n",pd_toc,cb,seed); }
     }
+    // *** addm 757: DoBlank is a ONE-SHOT, not a per-frame call ***
+    // The ADgm contract is Initialize -> BlankScreen (once, paints the initial field)
+    // -> DrawFrame (repeatedly, animates it). This loop called DoBlank EVERY frame,
+    // and PD's DoBlank (code 30000DD4) zeroes its animation cursor at state+0x2420/
+    // +0x2422 and repaints the initial field — so every frame the module was reset to
+    // frame 0 and only one DrawFrame pass ever showed. That is why the screen was a
+    // flat repeating chevron field, why all 12 Picture styles looked ~identical
+    // (2.5% of pixels differed = the single DrawFrame pass), and why addm 727 read the
+    // Picture control as inert. Blanking once yields the module's real artwork
+    // (spiral/fractal fields) and 12 visibly distinct Pictures (99% of pixels differ).
+    // Lever ADGMBLANKEACH restores the per-frame blank for A/B.
+    const bool blank_each = getenv("ADGMBLANKEACH")!=nullptr;
+    if(!getenv("ADGMNOBLANK") && !blank_each)
+      call_tvec(blankTV, {storeH, rgnH, gmpb}, "DoBlank (once, pre-frame-loop)");
     for(int fN=0; fN<gmframes; fN++){
       if(g_shm_on){ if(!wait_go()) break; }   // addm 571: block for the app's GO
-      if(!getenv("ADGMNOBLANK")) call_tvec(blankTV, {storeH, rgnH, gmpb}, "DoBlank");
+      if(!getenv("ADGMNOBLANK") && blank_each) call_tvec(blankTV, {storeH, rgnH, gmpb}, "DoBlank");
       if(pd_frame){
         // The module's real per-frame animation step. Measured robust (0 faults / 300
         // frames), so this try/catch is defensive only: if DoDrawFrame ever faults we
@@ -3040,6 +3239,41 @@ int main(int argc, char** argv){
   // reads the user's value, not 0. ADNOEARLYSEED reverts to the legacy post-INIT-only
   // order. Retained post-INIT re-seed below covers re-reading modules and the revert path.
   if(g_early_seed) seed_controls("pre-INIT", true);
+  // ---- addm 801: arm the opt-in library-RNG seeding (see the note at
+  // the top of the file for the full mechanism). Unset => nothing here runs.
+  if(const char* rs = getenv("ADLIBRNGSEED")){
+    uint32_t engtoc = 0;
+    try { engtoc = mem->read_u32b(mem->get_symbol_addr("adxpl510:__initialize")+4); }
+    catch(const exception&){ engtoc = 0; }
+    auto dump_rng = [&](const char* when){
+      if(!engtoc) return;
+      fprintf(stderr,"[rngseed] %-6s i=%d j=%d lcg=%08X tbl[0..3]=%08X %08X %08X %08X\n", when,
+        (int)(int16_t)mem->read_u16b(engtoc-0x2394), (int)(int16_t)mem->read_u16b(engtoc+0x0442),
+        mem->read_u32b(engtoc-0x056C),
+        mem->read_u32b(engtoc-0x254C), mem->read_u32b(engtoc-0x2548),
+        mem->read_u32b(engtoc-0x2544), mem->read_u32b(engtoc-0x2540));
+    };
+    dump_rng("baked");
+    if(!strcasecmp(rs,"probe")){
+      fprintf(stderr,"[adhost] ADLIBRNGSEED=probe: state reported, NOT seeded\n");
+    } else {
+      g_librng_seed  = !strcasecmp(rs,"random") ? (uint32_t)arc4random()
+                                                : (uint32_t)strtoul(rs, nullptr, 16);
+      try {
+        uint32_t tv = mem->get_symbol_addr("adxpl510:SRand__FUi");
+        g_librng_srand_pc = mem->read_u32b(tv);      // TVector -> code entry (0x10029D74)
+        g_librng_armed = true;                        // arm BEFORE the call so the
+        call_tvec(tv, {g_librng_seed}, "adxpl510:SRand__FUi");  // override logs uniformly
+        fprintf(stderr,"[adhost] ADLIBRNGSEED: adxpl510 SRand(%08X) [%s], SRand entry %08X armed\n",
+                g_librng_seed, !strcasecmp(rs,"random")?"random":"fixed", g_librng_srand_pc);
+      } catch(const exception& ex){
+        g_librng_armed = false;
+        fprintf(stderr,"[adhost] ADLIBRNGSEED failed: %s — library RNG left at its baked state\n",
+                ex.what());
+      }
+      dump_rng("seeded");
+    }
+  }
   call_main(0, "INIT");
   // ADSCANCB: after INIT, scan the whole faceplate region (frame/ADdl/tags) + the engine
   // TOC for any u32 that points into the MODULE code region [BASE_M, BASE_M+0x40000).
@@ -3174,24 +3408,39 @@ int main(int argc, char** argv){
   const int g_idleff_after = getenv("ADIDLEFFAFTER") ? atoi(getenv("ADIDLEFFAFTER")) : 15;
   uint64_t g_idleff_lasthash = 0; int g_idleff_streak = 0; bool g_idleff_init = false;
   if(g_pace_on) fprintf(stderr,"[adhost] addm573 pacing module DRAW to %.1f ms (%.1f fps)\n",g_pace_ms, g_pace_ms>0?1000.0/g_pace_ms:0.0);
-  // addm 622: the AfterDarkModule message protocol (main TOC+0x27F8 8-selector table) IS the
-  // classic SDK enum; RE mapped it for AD4.0 PPC as {0=Initialize, 1=Close, 2=UserMessage/About
-  // card, 3=DrawFrame, 7=event state-machine that dispatches the DoBlankScreen(vtable+0x14)/
-  // DoEnableAnimation(+0x18)/DoDisableAnimation(+0x1C)/DoButton(+0x20)/DoUpdateRgn(+0x34)
-  // virtuals}. A BlankScreen message DOES exist, but driving it (or any post-INIT step) CANNOT
-  // remove FT's init title: FT's sprite background is captured (screen->003D8000) DURING message
-  // 0, AFTER the title is drawn, so the title is baked into the sprite bg before any inter-message
-  // host step could run. The "blank between Initialize-return and first DrawFrame" hypothesis is
-  // therefore refuted for the title (see MSGBANNERFIX above for the real mechanism + fix). This
-  // blank-selector drive is kept only as an opt-in RE lever: ADBLANKSEL=<n> drives message n once
-  // after INIT (default OFF; note message 2 draws FT's "About" card, not a blank).
-  if(getenv("ADBLANKSEL") && nframes>0){
-    int blank_sel = atoi(getenv("ADBLANKSEL"));
+  // addm 622 + RAINFOREST ENGINE-DRIVE FIX: the AD4 SDK module shim (main's 8-entry selector
+  // table) is identical boilerplate in every PPC module: main(&result, ?, message, frame) with
+  //   0 Initialize (operator new + ctor, *result = the module object)
+  //   1 Close      (virtual dtor, vtable+0x08, delete-flag 1)
+  //   2 **BlankScreen**  -> the object's vtable+0x0C
+  //   3 DrawFrame        -> the object's vtable+0x10
+  //   7 event state machine (frame+0x36 subcode -> vtable+0x14/+0x18/+0x1C/+0x20, else +0x34)
+  // The vtable slot names are READ OFF adxpl510's own AfterDarkModule vtable (library data
+  // @10044ED8, found by anchoring on the DoLButtonDown/Held/Up/UpdateRgn TVector run):
+  //   +0x08 __dt  +0x0C DoBlankScreen  +0x10 DoDrawFrame  +0x14 DoLButtonDown  +0x18 DoLButtonHeld
+  //   +0x1C DoLButtonUp  +0x20 DoUpdateRgn  +0x24 DoMouseMove  +0x28 DoDisableAnimation
+  //   +0x2C DoEnableAnimation  +0x30 DoButton(short)  +0x34 DoUserMessage(short)
+  // (The addm-622 note said message 2 = "UserMessage/About card" and put DoBlankScreen at
+  // vtable+0x14; both came from extrapolating TVector addresses down the slot list, which
+  // breaks at +0x30. The base-class vtable dump above is direct evidence and supersedes it.)
+  // The host drove ONLY messages 0 and 3, so a module's DoBlankScreen override — the ONLY
+  // place a module paints its background — never ran. Rainforest was the visible casualty: it
+  // rendered a BLACK SCREEN (0.2% non-black), and its 10 Background options collapsed to 2
+  // distinct renders because nothing ever painted the jungle backdrop or the pattern texture.
+  // Driving message 2 once after Initialize (what the real After Dark app does before the
+  // first DrawFrame) is authentic and corpus-safe: 16/19 PPC modules byte-IDENTICAL; the
+  // other two GAIN authored content they had been skipping — Flying Toasters! plays its
+  // "toaster evolution" era-card intro and then resumes flying toasters, Rock Paper Scissors
+  // re-seeds its sprite layout (still 200/200 distinct frames). ADNOBLANKMSG=1 reverts to the
+  // legacy 0/3-only drive; ADBLANKSEL=<n> still overrides which message is sent.
+  if(nframes>0 && !getenv("ADNOBLANKMSG")){
+    int blank_sel = getenv("ADBLANKSEL") ? atoi(getenv("ADBLANKSEL")) : 2;
     call_main(blank_sel, "BLANK");
   }
   for(int fN=0; fN<nframes; fN++){
     if(g_shm_on){ if(!wait_go()) break; }   // addm 571: block for the app's GO (SET applied inline)
     else poll_set();               // addm 569: apply any live "SET idx val" before the draw
+    ad_poll_real_caps();           // addm 797: ADREALCAPS=1 -> fold real caps state in (inert unless armed)
     // addm 573: pacing decision — should the module advance this display frame? (else re-send prev frame)
     bool g_advance = !g_pace_on;
     if(!g_advance && g_initexempt && !g_first_drawn){   // addm 581 init exemption (first-change vs baseline)
@@ -3340,17 +3589,19 @@ int main(int argc, char** argv){
       snap_ppm(string(fbp)+"/frame"+to_string(fN)+".ppm", H.g_fb, H.fb_w, H.fb_h, H.fb_w);
     stream_frame();
     banner_restore(_bs);          // addm 699: restore g_fb — banner never persists in module state
-    // addm 595: TIMED re-init CYCLE (engine-authentic saver cycling), symmetric with the 68K host. The
-    // real After Dark control panel ran each saver for a while then re-inited on a TIMER — never a stall
-    // watcher. After ADCYCLESECS (default 45) WALL-seconds since this generation started, re-initialize the
-    // module via execv(self): a fresh CFM/data world re-inits and re-animates, PID preserved (outer
-    // `timeout` still bounds the window), the streamed fd inherited so a census sees one continuous stream.
-    // No per-frame framebuffer scan (pure wall timer). The PPC corpus is all continuous savers, so this is
-    // an authentic mid-window re-init, never a disruption. Levers match the 68K host: ADAUTORESTART=1 OR
-    // ADCYCLE=1 arms it; ADCYCLESECS=n sets the period; ADNOCYCLE disables; ADSTALLSECS=n arms the OFF-by-
-    // default sampled safety-net. Byte-inert when none of these are set (the census does not set them for
-    // PPC). The idle-FF (addm 581) is an orthogonal virtual-TIME fix and is KEPT untouched.
+    // addm 595/761: TIMED re-init CYCLE (engine-authentic saver cycling), reconciled with the 68K host
+    // (addm 701/719/744): the real After Dark control panel ran each saver for a while then re-inited on
+    // a TIMER — never a stall watcher, and never a freshness gate. Plain ADCYCLE is now the AUTHENTIC
+    // model: UNCONDITIONAL re-init at ADCYCLESECS (default 60s = sVal 503), no matter what the module is
+    // doing on screen — exactly what the fullscreen blanker did to whatever was mid-animation. The
+    // freshness/grace gate (defer the boundary while the module is still animating) was OUR invention, not
+    // the engine's; it is retained as an explicit legacy A/B path behind ADCYCLEFRESH=1 (default period
+    // reverts to 45s, matching its original addm-595 behavior), byte-for-byte identical to the prior
+    // default when armed. ADCYCLESECS=n overrides the period either way; ADNOCYCLE disables; ADSTALLSECS=n
+    // arms the OFF-by-default sampled safety-net. Byte-inert when none of these are set (the census does
+    // not set them for PPC). The idle-FF (addm 581) is an orthogonal virtual-TIME fix and is KEPT untouched.
     {
+      static const bool g_cycle_fresh = getenv("ADCYCLEFRESH");      // legacy freshness-gated A/B path
       static const bool g_cycle_on = (getenv("ADAUTORESTART") || getenv("ADCYCLE")) && !getenv("ADNOCYCLE");
       if(g_cycle_on){
         double now = ad_wall_elapsed();
@@ -3365,19 +3616,37 @@ int main(int argc, char** argv){
           fr_last_sample=now;
         }
         if(!cyc_armed && (g_first_drawn || fr_seen_change)){ cyc_armed=true; cyc_start=now; }   // anchor at first draw
-        double cyc_secs  = getenv("ADCYCLESECS")  ? atof(getenv("ADCYCLESECS"))  : 45.0;
+        // Authentic default Duration = 60s (sVal 503). Legacy freshness path keeps its former 45s default.
+        double cyc_secs  = getenv("ADCYCLESECS")  ? atof(getenv("ADCYCLESECS"))  : (g_cycle_fresh ? 45.0 : 60.0);
         double cyc_grace = getenv("ADCYCLEGRACE") ? atof(getenv("ADCYCLEGRACE")) : 8.0;
         if(cyc_armed && cyc_secs>0 && (now-cyc_start)>=cyc_secs){
-          bool frozen = (now-fr_last_change) >= cyc_grace;
-          if(!frozen){
-            if(getenv("ADCYCLELOG")) fprintf(stderr,"[ADCYCLE] boundary at %.1fs but module still animating (last fb change %.1fs ago < grace %.1fs) -> defer one period\n", now-cyc_start, now-fr_last_change, cyc_grace);
+          // LEGACY freshness gate (ADCYCLEFRESH): defer the boundary if the module is still animating. The
+          // authentic engine had no such gate — the DEFAULT path re-inits UNCONDITIONALLY at the Duration
+          // boundary, exactly as the fullscreen blanker tore down + re-init'd whatever was on screen.
+          if(g_cycle_fresh && (now-fr_last_change) < cyc_grace){
+            if(getenv("ADCYCLELOG")) fprintf(stderr,"[ADCYCLE] (legacy fresh) boundary at %.1fs but module still animating (last fb change %.1fs ago < grace %.1fs) -> defer one period\n", now-cyc_start, now-fr_last_change, cyc_grace);
             cyc_start = now;
           } else {
             const char* g=getenv("ADAR_GEN"); int gen=g?atoi(g):0;
-            fprintf(stderr,"[ADCYCLE] cycle-timer fired at frame %d gen %d (module static %.1fs at the %.1fs boundary) -> re-exec module init\n",
-              fN, gen, now-fr_last_change, now-cyc_start);
-            if(streamf){ fflush(streamf); dup2(fileno(streamf),1); }
-            fflush(stderr); fflush(stdout);
+            fprintf(stderr,"[ADCYCLE] cycle-timer fired at frame %d gen %d (%.1fs elapsed since first draw) -> re-exec module init\n",
+              fN, gen, now-cyc_start);
+            // addm 792: RESTORE THE REAL STDOUT ONTO fd 1 BEFORE execv.
+            // Both transports move the app-facing stdout to a PRIVATE dup and then point
+            // fd 1 at /dev/null (see the two `dup(1)` sites above), and the re-exec'd
+            // process rebuilds its transport from `dup(1)`. If fd 1 is still /dev/null at
+            // execv, the new generation dups /dev/null and writes every frame/ack into it
+            // while the app's real pipe survives only as an anonymous inherited descriptor
+            // nobody looks at. Under ADSHM that is a DEADLOCK, not just a lost frame: the
+            // app blocks waiting for the per-frame ack byte and the host blocks in wait_go()
+            // waiting for the next GO, so the screensaver freezes at the first cycle
+            // boundary. The ADSTREAM (streamf) restore was already here; ADSHM (g_ackf) —
+            // the transport the app actually uses by default — was not.
+            // stdout is flushed FIRST, while fd 1 is still /dev/null, so that nothing
+            // buffered for the bit bucket can land in the transport we are about to restore.
+            fflush(stdout);
+            FILE* outf = streamf ? streamf : g_ackf;
+            if(outf){ fflush(outf); dup2(fileno(outf), 1); }
+            fflush(stderr);
             char nb[32]; snprintf(nb,sizeof(nb),"%d",gen+1); setenv("ADAR_GEN",nb,1);
             char exe[4096]; uint32_t esz=(uint32_t)sizeof(exe); const char* path=argv[0];
             if(_NSGetExecutablePath(exe,&esz)==0) path=exe;

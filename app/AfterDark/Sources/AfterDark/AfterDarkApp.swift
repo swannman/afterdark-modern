@@ -44,6 +44,7 @@ struct MainWindow: View {
     @State private var showInspector = true
     @State private var search = ""
     @StateObject private var settings = ADSettingsStore()
+    @StateObject private var duration = ADDurationStore()   // addm 796
 
     private var ppc: [ADModule] { AD_MODULES.filter { $0.family == .ppc } }
     private var k68: [ADModule] { AD_MODULES.filter { $0.family == .k68 } }
@@ -63,10 +64,18 @@ struct MainWindow: View {
                 .frame(minWidth: 230)
                 .searchable(text: $search, placement: .sidebar,
                             prompt: "Search modules")
+                // addm 796: Duration sat in the MAIN control-panel window
+                // alongside the module list, not in a Setup sub-dialog — so it lives
+                // under the module list here, not in the per-module inspector.
+                .safeAreaInset(edge: .bottom) { DurationBar(duration: duration) }
             } detail: {
                 if let m = selection {
                     ModuleDetail(module: m, settings: settings)
-                        .id(m.id)
+                        // addm 796: a new Duration has to reach the host's
+                        // environment, which it only reads at spawn — so fold it into
+                        // the view identity and let the existing onAppear/onDisappear
+                        // lifecycle restart the preview, exactly as switching module does.
+                        .id("\(m.id)|\(duration.seconds)")
                         .navigationTitle(m.name)
                         .ignoresSafeArea()
                         .inspector(isPresented: $showInspector) {
@@ -109,6 +118,46 @@ struct MainWindow: View {
                 }
             }
         }
+    }
+}
+
+// addm 796: the control panel's Duration slider. Same shape as the app's
+// per-module sVal sliders (ControlRow's .slider case: "Label: value" over a step-1
+// Slider) because Duration WAS an sVal-family slider — 13 discrete stops, drawn by
+// the "Slider CDEF" (CNTL 129). Positions are stop indices; the seconds behind them
+// come from rsVl 503. See ADDuration for the resource provenance.
+struct DurationBar: View {
+    @ObservedObject var duration: ADDurationStore
+    @State private var pos: Double = 0
+
+    // Committing only on mouse-up keeps a drag across the ladder from restarting the
+    // preview once per stop; the readout still tracks the thumb live.
+    private var draggedStop: ADDuration.Stop {
+        ADDuration.stops[min(max(Int(pos.rounded()), 0), ADDuration.stops.count - 1)]
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Divider()
+            HStack(spacing: 4) {
+                Text(ADDuration.label)
+                Text(draggedStop.label).foregroundStyle(.secondary)
+            }
+            .font(.callout)
+            Slider(value: $pos, in: 0...Double(ADDuration.stops.count - 1), step: 1) { editing in
+                if !editing { duration.seconds = draggedStop.seconds }
+            }
+            Text(draggedStop.seconds == ADDuration.forever
+                 ? "Modules run until you wake the screen."
+                 : "How often the module restarts, as in the original control panel.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 10)
+        .background(.bar)
+        .onAppear { pos = Double(ADDuration.index(forSeconds: duration.seconds)) }
     }
 }
 

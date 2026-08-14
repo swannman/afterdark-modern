@@ -19,12 +19,25 @@ public struct EmulatedModuleView: View {
                                                            settings: settings))
     }
 
-    // addm 574: modules that react to keyboard input (Caps-Lock interactive mode).
-    // Rodger Dodger ("Caps-lock gets you in and out of interactive mode") and Fish
-    // World ("Hit Caps-lock to tap on the glass and scare the fish"). Hardcoded for
-    // now; these two get keyboard capture + the "interactive" hint caption.
+    // addm 797: modules that take ARROW/WASD keys and the mouse. These need
+    // first-responder capture (they swallow keystrokes), so the set stays small and
+    // explicit. Caps-Lock is NOT part of this gate — see capsConsumer below.
     static let interactiveNames: Set<String> = ["Rodger Dodger", "Fish World"]
     static func isInteractive(_ m: ADModule) -> Bool { interactiveNames.contains(m.name) }
+
+    // addm 797: does this module document a Caps-Lock behaviour? Derived from
+    // the module's OWN About text (shipped in catalog.json), not a hand-kept list, so it
+    // can never drift out of sync with the corpus. 19 modules match across both families
+    // — Time Flies ("Caps-lock changes the type of clock"), Mandelbrot ("change the color
+    // scheme"), Satori, Nirvana, Psycho Deli, Swirling Magic, Magic Turtle, Marbles!,
+    // Rock Paper Scissors, Confetti Factory, Strange Attractors, Fish World, Rodger
+    // Dodger, in 68K and/or PPC form. Used ONLY to decide whether to show the hint
+    // caption; caps itself is forwarded for every module (see EmulatedDriver.init).
+    static func capsConsumer(_ m: ADModule) -> Bool {
+        guard let about = m.about else { return false }
+        return about.range(of: "caps[ \u{2010}-\u{2015}-]?lock",
+                           options: [.regularExpression, .caseInsensitive]) != nil
+    }
 
     public var body: some View {
         ZStack {
@@ -41,8 +54,10 @@ public struct EmulatedModuleView: View {
                         .font(.callout).foregroundStyle(.secondary)
                 }
             }
-            // addm 574: subtle hint that this saver responds to the keyboard.
-            if Self.isInteractive(module) && driver.hasFrame {
+            // addm 797: subtle hint that this saver responds to the keyboard.
+            // Was gated on isInteractive (2 modules); now on capsConsumer, so all 19
+            // modules that document a Caps-Lock behaviour advertise it.
+            if (Self.capsConsumer(module) || Self.isInteractive(module)) && driver.hasFrame {
                 VStack {
                     Spacer()
                     HStack {
@@ -81,8 +96,14 @@ public final class FrameLayerNSView: NSView {
     var onMouse: ((_ x: Int, _ y: Int, _ button: Bool) -> Void)?
     var captureInput = false                 // gates first-responder + event capture
     private var lastImageSize: CGSize = .zero // native frame size for mouse mapping
-    private var lastCaps = false
     private var mouseDownNow = false
+
+    // addm 797: this view no longer observes Caps-Lock at all. The host reads
+    // the real key itself once per frame under ADREALCAPS (EmulatedHost._buildEnv), which
+    // needs no first responder, no key window and no event delivery — so it behaves the
+    // same in this pane and inside the screen-saver appex, and it survives host respawns
+    // and module cycling with no state to replay. An NSEvent monitor + poll here would be
+    // a second, weaker source of the same fact.
 
     public override init(frame: NSRect) { super.init(frame: frame); setup() }
     public required init?(coder: NSCoder) { super.init(coder: coder); setup() }
@@ -114,12 +135,6 @@ public final class FrameLayerNSView: NSView {
     public override func keyUp(with event: NSEvent) {
         guard captureInput else { super.keyUp(with: event); return }
         onKey?(Int(event.keyCode), false)
-    }
-    public override func flagsChanged(with event: NSEvent) {
-        guard captureInput else { super.flagsChanged(with: event); return }
-        let caps = event.modifierFlags.contains(.capsLock)
-        if caps != lastCaps { lastCaps = caps; onCaps?(caps) }
-        super.flagsChanged(with: event)
     }
 
     // Map a point in view (bottom-left origin) coords to FRAME-local (top-left
@@ -174,16 +189,13 @@ public final class FrameLayerNSView: NSView {
         nc.addObserver(self, selector: #selector(occlusionChanged),
                        name: NSApplication.didUnhideNotification, object: nil)
         updateVisibility()
-        // addm 574: interactive modules grab keyboard focus so Caps-Lock / keys route
+        // addm 574: arrow/WASD + mouse modules grab keyboard focus so those keys route
         // here. Deferred so the window has finished setting up its responder chain.
+        // (Caps no longer rides on this — startCapsObservation above already seeded it.)
         if captureInput {
             DispatchQueue.main.async { [weak self] in
                 guard let self, let win = self.window else { return }
                 win.makeFirstResponder(self)
-                // Seed the current caps-lock state immediately (so a saver opened with
-                // caps already on starts in interactive mode).
-                let caps = NSEvent.modifierFlags.contains(.capsLock)
-                self.lastCaps = caps; self.onCaps?(caps)
             }
         }
     }
@@ -254,12 +266,11 @@ final class EmulatedDriver: ObservableObject {
         frameView.onVisibility = { [weak self] visible in
             self?.host?.setPaused(!visible)
         }
-        // addm 574: for known-interactive modules, capture keyboard/caps/mouse and
-        // forward it to the host over the live input channel.
+        // Arrow/WASD + mouse need first-responder capture, so they stay gated. Caps is
+        // NOT here: the host polls the real key itself (addm 797).
         if EmulatedModuleView.isInteractive(module) {
             frameView.captureInput = true
             frameView.onKey   = { [weak self] kc, down in self?.host?.sendKey(keycode: kc, down: down) }
-            frameView.onCaps  = { [weak self] on in self?.host?.sendCaps(on) }
             frameView.onMouse = { [weak self] x, y, btn in self?.host?.sendMouse(x: x, y: y, button: btn) }
         }
     }

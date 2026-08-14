@@ -23,7 +23,8 @@ RD=$(TP)/resource_dasm
 PH=$(TP)/local
 CXX=clang++
 CXXFLAGS=-std=c++20 -O2 -I$(RD)/src -I$(PH)/include
-LIBS=$(RD)/build/libresource_file.a $(PH)/lib/libphosg.a -lz
+# addm 797: -framework ApplicationServices for CGEventSourceFlagsState (ADREALCAPS)
+LIBS=$(RD)/build/libresource_file.a $(PH)/lib/libphosg.a -lz -framework ApplicationServices
 adhost: adhost.cc
 	$(CXX) $(CXXFLAGS) adhost.cc $(LIBS) -o adhost
 
@@ -33,3 +34,10 @@ adhost68k: adhost68k.cc ad_toolbox.cc ad_toolbox.hh
 # Lane-D working copy (addm 702: Modern Art Rothko _Pack12 autoPop HSV2RGB).
 adhost68k_fd: adhost68k_fd.cc ad_toolbox.cc ad_toolbox.hh
 	$(CXX) $(CXXFLAGS) adhost68k_fd.cc ad_toolbox.cc $(LIBS) -o adhost68k_fd
+
+# Lane working copy (addm 756: Rodger Dodger play field).
+adhost68k_rd2: adhost68k_rd2.cc ad_toolbox.cc ad_toolbox.hh
+	$(CXX) $(CXXFLAGS) adhost68k_rd2.cc ad_toolbox.cc $(LIBS) -o adhost68k_rd2
+
+adhost68k_rd3: adhost68k_rd3.cc ad_toolbox.cc ad_toolbox.hh
+	$(CXX) $(CXXFLAGS) adhost68k_rd3.cc ad_toolbox.cc $(LIBS) -o adhost68k_rd3

@@ -271,13 +271,31 @@ struct ToolboxCanvas {
   explicit ToolboxCanvas(std::shared_ptr<ResourceDASM::MemoryContext> m): mem(m) {}
 
   // ---- CLUT / colour -------------------------------------------------------
-  // addm 769: three display/colour compensation fields retired writer-less after the gate audit —
-  // dm_white_black (addm 557 Draw Morph paper; gate retired addm 766, it was destroying the module's
-  // own light strokes), disp_black0 (addm 583 Nirvana; premise dead post-754, retired addm 766) and
-  // disp_black255 (addm 627 Warp!; writer gone since addm 679 — the authentic System palette already
-  // ends at pure black). The mechanisms they compensated for are fixed at the source: the authentic
-  // palette (addm 632) and the 1..N clut merge contract (addm 754/754b).
+  bool dm_white_black=false;   // addm 557: Draw Morph — resolve pure white to the black index (paper fill)
+  // addm 583: Nirvana — DISPLAY-ONLY black-at-index-0. Nirvana is a plasma/fire feedback saver whose
+  // untouched-background pixels are framebuffer index 0; its own installed CLUT leaves index 0 WHITE, so
+  // the backdrop renders white (user-flagged wrong twice — real Nirvana grows plasma on BLACK). It was
+  // KEEP0-exempted from the addm-549 CLUT[0]->black fix because blackening CLUT entry 0 perturbs
+  // rgb_to_index (the module resolves qd_fg/qd_bg and plasma colours through nearest-CLUT-match; measured:
+  // ADFORCE0 shifts qd_fg 192->0, qd_bg 0->22 and collapses the red band to near-black idx255). The fix is
+  // to change ONLY the DISPLAYED colour of index-0 pixels, not the CLUT rgb_to_index reads: force the
+  // display LUT entry 0 to black at snapshot time. The framebuffer bytes, g_clut, and rgb_to_index are all
+  // byte-identical to the (working) KEEP0 baseline — the plasma's frame-to-frame feedback is untouched;
+  // only the backdrop's shown colour flips white->black. Default-off; host sets it name-gated for Nirvana.
+  bool disp_black0=false;
+  // addm 627: display-only black at index 255 (Warp!). Same mechanism as disp_black0 — overrides the SHOWN
+  // colour of index-255 pixels to black without touching g_clut or rgb_to_index. The authentic Macintosh
+  // 8-bit System palette has index 255 = pure black; our synthetic gray ramp ended it at (17,17,17). Warp!
+  // fades distant stars and erases old star positions to index 255 expecting black; the near-black gray made
+  // every swept position a visible dark-gray pixel that accumulated into the reported "gray trail". Editing
+  // the CLUT itself would perturb rgb_to_index nearest-match (Bogglins near-dark colours shift index), so
+  // this is display-only: index bytes / rgb_to_index unchanged => ADFBHASH byte-identical. Host name-gates it.
+  bool disp_black255=false;
   uint8_t rgb_to_index(uint16_t R,uint16_t G,uint16_t B) const {
+    if(dm_white_black && R>=0xF000 && G>=0xF000 && B>=0xF000){ // pure-white paper -> black idx
+      int rb=0; long bd=1L<<40; for(int i=0;i<256;i++){ uint32_t e=g_clut+8+i*8;
+        int cr=mem->read_u16b(e+2)>>8,cg=mem->read_u16b(e+4)>>8,cb=mem->read_u16b(e+6)>>8;
+        long d=(long)cr*cr+(long)cg*cg+(long)cb*cb; if(d<bd){bd=d;rb=i;} } return (uint8_t)rb; }
     int r8=R>>8,g8=G>>8,b8=B>>8,best=0; long bd=1L<<40;
     for(int i=0;i<256;i++){ uint32_t e=g_clut+8+i*8;
       int cr=mem->read_u16b(e+2)>>8,cg=mem->read_u16b(e+4)>>8,cb=mem->read_u16b(e+6)>>8;
@@ -543,6 +561,8 @@ struct ToolboxCanvas {
     // addm 583: display-only black-at-index-0 (Nirvana). Overrides the SHOWN colour of index-0 pixels to
     // black without touching g_clut or rgb_to_index. Feeds every display path (P6 stream, P8 stream, shm)
     // since they all source ppm_lut here. Default-off => byte-identical for every other module.
+    if(disp_black0){ ppm_lut[0]=0; ppm_lut[1]=0; ppm_lut[2]=0; }
+    if(disp_black255){ ppm_lut[255*3]=0; ppm_lut[255*3+1]=0; ppm_lut[255*3+2]=0; } // addm 627 (Warp! erase/fade colour)
   }
   // Write one P6 frame to an already-open stream (used both for file snaps and
   // for the ADSTREAM stdout pipe — the app consumes concatenated P6 frames).

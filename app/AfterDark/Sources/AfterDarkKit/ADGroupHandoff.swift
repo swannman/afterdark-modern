@@ -26,6 +26,13 @@ public enum ADGroupHandoff {
     public static let kSharedLibsRoot = "sharedLibsRoot"
     public static let kHostsDir       = "hostsDir"
     public static let kUpdatedAt      = "updatedAt"
+    // addm 796: the global Duration preference rides along on the SAME two
+    // channels as the paths. It has to: the saver runs in another process whose
+    // defaults domain is its own (ScreenSaverDefaults inside legacyScreenSaver.appex),
+    // so it cannot read the app's UserDefaults.standard — but it already reads this
+    // sidecar by absolute path, and that is the channel proven to work in the real
+    // appex. Carried as a STRING to keep the sidecar's [String: String] shape.
+    public static let kDurationSeconds = "durationSeconds"
 
     // Fixed absolute path (under the app-support dir, i.e. the parent of assetsRoot)
     // of a plain-JSON handoff the SANDBOXED saver reads directly. This is the robust
@@ -44,16 +51,21 @@ public enum ADGroupHandoff {
     // in the real appex). Idempotent; safe to call repeatedly (on launch when assets
     // are already present, and after a download finishes).
     public static func publish() {
+        // addm 796: read straight from defaults rather than taking a parameter,
+        // so every existing publish() call site keeps the saver's copy current for free.
+        let duration = ADDuration.sanitize(UserDefaults.standard.object(forKey: ADDuration.defaultsKey) as? Int)
         if let d = UserDefaults(suiteName: suiteName) {
             d.set(ADPaths.assetsRoot,     forKey: kAssetsRoot)
             d.set(ADPaths.sharedLibsRoot, forKey: kSharedLibsRoot)
             d.set(ADPaths.hostsDir,       forKey: kHostsDir)
+            d.set(duration,               forKey: kDurationSeconds)
             d.set(Date().timeIntervalSince1970, forKey: kUpdatedAt)
         }
         let payload: [String: String] = [
             kAssetsRoot: ADPaths.assetsRoot,
             kSharedLibsRoot: ADPaths.sharedLibsRoot,
             kHostsDir: ADPaths.hostsDir,
+            kDurationSeconds: String(duration),
         ]
         if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted]) {
             let path = sidecarPath()
