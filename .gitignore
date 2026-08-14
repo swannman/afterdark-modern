@@ -7,29 +7,26 @@ app/AfterDark/.build/
 *.app/
 
 # --- compiled hosts / tools (built by `make` from source) ---
-tools/adhost/adhost
-tools/adhost/adhost68k
+engine/adhost
+engine/adhost68k
 tools/adblit/adblit
+app/saver/AfterDark.saver/
+app/saver/cshim/shim.o
 
 # --- ORIGINAL After Dark bits — never commit (fetched locally by tools/adfetch) ---
 # The two shared runtime libraries, placed next to the hosts by adfetch:
-tools/adhost/ADShared40.pef
-tools/adhost/AD4Library.rsrc
+engine/ADShared40.pef
+engine/AD4Library.rsrc
 # Anything adfetch downloads / extracts:
 **/.adfetch-downloads/
-# Extracted original sprite/sound assets bundled for the native scenes.
-# (These are original-derived; the public repo ships none of them — regenerate
-#  locally after fetching. See publish-prep/PUBLISH_PLAN.md, decision #1.)
+# Extracted original assets are never committed:
 app/AfterDark/Sources/AfterDarkKit/Resources/*/
 !app/AfterDark/Sources/AfterDarkKit/Resources/catalog.json
 assets/
 
 # --- reverse-engineering artifacts derived from original code (do not publish) ---
 research/
-tools/adhost/scratchpad/
-
-# --- per-module RE working variants (only the canonical mains are built/shipped) ---
-tools/adhost/adhost68k_*.cc
+tools/scratchpad/
 
 # --- cloned deps (README documents cloning) + downloaded assets ---
 third_party/

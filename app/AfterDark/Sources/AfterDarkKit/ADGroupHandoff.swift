@@ -16,8 +16,8 @@ import Foundation
 // AD_SHARED_DIR / AD_HOST_DIR environment overrides before it builds its catalog.
 public enum ADGroupHandoff {
     // App group shared between the AfterDark app and AfterDark.saver. Both are signed
-    // with this group entitlement (com.apple.security.application-groups, team
-    // 38DW3JR38X). Without the entitlement (an unsigned dev build) UserDefaults(suiteName:)
+    // with this group entitlement (com.apple.security.application-groups, same
+    // team). Without the entitlement (an unsigned dev build) UserDefaults(suiteName:)
     // degrades to a plain preferences domain of the same name — which still round-trips
     // between two processes on ONE machine, so the dev/harness path works unchanged.
     public static let suiteName = "group.com.afterdark.modern"

@@ -1,0 +1,97 @@
+name: Build
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # The emulator dependency (resource_dasm + phosg) rarely changes; cache the
+      # built libraries keyed on the upstream revisions we build against.
+      - name: Resolve emulator revision
+        id: rd
+        run: |
+          key=$(git ls-remote https://github.com/fuzziqersoftware/resource_dasm \
+                  refs/heads/master refs/pull/100/head | shasum | cut -c1-16)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+
+      - name: Cache third_party
+        uses: actions/cache@v4
+        with:
+          path: third_party
+          key: third-party-${{ runner.os }}-${{ steps.rd.outputs.key }}-v1
+
+      - name: Build emulator dependencies
+        run: |
+          if [ ! -f third_party/resource_dasm/build/libresource_file.a ]; then
+            git clone https://github.com/fuzziqersoftware/phosg third_party/phosg
+            git clone https://github.com/fuzziqersoftware/resource_dasm third_party/resource_dasm
+            # Graft the pending M68KEmulator fixes (PR #100). A no-op once merged.
+            (cd third_party/resource_dasm \
+              && git -c user.email=ci@localhost -c user.name=ci fetch origin pull/100/head \
+              && git -c user.email=ci@localhost -c user.name=ci merge --no-edit FETCH_HEAD)
+            (cd third_party/phosg && cmake -S . -B build -DCMAKE_INSTALL_PREFIX=../local \
+              && cmake --build build -j4 && cmake --install build)
+            (cd third_party/resource_dasm && cmake -S . -B build -DCMAKE_PREFIX_PATH=../local \
+              && cmake --build build --target resource_file m68kdasm resource_dasm -j4)
+          fi
+
+      - name: Build engine hosts
+        run: cd engine && make adhost adhost68k
+
+      - name: Swift tests
+        run: cd app/AfterDark && swift test
+
+      - name: Build AfterDark.app
+        run: cd app/AfterDark && AD_SIGN_ID=- ./make_app.sh
+
+      - name: Build AfterDark.saver
+        run: AD_SIGN_ID=- bash app/saver/build_saver.sh
+
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          case "$GITHUB_REF" in refs/tags/v*) ;; *) VERSION="0.0.0-$(git rev-parse --short HEAD)";; esac
+          for plist in "app/AfterDark/AfterDark.app/Contents/Info.plist" \
+                       "app/saver/AfterDark.saver/Contents/Info.plist"; do
+            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$plist" || true
+          done
+          mkdir -p dist/AfterDark
+          cp -R app/AfterDark/AfterDark.app dist/AfterDark/
+          cp -R app/saver/AfterDark.saver dist/AfterDark/
+          cp docs/INSTALL.md dist/AfterDark/INSTALL.md
+          (cd dist && ditto -c -k --keepParent AfterDark "AfterDark-$VERSION-arm64.zip")
+          echo "ZIP=dist/AfterDark-$VERSION-arm64.zip" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AfterDark-arm64
+          path: ${{ env.ZIP }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: AfterDark-arm64
+          path: dist
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.zip \
+            --title "After Dark Modern $GITHUB_REF_NAME" \
+            --generate-notes \
+            --notes "See INSTALL.md inside the zip for install steps. Apple Silicon (arm64), macOS 14+."

@@ -2,7 +2,12 @@
 
 Run real **After Dark** 68K and PowerPC screensaver modules under CPU emulation on
 modern macOS. Two hosts (`engine/`) execute the original module code against a
-software QuickDraw and stream frames; a SwiftUI app presents them.
+software QuickDraw and stream frames; a SwiftUI app and a real macOS screen
+saver present them.
+
+Prebuilt downloads are on the
+[Releases page](../../releases) — see `INSTALL.md` in the zip (or
+[docs/INSTALL.md](docs/INSTALL.md)). To build from source, read on.
 
 Everything in this repo is original work. **No copyrighted After Dark bits are
 included** — first run downloads them from archive.org (you're responsible for
@@ -17,6 +22,7 @@ separately.
 - `tools/` — utilities: `adfetch/` downloads/extracts the original assets
   (checksum-verified); the rest are debugging/validation aids
 - `app/AfterDark/` — the app, plus `adrender` (headless renderer/verifier)
+- `app/saver/` — `AfterDark.saver`, the installable macOS screen saver
 - `docs/RESEARCH.md` — the reverse-engineering log (what the hosts expect and why)
 
 ## Build & run
@@ -35,6 +41,9 @@ cd engine && make adhost adhost68k && cd ..
 
 # app — first launch shows the asset-download gate, then the module picker
 cd app/AfterDark && swift run AfterDark
+
+# screen saver bundle (install by double-clicking AfterDark.saver)
+bash app/saver/build_saver.sh
 ```
 
 The `.app` bundle is self-contained — `make_app.sh` builds the extraction tools

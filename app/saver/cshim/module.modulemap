@@ -1,0 +1,4 @@
+module ADCShim {
+    header "adcshim.h"
+    export *
+}
