@@ -1,4 +1,5 @@
-// ad_toolbox_lc.cc — legacy-cleanup COPY of ad_toolbox.cc (out-of-line data for ad_toolbox_lc.hh).
+// ad_toolbox.cc — out-of-line data for the software QuickDraw: the classic 8x8
+// bitmap font (QDFONT) shared by both hosts.
 #include "ad_toolbox.hh"
 namespace adtoolbox {
 const uint8_t QDFONT[96][8] = {

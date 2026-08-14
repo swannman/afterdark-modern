@@ -1,4 +1,7 @@
-// ad_toolbox.hh — shared Mac Toolbox / software-QuickDraw core for the After Dark
+// ad_toolbox_px.hh — the software-QuickDraw core compiled into adhost68k.cc.
+// (ad_toolbox.hh is the near-twin compiled only into the QDFONT translation
+// unit, ad_toolbox.cc; keep divergent fields reconciled deliberately.)
+// Shared Mac Toolbox / software-QuickDraw core for the After Dark
 // hosts. The DRAWING LOGIC is identical whether the module is PowerPC (adhost.cc,
 // args in registers) or 68K (adhost68k.cc, args on the stack); only the argument
 // marshaling differs. This header holds the reusable core — a color GrafPort +

@@ -4,9 +4,12 @@
 #include <climits>
 #include <array>
 #include <dirent.h>
-// Parallel to adhost.cc (PowerPC); uses resource_dasm's M68KEmulator and a
-// software-QuickDraw framebuffer. It loads the module's ADgm code, maps low memory
-// plus a screen GrafPort, runs the module entry, and traces the Mac Toolbox A-traps it makes.
+// Parallel to adhost.cc (PowerPC); uses resource_dasm's M68KEmulator and the
+// software-QuickDraw framebuffer (ad_toolbox_px.hh). It loads the module's ADgm
+// code, maps low memory plus a screen GrafPort, runs the module entry, services
+// every Mac Toolbox A-trap the module makes, and streams frames to the app over
+// the ADSHM/stdout pipeline. Behavior levers are environment variables; see the
+// KEYENV table below.
 //
 // Build: see Makefile target `adhost68k`.
 #include <stdio.h>

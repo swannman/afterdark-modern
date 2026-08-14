@@ -1,15 +1,15 @@
-// adhost — After Dark 4.0 runtime host (phase 1: trace).
+// adhost — runtime host for the PowerPC After Dark modules (A4gm PEFs).
 //
-// Loads the real `After Dark 4.0 Shared` (adxpl510) PPC shared library and a
-// real A4gm module PEF into one emulated address space, links them (module
-// imports -> adxpl510 exports; adxpl510 imports -> host OS sentinels), then
-// calls the module's `main` factory and traces execution: every Mac Toolbox
-// (InterfaceLib/MathLib/QuickTime) call the engine makes is trapped and logged.
+// Loads the real `After Dark 4.0 Shared` engine (adxpl510) and a real module
+// PEF into one emulated PowerPC address space, links them (module imports ->
+// adxpl510 exports; adxpl510 imports -> host OS implementations), calls the
+// module's `main` factory, and drives the module frame-by-frame, streaming
+// frames to the app over the ADSHM/stdout pipeline. Every Mac Toolbox call the
+// engine makes is trapped and serviced by the host (ADTRACE logs them).
 //
-// This is the reconnaissance build: its job is to reveal the exact startup /
-// per-frame call protocol so we can implement the host callbacks the modules
-// actually exercise. Usage:
+// Usage:
 //   adhost <ADShared.pef> <module.pef> [maxcalls]
+// Behavior levers are environment variables; see the KEYENV table below.
 //
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,7 +45,7 @@ static const uint32_t RET_SENT  = 0xE1000000;// "top-level call returned" marker
 // for named-but-unimplemented OS imports is tagged with the RESOLVED import name
 // (UNIMPL:<Lib:Name>) so we get an exact census of every faked API.
 //
-// The census runs under `timeout -s KILL 62`; SIGKILL is uncatchable, so we
+// Census runs are typically bounded by an external SIGKILL timeout; SIGKILL is uncatchable, so we
 // cannot rely on atexit/end-of-main. Instead we arm alarm() to fire well before
 // the kill; the handler only sets a flag (async-signal-safe), and do_import —
 // invoked on EVERY OS call, i.e. continuously by every frame loop — notices the
