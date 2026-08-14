@@ -5,10 +5,8 @@
 #include <array>
 #include <dirent.h>
 // Parallel to adhost.cc (PowerPC); uses resource_dasm's M68KEmulator and a
-// software-QuickDraw framebuffer. This is the bootstrap skeleton: it loads the
-// module's ADgm code, maps low memory + a screen GrafPort, runs the module
-// entry, and traces the Mac Toolbox A-traps it makes so we can implement them
-// incrementally (same methodology that brought up the PPC host).
+// software-QuickDraw framebuffer. It loads the module's ADgm code, maps low memory
+// plus a screen GrafPort, runs the module entry, and traces the Mac Toolbox A-traps it makes.
 //
 // Build: see Makefile target `adhost68k`.
 #include <stdio.h>
@@ -27,13 +25,13 @@
 #include "IndexFormats/Formats.hh"
 #include <phosg/Filesystem.hh>
 #include "ad_toolbox_px.hh"
-// addm 529: ADAUTORESTART self-exec restart support (opt-in; see the ADAUTORESTART block in the frame loop).
+// ADAUTORESTART self-exec restart support (opt-in; see the ADAUTORESTART block in the frame loop).
 #include <unistd.h>
 #include <fcntl.h>
-#include <sys/mman.h>   // addm 571: shm_open/mmap for zero-copy shared-memory transport
+#include <sys/mman.h>   // shm_open/mmap for zero-copy shared-memory transport
 #include <sys/stat.h>
 #include <sys/time.h>
-#include <time.h>       // addm 585: localtime/tm_gmtoff for opt-in real local Mac clock (ADREALCLOCK)
+#include <time.h>       // localtime/tm_gmtoff for opt-in real local Mac clock (ADREALCLOCK)
 #include <errno.h>
 #include <mach-o/dyld.h>
 
@@ -47,16 +45,14 @@ using namespace ResourceDASM;
 // index a 6-byte table ({4EF9,target.l}) — the recurring tvBase+6 fault is entry 1 of a 6-byte stride.
 static uint32_t g_tvStride(){ static uint32_t v = getenv("ADTVSTRIDE") ? (uint32_t)strtoul(getenv("ADTVSTRIDE"),0,0) : 8; return v; }
 static uint32_t g_jtBias(){ static uint32_t v = getenv("ADJTBIAS") ? (uint32_t)strtoul(getenv("ADJTBIAS"),0,0) : 0; return v; }
-// addm 719: set once the authentic near-model jump-table layout has been built (the CodeWarrior runtime
-// block at its absolute A5+0x20 base + a disjoint base per fragment). When it is, the forged __mul32
-// island, the addm-483 Coord converter back-fill and the addm-486 module ctor-callback back-fill all
-// become dead: every one of them was hand-installing what the layout now produces generically.
+// Set once the authentic near-model jump-table layout has been built (the CodeWarrior runtime
+// block at its absolute A5+0x20 base plus a disjoint base per fragment).
 static bool g_jtAuth=false;
 // Near-JT slots the HOST owns (e.g. the __mul32 MULU.L helper at A5+0x42). The dll# DRLT self-reloc
-// path (addm 309/311) writes {4EF9,method} islands into the low near-JT band and would otherwise
+// path writes {4EF9,method} islands into the low near-JT band and would otherwise
 // CLOBBER these, silently redirecting a runtime-helper call to an unrelated C++ method.
 static std::set<uint32_t> g_reservedJT;
-// ==== sfBand live/dead near-JT slot classifier (execution-based, addm 670) ====
+// ==== sfBand live/dead near-JT slot classifier (execution-based) ====
 // A near-JT slot is LIVE iff module code can actually REACH a read/jump-through of it at runtime.
 // Static scans (ADSFNEARSCAN: pea/lea (d16,A5) sites) over-approximate — DEAD code has address-take
 // sites too, so a static scan evicts bands that could harmlessly overlap dead slots. The dataflow
@@ -99,14 +95,14 @@ static void sf_live_dump(){
   }
   fprintf(stderr,"[sflive] VERDICT: %s (%d live-jumped-slot band clobbers)\n", jclob==0?"SAFE — no band clobbers a live jump island":"UNSAFE", jclob);
 }
-// ==== ADJTLIVE (addm 719): execution-based census of the LOW A5 near-JT band ====
+// ==== ADJTLIVE: execution-based census of the LOW A5 near-JT band ====
 // The static question "is a baked `pea/lea/jsr (d16,A5)` with 0 < d16 < 0x3800 a jump-table slot or a
 // plain A5-relative global?" cannot be settled by a linear-sweep disassembly (misdecodes manufacture
 // both forms). Execution settles it: record every (d16,A5) control transfer / address take that the
 // emulator ACTUALLY executes in the shared library A5 world, with the caller PC (so library code and
 // module code are distinguishable) and what the slot held at the time.
 struct JtlRec { long jmp=0, addr=0; uint32_t pcJmp=0, pcAddr=0, pcJmpMax=0, pcAddrMax=0; };
-// ADJTXPROBE (addm 719): record which near-JT ISLANDS actually execute, by their jump TARGET. Island
+// ADJTXPROBE: record which near-JT ISLANDS actually execute, by their jump TARGET. Island
 // addresses move when the layout is corrected, so comparing addresses across builds is meaningless —
 // comparing the set of methods reached is not. Any method that appears on one side only is a dispatch
 // whose binding the de-aliasing changed.
@@ -119,13 +115,13 @@ static void jtx_dump(){
   for(auto& kv : g_jtxTarget) fprintf(stderr,"[jtx]  island %08X -> %08X  x%ld\n",kv.first.first,kv.first.second,kv.second);
 }
 static bool     g_jtlive=false;
-// Executed-PC ring shared by the ADPCTRACE dump and the ADWATCHRING dump (addm 739).
+// Executed-PC ring shared by the ADPCTRACE dump and the ADWATCHRING dump.
 static const uint32_t G_PCRINGSZ=4096;
 static uint32_t g_pcring[G_PCRINGSZ]; static uint32_t g_pcringN=0;
-// addm 775 (promoted from the addm-756 lane, generic): ADRD2HIST executed-PC histogram
-// (16-byte buckets over one address range, dumped at exit). With ADRD2MAP (loader-side name->address
-// dump) this makes "which functions execute zero times" a two-command census on any dll# module.
-// CAVEAT (addm 755): hook-based PC counts are LOWER BOUNDS — a zero bucket needs a second evidence axis.
+// ADRD2HIST executed-PC histogram (16-byte buckets over one address range, dumped at exit).
+// With ADRD2MAP (loader-side name->address dump) this makes "which functions execute zero
+// times" a two-command census on any dll# module.
+// CAVEAT: hook-based PC counts are LOWER BOUNDS — a zero bucket needs a second evidence axis.
 static std::vector<unsigned long long> g_rd2_hist;
 static uint32_t g_rd2_hlo=0;
 static void rd2_hist_dump(){
@@ -158,11 +154,10 @@ static void jtl_dump(){
       (unsigned)kv.first,r.jmp,r.pcJmp,r.pcJmpMax,r.addr,r.pcAddr,r.pcAddrMax);
   }
 }
-// ==== ADSFFP (near-JT completion, this task): per-module near-A5 WRITE-FOOTPRINT recorder ====
+// ==== ADSFFP: per-module near-A5 WRITE-FOOTPRINT recorder ====
 // Captures a module's INTRINSIC near-A5 (s16 window) write footprint across its WHOLE run (init +
-// self-animation). RD self-animates under the plain single-run drive (measured: distinct=45 in 30s, NO
-// ADAUTORESTART), so the animation-phase footprint the sfBand allocator must avoid is reachable without
-// the queued input-drive RE — the addm-682 "blocked on RD's animation drive" premise is FALSE.
+// self-animation). RD self-animates under the plain single-run drive, so the animation-phase
+// footprint the sfBand allocator must avoid is reachable without a queued input drive.
 // Mechanism: baseline the s16 window at the FIRST module instruction (post-load, pre-init), then diff it
 // once per presented frame and OR any changed byte into an ever-touched map. The de-alias BAND span is
 // EXCLUDED at dump time (a module writing its own relocated far-globals is legitimate, NOT a region the
@@ -199,13 +194,11 @@ static void sffp_dump(){
   fprintf(stderr,"[sffp] DONE nbytes=%ld nruns=%ld (band-excluded)\n",nb,nr);
   if(out){ fprintf(out,"done %ld %ld\n",nb,nr); fclose(out); }
 }
-// ==== ADSFRD (near-JT completion): above-a5 READ / JUMP / address-reg probe ====
-// The write-footprint model is REFUTED (RD's near-A5 write set is identical between the animating below-a5
-// placement and the blank above-a5 placement). So the discriminator is a READ or a JUMP-through of the
-// above-a5 window that a write-diff cannot see. This probe records, per a5_mod-relative slot in a window,
-// every instruction that (R) reads a source EA in the window, (X) executes with PC in the window, or (A)
-// holds an address register pointing into the window — tagged by A5 world. Runs every instruction INCLUDING
-// the animation phase (unlike the prior ADJTWATCH which only covered init+first-draw). ADSFRDLO/HI bound
+// ==== ADSFRD: above-a5 READ / JUMP / address-reg probe ====
+// A write-diff cannot see a READ or a JUMP-through of the above-a5 window, so this probe records,
+// per a5_mod-relative slot in a window, every instruction that (R) reads a source EA in the window,
+// (X) executes with PC in the window, or (A) holds an address register pointing into the window —
+// tagged by A5 world. Runs on every instruction, including the animation phase. ADSFRDLO/HI bound
 // the window (a5_mod-relative hex, default 0x40..0x3800).
 static bool     g_sfrd=false, g_sfrd_ea=false;
 static uint32_t g_sfrd_a5=0, g_sfrd_lo=0, g_sfrd_hi=0, g_sfrd_a5lib=0;
@@ -223,17 +216,15 @@ static void sfrd_dump(){
     fprintf(stderr,"[sfrd]  slot a5_mod%+d  R=%ld(pc%08X) X=%ld(pc%08X) A=%ld(pc%08X) world{lib=%ld mod=%ld oth=%ld}\n",
       pr.first,r.r,r.rdPc,r.x,r.exPc,r.areg,r.aPc,r.libW,r.modW,r.othW); }
 }
-// ==== ADSFXPROBE (near-JT completion): lean EXECUTED-IN-GAP island probe — the CLEAN discriminator ====
+// ==== ADSFXPROBE: EXECUTED-IN-GAP island probe ====
 // A near-JT slot in the clean above-a5 gap [islandTop_base, tvBase) is a GENUINE live island iff the module
-// EXECUTES CODE there (PC lands in it). Measured cleanly: RD executes a contiguous island run at
-// a5_mod+[0x46A,0x51E] (+0x1E2E,+0x37FE); Art Critic and Bad Dog! execute NOTHING in the gap (their
-// above-a5 near-A5 use is pure de-alias-band DATA, never code). So "band must not overlap a slot the module
-// executes" separates RD (needs its band OUT of the gap) from AC/Bad Dog! (bands stay in the gap) with ZERO
-// module names. This refutes BOTH the write-footprint model (RD writes nothing above-a5) and the raw-code
-// NEARSCAN (RD's island is LIBRARY-address-taken, invisible to a module-code scan; and NEARSCAN's dead-site
-// over-approximation evicts Bad Dog!). Cheap: one PC range-test per instruction. Dump -> ADSFXOUT for the
-// allocator's 2-pass islandTop. Placement-robust: RD jumps into its island region even when a band clobbers
-// it, so the probe may run in ANY fixed placement (verified: same executed run animating and blank).
+// EXECUTES CODE there (PC lands in it). RD executes a contiguous island run at a5_mod+[0x46A,0x51E]
+// (+0x1E2E,+0x37FE); Art Critic and Bad Dog! execute nothing in the gap (their above-a5 near-A5 use
+// is pure de-alias-band DATA, never code). "Band must not overlap a slot the module executes"
+// therefore separates RD (band must stay OUT of the gap) from AC/Bad Dog! (bands stay in the gap)
+// with no module names. Cheap: one PC range-test per instruction. Dump -> ADSFXOUT for the
+// allocator's 2-pass islandTop. Placement-robust: RD jumps into its island region even when a band
+// clobbers it, so the probe may run in any fixed placement.
 static bool     g_sfx=false;
 static uint32_t g_sfx_a5=0, g_sfx_lo=0, g_sfx_hi=0;
 static std::set<int32_t> g_sfxSlots;      // a5_mod-relative slots where module-world PC executed
@@ -241,7 +232,6 @@ static std::set<int32_t> g_sfxSlots;      // a5_mod-relative slots where module-
 // Counts how often each per-instruction hook duty actually FIRES, so the zero-hook design is driven by
 // measured fire rates rather than by assumption. Zero production cost: every increment sits behind a
 // const bool captured at install time.
-// addm 804: the bitfield_emu / extb_emu / subx_addx_emu duties are gone with the shims that fed them.
 enum PfDuty { PFD_INSTR=0, PFD_SFX, PFD_SBCAP, PFD_BUGSEXT, PFD_BUGSDEPTH,
               PFD_SBREADER, PFD_DLLBUDGET, PFD_DDWALK, PFD_RETSENT, PFD_TMFIRE, PFD_TICK,
               PFD_NULLRTS, PFD_KEYPC, PFD_KEYFED, PFD_N };
@@ -253,33 +243,29 @@ static void pf_duty_dump(){ if(!getenv("ADPFDUTY")) return;
   for(int i=0;i<PFD_N;i++) fprintf(stderr,"[duty] %-16s %llu\n", g_duty_name[i],(unsigned long long)g_duty[i]); }
 
 // ==== [pf] EMULATOR OPCODE-CAPABILITY CHECK ====
-// addm 804: the host used to carry per-instruction shims for the M68K opcodes resource_dasm got
-// wrong, and this probe decided at startup whether to arm them. Every one of those defects is now fixed IN
-// THE EMULATOR (PRs #97 merged, #100 open; until #100 lands the local third_party clone carries the three
-// patches named in the error text below), so there is nothing left to arm and the shims are gone.
+// The M68K opcode defects this probe checks for are fixed in the emulator itself (PRs #97 merged and
+// #100 open; until #100 lands, the local third_party clone carries the patches named in the error
+// text below), so the host carries no per-instruction shims for them.
 //
-// The probe stays, and it is now a DIAGNOSTIC rather than a shim-armer: it executes each opcode once on a
-// throwaway emulator, and if the library we are linked against gets any of them wrong it prints ONE warning
-// naming the defect and its remedy -- and then RUNS ANYWAY. It does not gate the run. The defects here are
-// not crashes, they are wrong condition codes and wrong arithmetic that come out the far end as a
-// plausible-looking but wrong render (addm 720's Nirvana, addm 787's Clocks) -- which is exactly what the
-// warning is there to name, so that such a render is never mistaken for the module's real output.
+// The probe is a DIAGNOSTIC: it executes each opcode once on a throwaway emulator, and if the library
+// we are linked against gets any of them wrong it prints ONE warning naming the defect and its
+// remedy -- and then RUNS ANYWAY. It does not gate the run. The defects here are not crashes, they
+// are wrong condition codes and wrong arithmetic that come out the far end as a plausible-looking
+// but wrong render -- which is exactly what the warning is there to name, so that such a render is
+// never mistaken for the module's real output.
 // Cost is startup-only: five one-instruction runs, once, before any module code executes.
 static std::function<void()> g_pf_install_hook;   // [pf] installs the lean hook on demand (dynamic arming)
 static bool g_pf_hook_installed=false;            // is a hook currently attached?
 static bool g_pf_zero_hook=false;                 // this run started with NO hook at all
 static const uint16_t PF_SENT_TRAP=0xAFFE;        // host-owned A-line sentinel written at RET_SENT
-// [pf] Servicing the sentinel as a TRAP costs one on_cycle_start that the old in-hook pc-compare did not
-// (the hook threw BEFORE the fetch). Ticks are scheduled off that same cycle count, so without correction
-// the sentinel mechanism would silently shift every module's tick PHASE — measured: it moved Satori. Record
-// the debt and hand it back to the next tick interval, so changing HOW we detect the sentinel does not
-// change WHEN ticks land. This preserves the accepted baseline rather than papering over a shift.
+// [pf] Servicing the sentinel as a TRAP costs one on_cycle_start. Ticks are scheduled off that same
+// cycle count, so without correction the sentinel mechanism would silently shift every module's tick
+// PHASE. Record the debt and hand it back to the next tick interval, so how the sentinel is detected
+// does not change when ticks land.
 static uint64_t g_pf_cycle_debt=0;
 // [pf] Same mechanism for the dll# null-method shim. A null service slot makes `jsr [A0]` land at pc<0x10,
 // which is host-allocated, host-zeroed scratch that nothing else in the host reads or writes — so an A-line
-// trap there is host-owned, not a guest-code patch. This matters out of proportion to its 19 corpus-wide
-// fires: `dllA5 != 0` armed the hook for 19 of the 61 modules, and it was the ONLY thing keeping them from
-// running hook-free.
+// trap there is host-owned, not a guest-code patch.
 static const uint16_t PF_NULLRTS_TRAP=0xAFFD;
 static void pf_probe_emulator_opcodes(){
   const uint32_t B=0x00200000;
@@ -316,7 +302,7 @@ static void pf_probe_emulator_opcodes(){
   //    32-bit result and clears V and C; a build that only exchanges the halves leaves the stale Z, so the
   //    `beq` that every CodeWarrior 32-bit divide helper puts right after its `clr.w/swap.w` pair branches
   //    the wrong way. Probed separately from the other three because those are already fixed upstream and
-  //    this one is not — coupling them would needlessly re-arm three shims the emulator now carries.
+  //    this one is not, so an upstream fix can retire this arm alone.
   const uint16_t w4[]={0x4840};
   bool ok4=step([](M68KEmulator& e){ auto&r=e.registers(); r.d[0].u=0x000000FE; r.sr.u=0x04 /*Z*/; }, w4,1,
                 [](M68KEmulator& e){ auto&r=e.registers(); return r.d[0].u==0x00FE0000u && (r.sr.u&0x04)==0; });
@@ -325,7 +311,7 @@ static void pf_probe_emulator_opcodes(){
   //    which sign_extends the 32-bit An down to its low word, so every 64K-aligned address compares EQUAL
   //    to zero. That turns LIB510's `operator new` null-check (`cmpa.w A0,#0 / bne` at 0x0100442C) into a
   //    false "allocation failed" -> Throw(0x101) -> the module builds nothing. Probed separately from the
-  //    other four for the same reason ok4 is: so an upstream fix retires this shim alone.
+  //    other four for the same reason ok4 is: so an upstream fix can retire this arm alone.
   const uint16_t w5[]={0xB0FC,0x0000};
   bool ok5=step([](M68KEmulator& e){ auto&r=e.registers(); r.a[0]=0x000A0000; r.sr.u=0; }, w5,2,
                 [](M68KEmulator& e){ return (e.registers().sr.u&0x04)==0; });
@@ -358,7 +344,6 @@ static void pf_probe_emulator_opcodes(){
   fprintf(stderr,
     "\nUpdate third_party/resource_dasm past PRs #97 (merged) and #100, or check out the PR branch, or\n"
     "apply the local patches listed in tools/adhost/README.md, then rebuild libresource_file.a and relink.\n\n");
-  // addm 804: warn-and-run per the user's directive -- no exit, no gating.
 }
 static uint64_t g_pf_dll_base=0;          // [pf] emu.cycles() when the dll# step budget was armed
 static size_t g_sfx_lastN=(size_t)-1;     // [pf] island-set size at the previous frame (early-exit signal)
@@ -375,78 +360,60 @@ static void sfx_dump(){
 static bool g_bbtrace_on=false; static FILE* g_bbtrace_fp=nullptr; static uint32_t g_bbtrace_last=0; static long g_bbtrace_n=0;
 static const char* g_cm_phase="?";  // current call_module phase label (init/blank/draw/borstep...) — trace aid
 static bool g_bortitle=false;       // ADBORTITLE: log Boris title DrawString/DrawText + EraseRect ordering
-// *** addm 699 BANNER OVERLAY (task #14) *** — the authentic timed please-wait/info banner, replacing the
-// 68K do_blank_darken 2% proxy and (on PPC) the ADNOMSGBANNER suppression proxy. The engine's DoUserMessage
-// banners ("<Scene>:  <fact>") and module-own please-wait titles ("Boris is napping") were engine-composited
-// TIMED OVERLAYS: drawn OVER the animation, cleared after a timeout, NEVER written into a module's sprite
-// background (that overlay/timeout loop lives in the un-extracted faceplate app — addm 622). We reproduce it:
-// capture the banner at its draw site and SUPPRESS the draw into g_fb (so it never bakes into a sprite bg),
-// then composite it onto the PRESENTED frame for the first N frames and stop. Behavior class (draw->show->
-// clear) is certain; the exact timeout is not RE-able, so N is a documented default (ADBANNERSECS).
+// BANNER OVERLAY — the timed please-wait/info banner. The engine's DoUserMessage banners
+// ("<Scene>:  <fact>") and module-own please-wait titles ("Boris is napping") are engine-composited
+// TIMED OVERLAYS: drawn OVER the animation, cleared after a timeout, NEVER written into a module's
+// sprite background (that overlay/timeout loop lives in the un-extracted faceplate app). We
+// reproduce it: capture the banner at its draw site and SUPPRESS the draw into g_fb (so it never
+// bakes into a sprite bg), then composite it onto the PRESENTED frame for the first N frames and
+// stop. The behaviour class (draw->show->clear) is certain; the exact timeout is not RE-able, so N
+// is a documented default (ADBANNERSECS).
 static bool g_banner_have=false; static std::string g_banner_text; static int g_banner_x=0, g_banner_y=0; static uint8_t g_banner_fg=0;
-// *** addm 717b: THE CLIP REGION IS PER-PORT ***
+// THE CLIP REGION IS PER-PORT.
 // In QuickDraw the clip is not a machine-wide setting: every GrafPort/CGrafPort owns a clipRgn
-// (offset +0x1C) and ClipRect/SetClip edit THE CURRENT PORT'S copy. The host kept one global
-// (ToolboxCanvas::qd_clip_*), so a clip installed while a module was building an offscreen leaked
-// onto every later on-screen draw. Bogglins builds ten 196x196 cel-sheet ports and ClipRects each
-// one to its own rect; the last of those (-20,-20,176,173) then survived into the animation and
-// silently swallowed the module's on-screen Bogglin.DrawBlack erase (PaintRect at e.g.
-// [144,310,300,463], entirely outside x<173) — which is the un-erased explosion "smoke".
+// (offset +0x1C) and ClipRect/SetClip edit THE CURRENT PORT'S copy. A single global clip would let
+// a clip installed while a module builds an offscreen leak onto every later on-screen draw:
+// Bogglins builds ten 196x196 cel-sheet ports and ClipRects each one to its own rect, and the last
+// of those (-20,-20,176,173) would then swallow the module's on-screen erase.
 // Model it the way the port does: remember each port's clip, and reload it whenever the current
 // port changes. A port that has never been clipped gets QuickDraw's wide-open default; drawing is
-// still bounded by the pixmap extent, exactly as before. ADNOPORTCLIP=1 restores the single global.
+// still bounded by the pixmap extent. ADNOPORTCLIP=1 restores the single global.
 struct ADPortClip { int16_t t,l,b,r; uint32_t rgn; };
 static std::map<uint32_t,ADPortClip> g_portclip;
-// addm 742: fgColor/bkColor live in the GrafPort, not in the machine. The host kept ONE global
-// qd_fg/qd_bg pair, so a colour set while an offscreen port was current leaked into whatever port
-// was selected next — the exact class addm 717b removed for clipRgn. Draw Morph is the corpus'
-// proof: it draws its picture into an offscreen paper port (RGBForeColor per stroke), SetPorts to
-// the SCREEN port and erases the vacated area with PaintRgn, whose colour is then the last stroke
-// colour instead of the screen port's own. A port keeps the colours it was last given; a port that
-// has never been given one inherits the live pair at first sight (its GrafPort colour fields are
-// whatever the host left there), so nothing changes for the single-port modules. ADNOPORTCOLOR
-// reverts to the shared global pair.
-// addm 782: fg/bg carry a SECOND value alongside the resolved CLUT index — the exact RGBColor
-// last handed to RGBForeColor/RGBBackColor. Real QuickDraw keeps this in the CGrafPort (rgbFgColor/
-// rgbBkColor) and GetForeColor/GetBackColor answer it verbatim; the host's index (qd_fg/qd_bg) is a
-// lossy nearest-CLUT-match of it. Promoted from adhost68k_nr.cc's ADNVRESFCFIX (addm 776/776 supp):
-// 25/25 corpus users IDENT under the exact value, liveness proven on Sunburst (differs 30/464 calls,
-// module consumes it, still renders IDENT — every present consumer round-trips the value straight
-// back through RGBFore/BackColor, which quantises it back to the SAME index). THIS PROMOTION'S FIX
-// (not present in the gated nr experiment): the exact RGB is per-port state of EXACTLY the addm-742
-// kind (fgColor/bkColor live in the GrafPort) — the nr lane's g_fg_rgb/g_bg_rgb were bare globals,
-// not threaded through adpq_save/adpq_load, so a module alternating RGBForeColor across two ports
-// would leak port B's exact colour into a later GetForeColor on port A. Bundled into ADPortColor
-// alongside the index so both travel together on every port switch. Seeded to the QuickDraw defaults
+// fgColor/bkColor live in the GrafPort, not in the machine — the same rule as clipRgn above. With
+// one global qd_fg/qd_bg pair, a colour set while an offscreen port was current would leak into
+// whatever port was selected next: Draw Morph draws its picture into an offscreen paper port
+// (RGBForeColor per stroke), then SetPorts to the SCREEN port and erases the vacated area with
+// PaintRgn, which would take the last stroke colour instead of the screen port's own. A port keeps
+// the colours it was last given; a port that has never been given one inherits the live pair at
+// first sight (its GrafPort colour fields are whatever the host left there), so nothing changes
+// for single-port modules. ADNOPORTCOLOR reverts to the shared global pair.
+// fg/bg carry a SECOND value alongside the resolved CLUT index — the exact RGBColor last handed
+// to RGBForeColor/RGBBackColor. Real QuickDraw keeps this in the CGrafPort (rgbFgColor/rgbBkColor)
+// and GetForeColor/GetBackColor answer it verbatim; the index (qd_fg/qd_bg) is a lossy
+// nearest-CLUT-match of it. The exact RGB is per-port state of exactly the same kind as
+// fgColor/bkColor, so it is bundled into ADPortColor alongside the index and both travel together
+// on every port switch; otherwise a module alternating RGBForeColor across two ports would leak
+// port B's exact colour into a later GetForeColor on port A. Seeded to the QuickDraw defaults
 // (foreground black, background white) at canvas init, matching qd_fg/qd_bg's own defaults.
 struct ADPortColor { uint8_t fg, bg; uint16_t fg_rgb[3], bg_rgb[3]; };
 static std::map<uint32_t,ADPortColor> g_portcolor;
 static bool g_noportcolor=false;
 static bool g_noportclip=false;
-// addm 782: the CURRENT port's live exact fg/bg RGB — the counterpart of C.qd_fg/C.qd_bg for
+// The CURRENT port's live exact fg/bg RGB — the counterpart of C.qd_fg/C.qd_bg for
 // the lossless value. RGBForeColor/RGBBackColor write here; GetForeColor/GetBackColor read here by
 // default. adpq_save/adpq_load move this pair in and out of ADPortColor on every port switch, same
 // as the index. Seeded to the QuickDraw defaults (fg=black, bg=white).
 static uint16_t g_fg_rgb[3]={0,0,0}, g_bg_rgb[3]={0xFFFF,0xFFFF,0xFFFF};
 static bool g_no_fcexact=false;   // ADNOFCEXACT — revert GetForeColor/GetBackColor to CLUT[index]
-// (addm 740: the addm-736 "save-under erase suppression" (g_dmsu_*/ADNODMSU) is RETIRED. It existed to
-// keep Dominoes' single composited domino alive against the module's own whole-screen erase — but
-// "composite one domino then erase it" was never the module: it was the downstream shape of the missing
-// DeltaPoint trap (see the 0xA94F block), whose 8-byte stack leak derailed CalcNextPosition on the
-// SECOND domino. With DeltaPoint implemented the module lays a full board, and that whole-screen erase
-// is its legitimate start-of-game blank: suppressing it made each new game's tiles pile on top of the
-// finished one (measured at the cycle boundary: 95702 non-black pixels carried over, vs 120 with the
-// erase honoured). addm 736's own census found Dominoes was the ONLY module that ever reached the
-// guard, so removing it is byte-identical for the rest of the corpus (re-verified: full 62-entry A/B).
 // Stash the live clip against the port that owns it, and restore a port's own clip when it becomes
-// current. A port nobody has clipped gets ToolboxCanvas' own never-clipped state (0,0,32767,32767),
-// so every port that used to inherit no clip behaves exactly as before — only the LEAK is removed.
+// current. A port nobody has clipped gets ToolboxCanvas' own never-clipped state (0,0,32767,32767).
 static void adpc_save(adtoolbox::ToolboxCanvas& C){
   if(g_noportclip) return;
   uint32_t p = C.cur_port ? C.cur_port : C.g_port; if(!p) return;
   g_portclip[p] = ADPortClip{C.qd_clip_t, C.qd_clip_l, C.qd_clip_b, C.qd_clip_r, C.clip_rgn};
 }
-// Stash/restore the port's own fgColor/bkColor alongside its clip (see ADPortColor). addm 782:
+// Stash/restore the port's own fgColor/bkColor alongside its clip (see ADPortColor). It
 // carries the exact RGB pair (g_fg_rgb/g_bg_rgb) in lockstep with the index — same port, same rule.
 static void adpq_save(adtoolbox::ToolboxCanvas& C){
   if(g_noportcolor) return;
@@ -474,9 +441,9 @@ static void adpc_load(adtoolbox::ToolboxCanvas& C){
     C.qd_clip_b=it->second.b; C.qd_clip_r=it->second.r; C.clip_rgn=it->second.rgn;
   } else { C.qd_clip_t=0; C.qd_clip_l=0; C.qd_clip_b=32767; C.qd_clip_r=32767; C.clip_rgn=0; }
 }
-static bool g_gwtrack=false;        // addm 596/633: track QDExtensions Get/SetGWorld -> cur_port (now corpus-wide)
-static bool g_gwblank=false;        // addm 633: PerformBlank fb-clear scope — kept at old {Fish World,Slow Burn}
-// ADSBHITS (Slow Burn Gate-A diagnostic, addm 490, default-off): count entries at DisplayPop8 / UpdateScreen /
+static bool g_gwtrack=false;        // track QDExtensions Get/SetGWorld -> cur_port
+static bool g_gwblank=false;        // PerformBlank fb-clear scope — {Fish World, Slow Burn} only
+// ADSBHITS (Slow Burn diagnostic, default-off): count entries at DisplayPop8 / UpdateScreen /
 // the DoDrawFrame dirty-gate so we can see whether the board-rasterise path ever fires under drive/warmup.
 static long g_sb_displaypop=0, g_sb_updscr=0, g_sb_dirtygate=0, g_sb_dirtytrue=0, g_sb_drawfn=0;
 static uint32_t g_sb_ubobj=0;
@@ -484,17 +451,17 @@ static long g_sb_itc=0, g_sb_nzsrc=0; static uint32_t g_sb_minA3=0xFFFFFFFF, g_s
 // ADDOMTR (diagnostic, default-off): draw-phase basic-block trace for Dominoes. Set true around the
 // draw call; logs each module-range PC (run-length compressed) to g_domtr_fp.
 static bool g_domtr_on=false; static FILE* g_domtr_fp=nullptr; static uint32_t g_domtr_last=0; static long g_domtr_n=0;
-// addm 472 (Daredevil Dan walk-bound fix): set true when the ADDDDEALIAS de-alias path is active, so the
-// LIB510_Glue section-reset walk @0x0102BB6C can be host-bounded to the real number of valid sections.
+// Set true when the ADDDDEALIAS de-alias path is active, so the LIB510_Glue section-reset walk
+// @0x0102BB6C can be host-bounded to the real number of valid sections (Daredevil Dan).
 static bool g_ddWalkFix=false;
-// addm 492 (Daredevil Dan section-array HOST RECONSTRUCTION test). The de-aliased construction stores the
+// Daredevil Dan section-array host reconstruction. The de-aliased construction stores the
 // per-frame section container as begin/END-POINTER (obj+0x40/obj+0x44) over a run of 8-byte {sectionPtr,
 // regionHandle} nodes with QuickDraw NewRgn regions heap-interleaved BETWEEN them, but the reset walk
 // @0x0102BB54 wants a FLAT 4-byte-stride pointer array bounded by a COUNT. ADDDSECFIX rebuilds a clean flat
 // array of the REAL section pointers (scanned from the node list) in a host scratch buffer and repoints
 // obj+0x40->buffer, obj+0x44->count so the walk iterates only the valid sections. Default-off.
 static uint32_t g_ddSecArr=0; static int g_ddSecCount=0;
-// addm 478 (Daredevil Dan de-alias PLACEMENT-collision investigation — DOCUMENTED NEGATIVE RESULT). Under the
+// Daredevil Dan de-alias placement-collision steering (documented negative result). Under the
 // DD de-alias path LIB510 builds its per-frame section list as a run of interleaved NewPtr(8) section nodes +
 // NewRgn regions out of the SAME contiguous low heap, so the host allocator packs each fresh region RIGHT
 // BETWEEN two consecutive section nodes (node@3E4, rgn@3EC, node@3FC, rgn@404, ...) and RectRgn then writes a
@@ -505,15 +472,15 @@ static uint32_t g_ddSecArr=0; static int g_ddSecCount=0;
 static bool     g_ddRgnSteer=false;
 static uint32_t g_ddRgnNext=0, g_ddRgnEnd=0;
 static bool     g_ddLastWasSectionNode=false;   // set iff the previous heap alloc was an in-band section node
-// addm 377: two-A5 screen-BOUNDS gate (Bucket A / Art Critic). The library's screen-bounds reader
+// Two-A5 screen-BOUNDS gate (Art Critic). The library's screen-bounds reader
 // (GetScreenCanvas -> [A5+0x61C8] -> fn @~0x01021980) reads its screen size from the MacPlatform
 // singleton [A5-0x2324] + screen-region [A5-0x2328], both of which are NULL because the two-A5 path
-// skips the CRT static ctor that builds them (same class of defect as the addm-375 IXResourceFile
-// server record). With those null, the reader returns {0,0,0,0}, which flows into the screen
-// XCanvas's MacScreenPixels bounds (obj+0x20) and fails the module's `w>=513 && h>=385` precondition
-// -> Throw(0x801). Rather than forge the whole 28-ref MacPlatform object graph, intercept the reader
-// at its entry (resolved via the [A5+0x61C8] island so it is base-shift robust) and fill its two Rect
-// out-params directly from the host screen (fb_w x fb_h). g_sbReaderPC==0 unless twoA5 -> zero regression.
+// skips the CRT static ctor that builds them. With those null, the reader returns {0,0,0,0}, which
+// flows into the screen XCanvas's MacScreenPixels bounds (obj+0x20) and fails the module's
+// `w>=513 && h>=385` precondition -> Throw(0x801). Rather than forge the whole 28-ref MacPlatform
+// object graph, intercept the reader at its entry (resolved via the [A5+0x61C8] island so it is
+// base-shift robust) and fill its two Rect out-params directly from the host screen (fb_w x fb_h).
+// g_sbReaderPC==0 unless twoA5.
 static uint32_t g_sbReaderPC=0;   // entry PC of the two-A5 screen-bounds reader (0 = disabled)
 static int      g_sbW=0, g_sbH=0; // host screen dims to plumb into the module's screen canvas
 // LIB510 library CODE arena [lo,hi). Used to recognise when an OSDispatch sel 0x1D (TempNewHandle) is
@@ -537,67 +504,57 @@ static inline void census_note(uint64_t key, uint32_t pc, const std::string& lab
   if(!e.count){ e.firstPC=pc; e.label=label; e.cat=cat; }
   e.count++;
 }
-// ---- Stub census (ADSTUBCENSUS) — hardcoded-stub audit (addm 537) -------------
+// ---- Stub census (ADSTUBCENSUS) — hardcoded-stub audit ------------------------
 // Separate from the trap census above: this instruments every HANDLED trap/selector
 // whose handler returns a hardcoded constant / no-ops with only an arg-pop (where a
 // real Mac would compute a result). Goal: prove no in-scope module silently runs on a
-// fake value (the class of the addm-532 BackPat mis-trap and the addm-534 Get1NamedResource
-// NULL). ADSTUB(tag) records a hit into g_stubhits; ZERO overhead when the env is unset
-// (guarded on the cached g_stubcensus_on bool). Flushed periodically (so a SIGKILL'd soak
-// still leaves the last complete table in the log) and once at natural exit.
+// fake value. ADSTUB(tag) records a hit into g_stubhits; ZERO overhead when the env is
+// unset (guarded on the cached g_stubcensus_on bool). Flushed periodically (so a SIGKILL'd
+// soak still leaves the last complete table in the log) and once at natural exit.
 static bool g_stubcensus_on=false;                 // getenv("ADSTUBCENSUS")!=nullptr (cached once)
-// ---- addm 543 stub-implementation opt-OUT flags (cached once; per-item A/B) ----
+// ---- Stub-implementation opt-OUT flags (cached once; per-item A/B) ------------
 static bool g_nopen=false;        // ADNOPEN        — disable the whole pen model (revert to solid-fg strokes/fills)
 static bool g_no_l2g=false;       // ADNOL2G        — disable LocalToGlobal/GlobalToLocal origin offset
-static bool g_noportorg=false;    // ADNOPORTORG    — addm 749 revert: L2G/G2L use the sticky global origin
-// addm 708c: CLUT entry 0's colour as the module installed it, captured before the black-blank blackens
+static bool g_noportorg=false;    // ADNOPORTORG    — revert: L2G/G2L use the sticky global origin
+// CLUT entry 0's colour as the module installed it, captured before the black-blank blackens
 // it for display. Background resolution matches against this so the display edit cannot move a module's
 // backdrop off index 0 (see bg_to_index).
 static uint16_t g_clut0R=0,g_clut0G=0,g_clut0B=0; static bool g_clut0_saved=false;
 static bool g_setentries=false;   // ADSETENTRIES set OR default-on unless ADNOSETENTRIES — install SetEntries CLUT
-static int  g_sticky_black_idx=-1; // addm 553: CLUT index kept black across SetEntries (Satori blank-index)
+static int  g_sticky_black_idx=-1; // CLUT index kept black across SetEntries (Satori blank-index)
 static bool g_no_setentries=false;// ADNOSETENTRIES — force the old SetEntries no-op
-// addm 627: CLUT-animation color-search-proc idiom (Tunnel). When a module registers a custom Color
-// Manager search proc via AddSearch (AA3A), classic AD CLUT-animation savers install the "palette-
-// index-in-red" proc: RGBForeColor is called with the desired CLUT INDEX packed into the red channel
-// (Tunnel: R=2..36 = ring#, G/B constant) so each ring lands on a DISTINCT index of a gradient the
-// module SetEntries-rotates every frame -> the tunnel "flies". Our host stubs AddSearch and resolves
-// RGBForeColor by nearest-CLUT-match, collapsing all 35 near-identical blues to ONE index (243) -> the
-// rotating gradient (indices 2-101) is invisible and the tunnel looks static. While a search proc is
-// active, resolve fore/back colour as the red-channel-as-index instead of nearest-match. Mechanism-
-// scoped (only fires between AddSearch and DelSearch — no module that never calls AA3A is affected;
-// zero-regression by construction). ADNOSEARCHIDX opts out (restores nearest-match); ADSEARCHIDXLOG traces.
-// addm 720: THE SEARCH PROC IS REAL 68K CODE — RUN IT. AddSearch's argument is not a marker that some
-// "idiom" is in force; it is a `pascal Boolean (*)(RGBColor*, long* position)` that the Color Manager
-// invokes for every RGB->index resolution, and whose returned `position` IS the answer. The addm-627
-// index-in-red rule was a hand-written stand-in for ONE such proc (Tunnel's), which is why it needed a
-// name gate: a different producer packs its index differently and the rule silently returns the wrong
-// channel. Nirvana is that different producer — the AD 3.0 library's own IndexedForeColor__FUl splats
-// the low three bytes of a ULong index into (R,G,B) as BYTES, and its IndexedColorSearch reassembles
-// them ((R&FF)<<16 | (G&FF)<<8 | (B&FF)); with the red rule, index 1 arrives as RGB(0,0,1), decodes to
-// red=0, and every colour in the module resolves to nearest-match black. Running the module's own proc
-// needs no rule and no name: it answers correctly for every producer, present and future.
-// g_search_procs is the current device's search-proc list (AddSearch AA3A pushes, DelSearch AA4C pops);
-// AddComp/DelComp (AA3B/AA4D) register COMPLEMENT procs, which the Color Manager never consults for
-// colour matching, and stay no-ops. ADNOSEARCHPROC reverts to the addm-627 behaviour exactly.
+// Colour-search procs (AddSearch AA3A / DelSearch AA4C). A search proc is real 68K code:
+// `pascal Boolean (*)(RGBColor*, long* position)`, which the Color Manager invokes for every
+// RGB->index resolution and whose returned `position` IS the answer. The host runs it, so no
+// per-producer rule is needed: CLUT-animation savers pack the desired CLUT index into the
+// RGBColor however they like (Tunnel puts ring# 2..36 in red; the AD 3.0 library's
+// IndexedForeColor__FUl splats the low three bytes of a ULong index into R,G,B and its
+// IndexedColorSearch reassembles them as (R&FF)<<16 | (G&FF)<<8 | (B&FF)), and the proc decodes
+// its own packing. Without this, nearest-CLUT-match collapses a whole rotating gradient onto one
+// index and the animation looks static (Tunnel's 35 near-identical blues all land on index 243).
+// g_search_procs is the current device's search-proc list (AddSearch pushes, DelSearch pops);
+// AddComp/DelComp (AA3B/AA4D) register COMPLEMENT procs, which the Color Manager never consults
+// for colour matching, and stay no-ops.
+// ADNOSEARCHPROC falls back to a fixed "CLUT index packed in the red channel" rule instead of
+// running the proc; ADNOSEARCHIDX goes further and restores plain nearest-CLUT-match even while a
+// proc is registered. ADSEARCHIDXLOG traces.
 static std::vector<uint32_t> g_search_procs; // registered colour-search procs, most recent last
-static bool g_search_active=false; // legacy (ADNOSEARCHPROC): a proc is registered (AA3A..AA4C)
+static bool g_search_active=false; // ADNOSEARCHPROC fallback: a proc is registered (AA3A..AA4C)
 static bool g_no_searchidx=false;  // ADNOSEARCHIDX — revert to nearest-CLUT-match even while a proc is active
-static bool g_no_searchproc=false; // ADNOSEARCHPROC — do not run the registered proc; use the addm-627 rule
+static bool g_no_searchproc=false; // ADNOSEARCHPROC — do not run the registered proc; use the index-in-red rule
 static long g_searchproc_calls=0, g_searchproc_hits=0, g_searchproc_bail=0; // ADSEARCHIDXLOG counters
 static bool g_no_reserr=false;    // ADNORESERR     — force ResError==noErr (old behaviour)
-static bool g_nobool=false;       // ADNOBOOLFIX    — addm 590: revert the Boolean-result-slot audit (all
+static bool g_nobool=false;       // ADNOBOOLFIX    — revert the Boolean-result-slot audit (all
                                   //   Pascal FUNCTION Boolean traps serve truth in the HIGH byte + clear low)
 static bool g_no_relres=false;    // ADNORELRES     — disable ReleaseResource/DetachResource eviction
-// *** addm 747 *** ADTICKCYCLES: emulated instructions per Mac tick (1/60 s). The intra-frame Ticks
-// busy-wait breaker (addm 710/742) doubles as the guest clock, so this constant IS the emulated CPU's
-// speed. The historical 256 models a ~15 kHz CPU: guest time then advances in proportion to WORK DONE,
-// and a module that compares two guest timestamps across a heavy computation reads an absurd elapsed
-// time. A 1996-class 68030/68040 retired ~65,000-330,000 instructions per tick; 65536 is the
-// conservative (68030/25, After Dark Deluxe's stated minimum) end of that range. ADTICKCYCLES=256
-// restores the legacy clock exactly.
+// ADTICKCYCLES: emulated instructions per Mac tick (1/60 s). The intra-frame Ticks busy-wait
+// breaker doubles as the guest clock, so this constant IS the emulated CPU's speed. A 1996-class
+// 68030/68040 retired ~65,000-330,000 instructions per tick; 65536 is the conservative (68030/25,
+// After Dark Deluxe's stated minimum) end of that range. A much smaller value (256, a ~15 kHz CPU)
+// makes guest time advance in proportion to WORK DONE, so a module comparing two guest timestamps
+// across a heavy computation reads an absurd elapsed time. ADTICKCYCLES=256 restores that clock.
 static uint32_t g_tick_cycles=65536;
-// TEMPORARY addm-747 instrumentation (COPY-ONLY, adhost68k_sg.cc): ADCALLHIST call-site histograms.
+// ADCALLHIST call-site histograms (instrumentation).
 static std::map<uint32_t,std::map<std::tuple<uint32_t,uint16_t,uint16_t>,unsigned long long>> g_ch_hist;
 static std::map<uint32_t,std::set<uint32_t>> g_ch_objs;
 static void ch_dump(){ for(auto& pc : g_ch_hist){
@@ -626,8 +583,8 @@ static void sgp_dump(){ if(!g_sgp_ci) return;
   std::sort(v.rbegin(),v.rend());
   for(auto& e : v){ fprintf(stderr,"[sgp]   stream=%016llX x%llu\n",e.second,e.first); if(++n>=8) break; } }
 
-static long g_curframe=0;         // addm 561 diagnostic: current frame index (ADBORDUMP)
-static const char* g_audit_mod="?";  // addm 564 QD-audit: basename of the running module (ADQDAUDIT census)
+static long g_curframe=0;         // diagnostic: current frame index (ADBORDUMP)
+static const char* g_audit_mod="?";  // QD-audit: basename of the running module (ADQDAUDIT census)
 static bool g_no_fpenv=false;     // ADNOFPENV      — disable FP68K SANE env round-trip
 static bool g_no_rgncap=false;    // ADNORGNCAP     — disable generalized OpenRgn/CloseRgn bbox capture
 static bool g_no_hidepen=false;   // ADNOHIDEPEN    — disable HidePen/ShowPen pen-visibility counting
@@ -639,10 +596,10 @@ static bool g_no_gwctab=false;    // ADNOGWCTAB    — NewGWorld reverts to igno
 static bool g_no_gwportrect=false;// ADNOGWPORTRECT — NewGWorld reverts to writing portRect at the wrong +0x08
 static bool g_no_gwcliprgn=false; // ADNOGWCLIPRGN  — NewGWorld reverts to leaving clipRgn (+0x1C) NULL
 static bool g_no_gwvisrgn=false;  // ADNOGWVISRGN   — NewGWorld reverts to aliasing visRgn (+0x18) to the shared screen region
-static bool g_no_setclipbbox=false; // ADNOSETCLIPBBOX — addm 800: SetClip reverts to keeping the stale host clip rect (mask-only install)
+static bool g_no_setclipbbox=false; // ADNOSETCLIPBBOX — SetClip reverts to keeping the stale host clip rect (mask-only install)
 static bool g_no_cpcliprgn=false; // ADNOCPCLIPRGN  — OpenCPort reverts to leaving clipRgn (+0x1C) NULL
 static bool g_no_cpvisrgn=false;  // ADNOCPVISRGN   — OpenCPort reverts to aliasing visRgn (+0x18) to the shared screen region
-static bool g_pm_legacy=false;    // ADPMLEGACY    — restore the retired bring-up PixMap aliases (0x13/0x16/0x18/0x1C)
+static bool g_pm_legacy=false;    // ADPMLEGACY    — restore the bring-up PixMap aliases (0x13/0x16/0x18/0x1C)
                                   //                 on the screen pixmap (ad_toolbox setup()) AND its GWorld clones.
                                   //                 The alias overlaps pixelType@0x1E, so it must be all-or-nothing
                                   //                 across every builder: a clone inherits the write-order contract.
@@ -650,41 +607,34 @@ static bool g_qdextsel_log=false; // ADQDEXTSELLOG  — log QDExtensions selecto
 static std::map<std::string,uint64_t> g_stubhits;  // tag -> hit count
 static inline void adstub_note(const char* tag){ g_stubhits[tag]++; }
 
-// addm 669: region-mask CONSUMER census. A module is a "region-mask consumer" if
+// Region-mask CONSUMER census. A module is a "region-mask consumer" if
 // it drives the scan-mask machinery in any of the three consuming primitives:
 // region ALGEBRA (Diff/Sect/Union combine), shaped FillRgn/PaintRgn/EraseRgn, or
 // CopyBits maskRgn. Bumped at each site; printed at exit under ADRGNCOUNT so the
-// default-flip's affected set is enumerable per module.
+// affected set is enumerable per module.
 static long g_rgnc_combine=0, g_rgnc_fillmask=0, g_rgnc_cbmask=0;
-// region-exact pass: coverage counters for the newly-exact consumer/producer paths, so
+// Coverage counters for the exact consumer/producer paths, so
 // the corpus exercise of each is enumerable (printed under ADRGNCOUNT).
 static long g_rgnc_nonrect=0;   // combine of two mask-less rects that was genuinely NON-rect -> materialised
 static long g_rgnc_framemask=0; // FrameRgn that outlined a real (non-rect) mask
 static long g_rgnc_ptmask=0;    // PtInRgn that hit-tested a real mask
 static long g_rgnc_rirmask=0;   // RectInRgn that hit-tested a real mask
-static long g_rgnc_xor=0;       // XorRgn calls (now a real symmetric difference)
+static long g_rgnc_xor=0;       // XorRgn calls (a real symmetric difference)
 static long g_rgnc_polymask=0;  // recorded pen-polygon scan-converted to a kept non-rect mask
 
-// ---- addm 669: QuickDraw-CORRECT region-mask algebra (Diff/Sect/Union) -------
-// The addm-657 rgn_mask_combine (ad_toolbox.hh) treats a mask-LESS operand as a
-// CONSTANT — operand a as "full" (1), operand b as "empty" (0). That asymmetry
-// is wrong: in QuickDraw a region is ALWAYS a precise pixel set, and the host's
+// ---- QuickDraw-CORRECT region-mask algebra (Diff/Sect/Union) -----------------
+// In QuickDraw a region is ALWAYS a precise pixel set, and the host's
 // bounds-only representation of a region means "this region equals its bounding
 // rectangle" (a rectangular region; an EMPTY region is a zero-area bbox). So a
-// mask-less operand's per-pixel coverage is "inside its bbox rect", NOT a global
-// constant. Under the old rule:
-//   * SectRgn(hasMask, rectRgn-without-mask) -> b taken as EMPTY -> result EMPTY
-//     (Down the Drain: its per-element  work ∩ portClipRect  collapses to nothing
-//      -> FillRgn paints nothing -> screen static, decoded distinct 20->2).
-//   * DiffRgn(hasMask, rectRgn-without-mask) -> b taken as EMPTY -> A-∅=A, the
-//     subtracted rect is IGNORED (leaves too much).
-// The fix synthesises each mask-less operand from its region-data bbox, giving
-// real set algebra. In-place (dst==a or dst==b) is index-parallel safe (we read
-// operand[i] before writing dst[i] at the same i); std::map insert of a new dst
+// mask-less operand's per-pixel coverage is "inside its bbox rect", never a global
+// constant — treating it as one collapses SectRgn(hasMask, rectRgn-without-mask)
+// to EMPTY, and makes DiffRgn(hasMask, rectRgn-without-mask) ignore the subtracted
+// rect. Each mask-less operand is therefore synthesised from its region-data bbox,
+// giving real set algebra. In-place (dst==a or dst==b) is index-parallel safe (we
+// read operand[i] before writing dst[i] at the same i); std::map insert of a new dst
 // key does not invalidate references to the a/b vectors. masks_enabled off ->
-// no-op (matches rgn_mask() returning null). (legacy-cleanup addm 679: the ADDMALG=0 A/B revert to the
-// old asymmetric rgn_mask_combine is retired — dead by default in main.)
-// region-exact pass: exact rect⊕rect classifier. op 0=union 1=diff(a-b) 2=sect 3=xor.
+// no-op (matches rgn_mask() returning null).
+// Exact rect⊕rect classifier. op 0=union 1=diff(a-b) 2=sect 3=xor.
 // Rects are half-open [t,l,b,r). Fills *res + returns true IFF the combine of two
 // RECTANGLES is itself a single rectangle (so a mask-less bbox is EXACT). Returns false
 // for a genuinely non-rectangular result (disjoint union, interior/mid-edge diff-hole,
@@ -736,12 +686,12 @@ static void dm_rgn_combine(adtoolbox::ToolboxCanvas& C, uint32_t dst,
   RRect A=bbox(a), B=bbox(b);
   // Both operands are plain rects (mask-less == exact bbox rect). If the combine of two
   // rects is itself a rect, the caller's already-written bbox is exact -> stay mask-free
-  // (base behaviour, byte-identical). ONLY when the result is genuinely non-rectangular
+  // (byte-identical). ONLY when the result is genuinely non-rectangular
   // (disjoint union, interior/mid-edge diff-hole, overlapping xor) do we materialise an
-  // exact mask below — the one case base approximated by the bbox SUPERSET.
+  // exact mask below — the one case a bbox could only approximate as a SUPERSET.
   if(!ma && !mb){
-    // ADRGNXBBOX A/B lever: force the pre-pass behaviour (two mask-less rects always
-    // fall to the caller's bbox, even when the result is non-rectangular).
+    // ADRGNXBBOX A/B lever: two mask-less rects always fall to the caller's bbox,
+    // even when the result is non-rectangular.
     static const bool no_nonrect = getenv("ADRGNXBBOX")!=nullptr;
     RRect res; if(no_nonrect || rect_combine_rect(op,A,B,&res)) { C.rgn_masks.erase(dst); return; }
     g_rgnc_nonrect++;   // genuinely non-rect result of two mask-less rects -> exact mask below
@@ -770,13 +720,13 @@ static void dm_rgn_combine(adtoolbox::ToolboxCanvas& C, uint32_t dst,
 }
 #define ADSTUB(tag) do{ if(g_stubcensus_on) adstub_note(tag); }while(0)
 // Number of distinct ADSTUB() call sites compiled in (coverage). Kept in sync with the
-// grep count of `ADSTUB("` call sites (verified at build time; see addm 537).
+// grep count of `ADSTUB("` call sites (verified at build time).
 #define ADSTUB_TAG_COUNT 65
 static inline void adstub_flush(){
   for(auto& kv:g_stubhits)
     fprintf(stderr,"[stubhit] %s %llu\n", kv.first.c_str(), (unsigned long long)kv.second);
 }
-// ---- addm 574: live keyboard/mouse input from the app (stdin line protocol) -----
+// ---- Live keyboard/mouse input from the app (stdin line protocol) ---------------
 // The app forwards real input over the SAME stdin channel as SET/GO:
 //   KEY <keycode> <0|1>   Mac virtual keycode, down(1)/up(0)  -> KeyMap bit
 //   CAPS <0|1>            caps-lock STATE (macOS reports caps as a modifier state,
@@ -784,10 +734,10 @@ static inline void adstub_flush(){
 //   MOUSE <x> <y> <btn>   frame-local mouse coords + button 0/1
 // We keep a live 128-bit Mac KeyMap (flat 16-byte order: bit(kc) = km[kc>>3]&(1<<(kc&7)),
 // per Inside Macintosh GetKeys), caps state, and mouse state. EVERYTHING starts in the
-// exact "headless-zero" state the pre-574 code hardcoded (all keys up, caps off, mouse
-// (0,0) up) and is ONLY mutated by protocol lines that arrive from the app. So every
-// input-less run (census / file-dump / stream-without-input, and anything from a tty
-// where poll_set is disabled) is BYTE-IDENTICAL to the pre-574 host by construction.
+// exact "headless-zero" state (all keys up, caps off, mouse (0,0) up) and is ONLY
+// mutated by protocol lines that arrive from the app. So every input-less run (census /
+// file-dump / stream-without-input, and anything from a tty where poll_set is disabled)
+// behaves exactly as a headless host.
 static uint8_t g_km[16] = {0};        // live Mac KeyMap, flat byte order
 static bool    g_caps   = false;      // caps-lock state (alphaLock 0x0400)
 static int     g_msx=0, g_msy=0;      // mouse position (frame-local)
@@ -796,21 +746,20 @@ static bool    g_input_seen = false;  // any KEY/CAPS/MOUSE line ever received
 static const int kCapsKeycode = 57;   // Mac virtual keycode for Caps Lock
 static inline void ad_km_set(int kc,bool dn){ if(kc<0||kc>127) return;
   uint8_t m=(uint8_t)(1u<<(kc&7)); if(dn) g_km[kc>>3]|=m; else g_km[kc>>3]&=(uint8_t)~m; }
-// [RD keypump / addm 601] Rodger Dodger continuous-direction feed. The shared AD 4.0
+// [RD keypump] Rodger Dodger continuous-direction feed. The shared AD 4.0
 // library (CODE 141, LIB510_Util) UserInput class keeps a GLOBAL circular key-buffer in
 // the A5 world: buffer@A5-0x2B78 (4-byte KeyType slots), head@A5-0x2B7E, tail@A5-0x2B7C,
 // size@A5-0x2B7A, pending-flag@A5-0x2B80. The real AD shell called UserInput::AddKey(
 // KeyType) on each keyDown; RD's DoDrawFrame (MainMod) polls via UserInput::Do/GetLastKey/
 // KeyPressed and maps the buffered value with module KeyToMove (@0x75F6): KeyType
-// 0x26/0x68->dir1, 0x27/0x66->dir2, 0x28/0x62->dir3, 0x25/0x64->dir4. This host never ran
+// 0x26/0x68->dir1, 0x27/0x66->dir2, 0x28/0x62->dir3, 0x25/0x64->dir4. This host does not run
 // the shell's keyDown->AddKey pump (it lives in the un-extracted control panel), so the
-// buffer stayed empty and RD auto-played its demo AI. We reproduce AddKey from the host
-// each frame while a mapped direction key is held. (Refutes addm 574/598/599's "needs a
-// shell key-STATE pump / GetKeys": the reached consumer is the buffered AddKey path.)
+// buffer stays empty and RD auto-plays its demo AI. We reproduce AddKey from the host
+// each frame while a mapped direction key is held.
 static int g_rd_dir = 0;   // currently-held RD KeyType (0 = none)
 // Map a Mac virtual keycode -> RD KeyType (0 if not a movement key). Arrow cluster + WASD;
 // the four KeyType values are the ones KeyToMove recognises (verified by disasm). Which
-// value drives which screen direction is confirmed empirically (see LIB510_STATE addm 601).
+// value drives which screen direction is confirmed empirically.
 static int ad_rd_keytype(int kc){
   switch(kc){
     case 0x7E: case 0x0D: return 0x26; // Up arrow    / W
@@ -837,11 +786,10 @@ static bool ad_input_line(const char* s){
   return false;
 }
 
-// ---- addm 797: OPT-IN REAL HARDWARE CAPS-LOCK POLLING (ADREALCAPS=1) ------
-// The modules were already polling; the app just never told the host what caps was doing.
+// ---- Opt-in real hardware caps-lock polling (ADREALCAPS=1) ----------------
 // The consumer is PortableModule::GetCapsLockChange() in the AD 4.0 shared library, which
-// reads the low-memory Mac KeyMap (68K: 0x174 directly; PPC: via the TOC pointer, addm 612)
-// and edge-detects it. So the host only has to keep g_caps truthful and everything already
+// reads the low-memory Mac KeyMap (68K: 0x174 directly; PPC: via the TOC pointer) and
+// edge-detects it, so the host only has to keep g_caps truthful and everything already
 // wired downstream fires. Instead of routing the state app->stdin, the host can simply ask
 // the OS what caps is doing right now — which also works when there is no app at all.
 //
@@ -886,14 +834,14 @@ static void ad_poll_real_caps(){
   if(getenv("ADINPUTLOG")) fprintf(stderr,"[input] REALCAPS=%d\n", rc?1:0);
 }
 
-// ---- Meadow _Pack12 (0xAC2E) selector 8 (addm 428) --------------------------
+// ---- Meadow _Pack12 (0xAC2E) selector 8 --------------------------------------
 // Meadow's ONLY _Pack12 selector, called sel8(srcPtr,dstPtr) on two 6-byte structs
 // from 3 sites. RE'd as the INVERSE of the module's HSV->RGB sibling @0x10319C (which
 // has the classic 6-sector hue wheel, sector=0x2AAA=0xFFFF/6): sel8 = RGB->HSV. The
 // init palette pass converts a 6x6x6 RGB cube; the per-frame loop perturbs H via
 // URANDOM then runs 0x10319C(HSV->RGB). Result in D0 (unused by callers). NOTE: this
 // clears the runaway + div0 and completes init+draw, but Meadow does NOT strict-animate
-// (a deeper blade-generation gate leaves the display-count 0 — see addm 428).
+// (a deeper blade-generation gate leaves the display-count 0).
 static uint32_t meadow_pack12_sel8(std::shared_ptr<MemoryContext> mem, uint32_t p1, uint32_t p2){
   // Stack: [sp+6]=arg2 (=dst, consumed by the HSV->RGB sibling 0x10319C) -> p1;
   //        [sp+0xA]=arg1 (=src RGBColor loaded from the palette array)      -> p2.
@@ -930,7 +878,7 @@ static uint32_t meadow_pack12_sel8(std::shared_ptr<MemoryContext> mem, uint32_t 
       src,r,g,b,dst,H,S,V);
   return 0;
 }
-// ---- Color Picker Package _Pack12 (0xA82E) color conversions (addm 545) ------
+// ---- Color Picker Package _Pack12 (0xA82E) color conversions -----------------
 // The classic Mac OS Color Picker Package (Inside Macintosh VI, "Color Picker Manager"),
 // dispatched by _Pack12 with a routine-selector word on the stack. Photon calls selector 5 =
 // HSL2RGB in a per-particle palette loop (RE'd @00100FF6, see the 0xA82E dispatch arm). The low-
@@ -1044,17 +992,17 @@ static void ext80_write(const shared_ptr<MemoryContext>& mem, uint32_t p, double
 // Read/write a SANE operand in the format the FP68K opword selects (bits 11-13):
 // FFEXT=0x0000(ext80), FFDBL=0x0800(double), FFSGL=0x1000(single), FFINT=0x2000(int16),
 // FFLNG=0x2800(int32), FFCOMP=0x3000(int64). Only the arithmetic DEST is always extended.
-// addm 543 item 8: SANE environment word (FP68K FOSETENV/FOGETENV/FOPROCENTRY/FOPROCEXIT round-trip).
+// SANE environment word (FP68K FOSETENV/FOGETENV/FOPROCENTRY/FOPROCEXIT round-trip).
 // Bits 13-14 = rounding direction (0 toNearest, 1 upward, 2 downward, 3 towardZero — MPW Sane.h
-// kRoundTowardZero = 0x6000). Zot! SETS 0x6000 (toward-zero) 57x/frame-window (measured), so the
-// integer conversions and FORTI honor the mode. Default env keeps the exact legacy llround path.
+// kRoundTowardZero = 0x6000). Zot! sets 0x6000 (toward-zero) 57x per frame window, so the
+// integer conversions and FORTI honour the mode. The default env keeps the llround path.
 static uint16_t g_sane_env=0;
 static long long sane_round(double v){
   switch((g_sane_env>>13)&3){
     case 1: return (long long)ceil(v);      // upward
     case 2: return (long long)floor(v);     // downward
     case 3: return (long long)trunc(v);     // toward zero (Zot!)
-    default: return llround(v);             // to-nearest (legacy exact behaviour)
+    default: return llround(v);             // to-nearest
   }
 }
 static double fp_read(const shared_ptr<MemoryContext>& mem, uint32_t p, uint16_t fmt){
@@ -1079,16 +1027,14 @@ static void fp_write(const shared_ptr<MemoryContext>& mem, uint32_t p, uint16_t 
   }
 }
 
-// ---- indexed pixel access at a sub-byte PixMap depth (addm 758) ------------
-// The CopyBits/CopyMask blit loops knew exactly two source shapes: the old-style 1-bit BitMap
-// (addm 707/715) and an 8bpp chunky PixMap. Colour QuickDraw's other INDEXED depths, 2 and 4 bits
-// per pixel, pack several pixels per byte, leftmost pixel in the HIGH bits — the same packing the
-// PICT decoder has always read correctly (draw_pict's pixelSize 2/4 arms). No corpus module makes
-// one today (all 271 censused NewGWorld calls ask for depth 8, addm 751), but NewGWorld now honours
-// a requested depth and allocates a buffer sized for it, so a 2- or 4-bit GWorld is REACHABLE and
-// would otherwise be read one byte per pixel — consuming four or eight times the row it has, i.e.
-// the same shear addm 707 diagnosed for the 1-bit case, silently. `col` is the pixel index within
-// the row (already bounds-relative); `rowbase` is the address of that row's first byte.
+// ---- indexed pixel access at a sub-byte PixMap depth ------------------------
+// Colour QuickDraw's INDEXED depths of 2 and 4 bits per pixel pack several pixels per byte,
+// leftmost pixel in the HIGH bits — the same packing the PICT decoder reads (draw_pict's
+// pixelSize 2/4 arms). No corpus module makes one today (all 271 censused NewGWorld calls ask
+// for depth 8), but NewGWorld honours a requested depth and allocates a buffer sized for it, so
+// a 2- or 4-bit GWorld is REACHABLE and would otherwise be read one byte per pixel — consuming
+// four or eight times the row it has, silently shearing the image. `col` is the pixel index
+// within the row (already bounds-relative); `rowbase` is the address of that row's first byte.
 static inline uint8_t pm_get_idx(const std::shared_ptr<ResourceDASM::MemoryContext>& mem,
                                  uint32_t rowbase, int col, int depth){
   if(depth==8) return mem->read_u8(rowbase+(uint32_t)col);
@@ -1170,10 +1116,9 @@ static void draw_pict(std::shared_ptr<ResourceDASM::MemoryContext> mem, adtoolbo
     // frame/paint/erase/invert/fillRect (0x30-0x34) each carry an 8-byte rect operand; the
     // "same" variants (0x38-0x3C) reuse the last rect and carry none. Rebound's coloured (plastic)
     // ball sprites emit a paintRect (0x31) between the ClipRgn and the PackBitsRect that holds the
-    // real 16x16 4-bit sprite; the old `else break` stopped on it, so the sprite never decoded and
-    // the ball composited blank (its metal sprites lack this op and decoded fine). Skip the operand
-    // and continue to the PackBitsRect — the masked sprite's pixels live there, and painting the
-    // background rect would only fill the transparent corners the round CopyMask clips away.
+    // real 16x16 4-bit sprite. Skip the operand and continue to the PackBitsRect — the masked
+    // sprite's pixels live there, and painting the background rect would only fill the
+    // transparent corners the round CopyMask clips away.
     else if(op>=0x0030 && op<=0x0034){ i+=8; }       // frame/paint/erase/invert/fillRect: 8-byte rect
     else if(op>=0x0038 && op<=0x003C){ }             // same-rect variants: no operand
     else if(op==0x0098||op==0x0099||op==0x009A||op==0x0090||op==0x0091){
@@ -1202,14 +1147,12 @@ static void draw_pict(std::shared_ptr<ResourceDASM::MemoryContext> mem, adtoolbo
       uint16_t mode=u16(q); q+=2; (void)mode;(void)ddT;(void)ddL;(void)bT;(void)bL;
       // BitsRgn/PackBitsRgn (0x0091/0x0099) carry a MASK REGION after the dstRect+mode.
       // Real QuickDraw clips the blit to that region — only pixels INSIDE the region are
-      // written. The host previously skipped the region entirely (q+=rs) and painted the
-      // WHOLE source rect, so a sprite whose art sits on a WHITE rectangular "paper" cell
-      // (e.g. Mowin' Man's mower, drawn as a shaped region over an opaque-white 111x99 cell;
-      // also Meadow's flowers, Dominoes' tiles) showed the white matte as a solid box.
+      // written. Ignoring it and painting the WHOLE source rect shows the white rectangular
+      // "paper" cell a shaped sprite sits on as a solid box (Mowin' Man's mower is drawn as a
+      // shaped region over an opaque-white 111x99 cell; also Meadow's flowers, Dominoes' tiles).
       // Decode the region into a per-pixel mask (source-pixmap coords) and skip out-of-region
       // pixels below. Only NON-rectangular regions (rgnSize>10) mask anything; a bare-bbox
-      // region (rgnSize==10, the common full-cover case) keeps the paint-all path =>
-      // byte-identical for those blits. addm 584.
+      // region (rgnSize==10, the common full-cover case) keeps the paint-all path.
       std::vector<uint8_t> rmask;   // empty => no masking (paint all, as before)
       if(hasRgn){ uint16_t rs=u16(q); uint32_t rgnStart=q;
         if(getenv("ADPICTRGN")) fprintf(stderr,"      [pict RGN op=%04X mode=%d rgnSize=%u rgnBBox=%d,%d,%d,%d]\n",
@@ -1236,13 +1179,13 @@ static void draw_pict(std::shared_ptr<ResourceDASM::MemoryContext> mem, adtoolbo
       int baseX = dstL + (oL - fL), baseY = dstT + (oT - fT);
       // A 1-bit-deep DESTINATION pixmap (a mask GWorld a module builds, then hands to CopyMask which
       // reads it back as PACKED 1-bit) must receive packed bits, not qd_px's one-byte-per-pixel writes.
-      // This is the DrawPicture twin of the addm-725 1-bit-destination raster the trap handlers already
-      // grew (FillRgn/FrameRect/Line/CopyMask): draw_pict writes through qd_px, which the addm-725 lambdas
-      // never reached, so a module that builds its mask with DrawPicture (Rebound's small coloured balls
-      // draw a round shape this way) had qd_px overflow the 4-byte rows -> the mask read all-clear and
-      // CopyMask copied nothing. Same structural, name-free discriminator + ADNO1BITDST opt-out as 725:
-      // a row too small for one byte per pixel but big enough for one bit per pixel is 1-bit; the screen
-      // (base==g_fb) and every 8bpp pixmap (rb>=w) are excluded so those decodes stay byte-identical.
+      // This is the DrawPicture twin of the 1-bit-destination raster the trap handlers carry
+      // (FillRgn/FrameRect/Line/CopyMask): a module that builds its mask with DrawPicture (Rebound's
+      // small coloured balls draw a round shape this way) would otherwise have qd_px overflow the
+      // 4-byte rows, so the mask reads all-clear and CopyMask copies nothing. Structural, name-free
+      // discriminator with an ADNO1BITDST opt-out: a row too small for one byte per pixel but big
+      // enough for one bit per pixel is 1-bit; the screen (base==g_fb) and every 8bpp pixmap (rb>=w)
+      // are excluded.
       bool dst1bit=false;
       if(!getenv("ADNO1BITDST")){ uint32_t db;int drb,dbt2,dbl2,dbb2,dbr2; if(C.cur_pm(db,drb,dbt2,dbl2,dbb2,dbr2)){
           int w=dbr2-dbl2; dst1bit = (db!=C.g_fb && w>0 && drb>0 && drb<w && drb*8>=w); } }
@@ -1255,14 +1198,11 @@ static void draw_pict(std::shared_ptr<ResourceDASM::MemoryContext> mem, adtoolbo
         uint32_t a=base+(uint32_t)py*rb2+(px>>3); uint8_t mbit=(uint8_t)(0x80>>(px&7));
         uint8_t v=mem->read_u8(a); v = bit? (uint8_t)(v|mbit) : (uint8_t)(v&~mbit); mem->write_u8(a,v); };
       std::vector<uint8_t> line(rowBytes>0?rowBytes:1,0);
-      // addm 726: PackBitsRect (op 0x0098/0x0099/0x009A) stores its scanlines PackBits-compressed iff
+      // PackBitsRect (op 0x0098/0x0099/0x009A) stores its scanlines PackBits-compressed iff
       // rowBytes >= 8 (Inside Macintosh: Imaging With QuickDraw — "if rowBytes < 8 the data is unpacked").
-      // The host previously used `> 8`, an off-by-one that treated the rowBytes==8 case as UNCOMPRESSED and
-      // read the packed bytes raw -> garbled scanlines. rowBytes==8 is exactly a 16px-wide 4-bit sprite
-      // (Rebound's metal balls are 16x16 4bpp = 8 B/row) or an 8px-wide 8-bit sprite, so those rendered as
-      // "square garbage" (a 16x16 cel box striped with mis-read pixels) instead of the real shaded sprite.
-      // Corpus census (46 modules): only Rebound changes (metal balls now render as round shaded spheres);
-      // every other PICT consumer is byte-identical. ADPACKGT8 restores the old `>8` boundary for A/B.
+      // rowBytes==8 is exactly a 16px-wide 4-bit sprite (Rebound's metal balls are 16x16 4bpp = 8 B/row)
+      // or an 8px-wide 8-bit sprite, so a `> 8` boundary would read those packed bytes raw and garble
+      // the scanlines. ADPACKGT8 restores the `>8` boundary for A/B.
       bool packBoundGt8 = getenv("ADPACKGT8")!=nullptr;
       for(int row=0; row<height; row++){
         if(packed && (packBoundGt8 ? rowBytes>8 : rowBytes>=8)){
@@ -1275,7 +1215,7 @@ static void draw_pict(std::shared_ptr<ResourceDASM::MemoryContext> mem, adtoolbo
           }
         } else { for(int k=0;k<rowBytes;k++) line[k]=u8(q++); }
         for(int col=0; col<width; col++){
-          if(!rmask.empty() && !rmask[(size_t)row*width+col]) continue;  // addm 584: outside mask region -> leave dst (transparency)
+          if(!rmask.empty() && !rmask[(size_t)row*width+col]) continue;  // outside mask region -> leave dst (transparency)
           uint8_t hostIdx;
           if(direct && pixelSize>=16){                 // 16bpp: 5-5-5 RGB
             uint32_t o=(uint32_t)col*2; if(o+1>=(uint32_t)rowBytes) break;
@@ -1324,7 +1264,7 @@ static void draw_pict(std::shared_ptr<ResourceDASM::MemoryContext> mem, adtoolbo
 //  * JUMP = fragment export table: 8-byte entries { u16 codeOffset, 6x00 }.
 //  * NAME = parallel export names: {u16 recLen, u8 nameLen, char[] mangled,pad}.
 //  * SYMS (lib) / SYMT (module) = symbol reference tables (14-byte-ish records,
-//    index-keyed; exact field split still under RE -- see report).
+//    index-keyed; exact field split still under RE).
 //  * JOHN = 8 bytes { u32 codeSize, u32 a5DataSize(globals+BSS) }.
 //  * dll#  = module's named import list: u16 count, then count Pascal strings
 //    (e.g. AD3_Required1/2, AD3_Canvas1/2, AD3_Sprite, AD3_RLE, AD3_Resource,
@@ -1374,10 +1314,10 @@ struct AdLibFragment {
   uint32_t    johnCodeSize=0, johnA5Data=0;
   std::vector<AdRelocRec> creRecs, dreRecs;
   std::vector<AdExport>   exports;      // parsed SYMS(lib)/SYMT(module)
-  std::vector<std::string> symNames;    // 4.0 mode: per-SYMS-record symbol name (via NAME pointer, addm 340)
+  std::vector<std::string> symNames;    // 4.0 mode: per-SYMS-record symbol name (via NAME pointer)
   std::vector<uint16_t>   jumpOff;      // JUMP codeOffsets (u16 per 8-byte entry)
   int         tvBase=-1;                // first TV slot index for this fragment
-  // ---- addm 719: this fragment's own near-model JUMP TABLE base, A5-relative ----
+  // ---- this fragment's own near-model JUMP TABLE base, A5-relative ----
   // The KAHL link format marks a reference to "my own jump-table slot k" with a reloc record
   // {kind=0xFFFF, addend=0xFFFFFFFF} whose stored value is 8k+2 (code side: the (d16,A5) displacement;
   // data side: the C++ vtable longword). The loader owns the base those slot numbers are counted from.
@@ -1396,12 +1336,12 @@ struct AdLib510 {
   uint32_t a5=0;                         // CurrentA5 (68K A5 register value)
   uint32_t tvBaseAddr=0;                 // g_a5 + 0x3800 : base of the TV island table
   uint32_t tvCount=0;                    // number of 8-byte TV slots
-  // ---- SECOND A5 world for large 4.0 modules (two-A5 model, addm 363b) -----
+  // ---- SECOND A5 world for large 4.0 modules (two-A5 model) ----------------
   // Large AD4.0 modules (moduleDbss>=0x8000) can't fit their 65KB DATA+BSS alongside the library
   // DATA in one shared A5's +-32KB s16 window. Give the MODULE its own A5 world (a5_mod): module
   // DATA/BSS below it + a copy of the TV island band above it, module code entered with A5=a5_mod,
   // module relocs re-based to a5_mod. GATED to nameMode(4.0) + large modules only -> AD3/classic
-  // (shared A5) untouched = zero-regression by construction.
+  // (shared A5) loads keep the single-A5 model.
   bool     twoA5=false;                  // two-A5 model active for this load
   uint32_t a5_mod=0;                     // module A5 world base
   uint32_t tvBaseAddrMod=0;              // module world's copy of the TV island band base
@@ -1418,7 +1358,7 @@ struct AdLib510 {
   // object pointer resolved to a TV code slot instead of a data global → null virtual dispatch).
   struct SymBind { uint8_t kind=0; /*0=none 1=code 2=data*/ uint16_t tv=0; AdLibFragment* frag=nullptr; uint16_t off=0; };
   std::vector<SymBind> symMap;           // CODE map (isCode exports), sized 0x1000
-  std::map<std::string,SymBind> nameExports;   // 4.0 mode: bind-by-name map (addm 340)
+  std::map<std::string,SymBind> nameExports;   // 4.0 mode: bind-by-name map
   bool nameMode=false;                          // true when the mounted library carries NAME resources
   std::vector<SymBind> symMapData;       // DATA map (data exports),   sized 0x1000
   AdLibFragment* byName(const char* n){
@@ -1436,7 +1376,7 @@ static std::vector<std::string> ad_parse_dll_imports(const std::string& s){
   return out;
 }
 
-// ---- Embedded AD 3.0 '+ODE' runtime loader (dll# unlock; see scratchpad/LIB510_STATE.md ITER-J) ----
+// ---- Embedded AD 3.0 '+ODE' runtime loader (dll# unlock) ----
 // The AD 4.0 engine app ("After Dark 4.0", ad9_engine/AD40_engine.rsrc) embeds a self-contained 68K
 // AD 3.0 runtime under '+'-prefixed resource types so the OS Segment Loader won't auto-load it. '+ODE'
 // = code (id0=jump table, ids 1,2,3,5,6,8=segs), '+ATA'=DATA, '+DRL'=DREL, '+ERO'=BSS. We load it into
@@ -1536,35 +1476,30 @@ static OdeRuntime load_ode_runtime(std::shared_ptr<MemoryContext> mem, const cha
   return R;
 }
 
-// ==== near-JT completion (SHIP): deterministic execution-island probe FORK ====
-// sfBand is the zero-name default for every twoA5 de-alias module. RD (and any future module whose band
-// would land on a live near-JT island) needs islandTop raised above the slots the module executes code in.
-// Those islands only fully materialise while the module ANIMATES (RD self-animates at 640x480; the
-// blank-placement partial probe is insufficient — proven), so we cannot see them at load time. Instead we
-// fork+exec a bounded child of ourselves that runs `ADSFBAND=0` (bands packed below-a5 → the clean gap is
-// EMPTY, so the module reaches its full near-JT-island execution without band interference) + `ADSFXPROBE`,
-// and dumps the executed-island slots to a temp file. The parent then loads with `ADSFXIN` pointed at that
-// file and the allocator raises islandTop above the probed islands. Mechanism-based (executed code = a live
-// near-JT island) + fully DETERMINISTIC (emulation is deterministic — the same module always yields the same
-// islands, independent of CPU load): NOT the declined render/motion symptom probe, NOT a pre-baked hash
-// cache. Recursion-safe: the child runs ADSFBAND=0 (its own sfBand is off → it never re-forks) + an
-// ADSFPROBED guard. Levers: ADSFNOPROBE (skip → base islandTop, RD would blank — A/B only), ADSFPROBESECS
-// (child animation budget, default 10), ADSFPROBEDIR (temp dir), ADSFPROBEVERBOSE (keep child stderr).
+// ==== near-JT completion: deterministic execution-island probe fork ====
+// sfBand is the default for every twoA5 de-alias module. A module whose band would land on a live near-JT
+// island needs islandTop raised above the slots that module executes code in. Those islands only fully
+// materialise while the module ANIMATES, so they are invisible at load time. Instead we fork+exec a bounded
+// child of ourselves running `ADSFBAND=0` (bands packed below-a5, so the clean gap is EMPTY and the module
+// reaches its full near-JT-island execution without band interference) plus `ADSFXPROBE`, which dumps the
+// executed-island slots to a temp file. The parent then loads with `ADSFXIN` pointed at that file and the
+// allocator raises islandTop above the probed islands. Executed code = a live near-JT island, and emulation
+// is deterministic, so the same module always yields the same island set independent of CPU load.
+// Recursion-safe: the child runs ADSFBAND=0 (its own sfBand is off, so it never re-forks) plus an
+// ADSFPROBED guard. Levers: ADSFNOPROBE (skip, leaving islandTop at its base value — A/B only),
+// ADSFPROBESECS (child animation budget), ADSFPROBEDIR (temp dir), ADSFPROBEVERBOSE (keep child stderr).
 static std::string g_sf_islandfile;                    // temp island file to unlink at exit
-static bool g_sf_from_cache=false;                     // [pf] the island path came from the memo cache (never unlink it)
+static bool g_sf_from_cache=false;                     // the island path came from the memo cache (never unlink it)
 static void sf_islandfile_cleanup(){ if(!g_sf_islandfile.empty()) unlink(g_sf_islandfile.c_str()); }
 
-// ==== [pf perf] MEMOISED ISLAND SET ====
-// The probe is a DETERMINISTIC MEASUREMENT of this module under this host: emulation is deterministic, so
-// the same (module bytes, host binary, execution-affecting env) always yields the same island set — addm
-// 695 relied on exactly that property to justify the probe as a mechanism rather than a heuristic. The
-// measurement is therefore memoisable. This is NOT a name gate and NOT a pre-baked answer shipped with the
-// host: nothing is keyed on a module's identity or title, the cache starts empty, every entry is written by
-// a real probe run on this machine, and any change to the module bytes, the host binary or the relevant env
-// misses the key and re-measures. It only removes the cost of asking the same question twice.
-// The app relaunches modules constantly (cycling, settings changes, preview panes), so after the first
-// launch of a module this takes the probe's whole wall-clock cost to zero.
-// Levers: ADSFNOCACHE=1 (never read or write), ADSFCACHEDIR (location).
+// ==== memoised island set ====
+// The probe is a deterministic measurement of this module under this host: emulation is deterministic, so
+// the same (module bytes, host binary, execution-affecting env) always yields the same island set, and the
+// measurement is therefore memoisable. Nothing is keyed on a module's identity or title: the cache starts
+// empty, every entry is written by a real probe run on this machine, and any change to the module bytes,
+// the host binary or the relevant env misses the key and re-measures. The app relaunches modules constantly
+// (cycling, settings changes, preview panes), so after the first launch of a module the probe's wall-clock
+// cost drops to zero. Levers: ADSFNOCACHE=1 (never read or write), ADSFCACHEDIR (location).
 static uint64_t pf_fnv_file(const char* path){          // FNV-1a over the file's bytes; 0 = unreadable
   FILE* f=fopen(path,"rb"); if(!f) return 0;
   uint64_t h=1469598103934665603ULL; unsigned char buf[65536]; size_t n;
@@ -1579,106 +1514,99 @@ static std::string pf_island_cache_path(const char* modpath, const char* selfpat
   if(!hs) return "";                                        // cannot identify the host build -> no caching
   // Every env var that can steer which code the module executes must be part of the key, or a cached set
   // could be replayed into a run it was not measured for.
-  // addm 719: ADNOJTBASE belongs here for exactly the reason stated above — it steers the near-model
-  // jump-table layout, so every island ADDRESS the probe records differs between the two settings. Without
-  // it in the key, an island set measured under the authentic layout is replayed into a reverted run, which
-  // raises islandTop to the wrong place and blanks Rodger Dodger (measured: ADNOJTBASE gives d=1 on a warm
-  // cache and the correct d=15 with ADSFNOCACHE=1). That made the revert lever look unfaithful when it is not.
+  // ADNOJTBASE steers the near-model jump-table layout, so every island ADDRESS the probe records differs
+  // between the two settings; without it in the key an island set measured under the authentic layout would
+  // be replayed into a reverted run and raise islandTop to the wrong place.
   static const char* KEYENV[] = { "ADSCREENW","ADSCREENH","ADLINKMODULE","ADDLLMAXI","ADSECSRATE",
                                   "ADTICKRATE","ADCTRL","ADCVSET","ADCVDEFAULT","ADSFBAND","ADSFXBIAS",
                                   "ADNOJTBASE",
-                                  // addm 720: ADNOSEARCHPROC decides whether the module's registered colour
-                                  // -search proc is EXECUTED at all, so the two settings run different code
-                                  // (and can resolve different colours, hence different draws). Same rule.
+                                  // ADNOSEARCHPROC decides whether the module's registered colour-search
+                                  // proc is EXECUTED at all, so the two settings run different code (and
+                                  // can resolve different colours, hence different draws).
                                   "ADNOSEARCHPROC",
-                                  // addm 749: ADNOPORTORG changes the rects LocalToGlobal hands back to
-                                  // the module, so the two settings execute different drawing code.
+                                  // ADNOPORTORG changes the rects LocalToGlobal hands back to the
+                                  // module, so the two settings execute different drawing code.
                                   "ADNOPORTORG",
-                                  // addm 751: both NewGWorld reverts change what a module READS out of its
-                                  // own offscreen pixmap (pixelSize@0x20, pmTable@0x2A), and this library
-                                  // picks its pixel accessor from pixelSize and its colour arithmetic from
-                                  // the table — different settings can run different code. Same rule.
+                                  // Both NewGWorld reverts change what a module READS out of its own
+                                  // offscreen pixmap (pixelSize@0x20, pmTable@0x2A), and this library picks
+                                  // its pixel accessor from pixelSize and its colour arithmetic from the
+                                  // table — different settings can run different code.
                                   "ADNOGWDEPTH","ADNOGWCTAB","ADNOGWPORTRECT",
-                                  // addm 790: the revert decides whether a GWorld's clipRgn is a
-                                  // real region handle or NULL, and the library READS that field
+                                  // ADNOGWCLIPRGN decides whether a GWorld's clipRgn is a real
+                                  // region handle or NULL, and the library READS that field
                                   // (MacCanvas::SetPenOrigin) before handing it to OffsetRgn.
                                   "ADNOGWCLIPRGN",
-                                  // addm 790: the revert decides whether every GWorld's visRgn is
-                                  // its own region or the ONE shared screen record, and modules RectRgn
-                                  // the handle they read there — different data, therefore different code.
+                                  // ADNOGWVISRGN decides whether every GWorld's visRgn is its own
+                                  // region or the ONE shared screen record, and modules RectRgn the
+                                  // handle they read there — different data, therefore different code.
                                   "ADNOGWVISRGN",
-                                  // addm 800: whether SetClip replaces the clip RECT changes which
-                                  // pixels every later draw can touch — different code paths. Same rule.
+                                  // Whether SetClip replaces the clip RECT changes which pixels
+                                  // every later draw can touch — different code paths.
                                   "ADNOSETCLIPBBOX",
-                                  // addm 799: the same argument one arm over. Both reverts
-                                  // decide whether an OpenCPort port's clipRgn is a real handle or
-                                  // NULL, and whether its visRgn is its own record or the ONE shared
-                                  // screen record that 12 modules RectRgn. Guest code reads BOTH
-                                  // fields and hands them to region traps, so the settings walk
-                                  // different data and therefore execute different code. Same rule.
+                                  // Both reverts decide whether an OpenCPort port's clipRgn is a
+                                  // real handle or NULL, and whether its visRgn is its own record
+                                  // or the ONE shared screen record that 12 modules RectRgn. Guest
+                                  // code reads BOTH fields and hands them to region traps, so the
+                                  // settings walk different data and execute different code.
                                   "ADNOCPCLIPRGN",
                                   "ADNOCPVISRGN",
-                                  // addm 799: the screen port's clipRgn is built in the
-                                  // toolbox header, and its revert changes the same guest-read field
-                                  // for the one port every module starts out drawing into. Same rule.
+                                  // The screen port's clipRgn is built in the toolbox header, and
+                                  // this revert changes the same guest-read field for the one port
+                                  // every module starts out drawing into.
                                   "ADNOSCRCLIPRGN",
-                                  // addm 756: ADNODRELSELF decides whether a module's own static pointer
-                                  // tables hold real addresses or raw offsets, so the two settings walk
-                                  // different data and therefore execute different code. Same rule.
+                                  // ADNODRELSELF decides whether a module's own static pointer tables
+                                  // hold real addresses or raw offsets, so the two settings walk
+                                  // different data and therefore execute different code.
                                   "ADNODRELSELF",
-                                  // addm 797: ADREALCAPS decides whether the real hardware
-                                  // caps state reaches the KeyMap the library's GetCapsLockChange
-                                  // polls. A caps edge sends 13 of the 61 corpus modules down a
-                                  // different branch (Time Flies picks another clock face, Magic
-                                  // Turtle opens its edit window) — literally different code. Same rule.
+                                  // ADREALCAPS decides whether the real hardware caps state reaches
+                                  // the KeyMap the library's GetCapsLockChange polls. A caps edge
+                                  // sends 13 of the 61 corpus modules down a different branch (Time
+                                  // Flies picks another clock face, Magic Turtle opens its edit
+                                  // window) — different code.
                                   "ADREALCAPS",
-                                  // addm 754: both clut-merge reverts change the startup DEVICE
-                                  // table, and modules pick drawing indices out of it (the host's
-                                  // rgb_to_index, the library's own FigureColor nearest-match) —
-                                  // different settings can resolve different indices and run
-                                  // different code. Same rule.
-                                  // addm 754b: ADNOCLUTMERGE retired (its behaviour is the default
-                                  // now for every non-device table); ADCLUTPREMERGE is the revert.
+                                  // Both clut-merge reverts change the startup DEVICE table, and
+                                  // modules pick drawing indices out of it (the host's rgb_to_index,
+                                  // the library's own FigureColor nearest-match) — different settings
+                                  // can resolve different indices and run different code.
                                   "ADNOCLUTBASE1","ADCLUTPREMERGE",
-                                  // addm 769 (audit follow-up): ADFORCE0/ADKEEP0 change what CLUT[0]
-                                  // holds and therefore what rgb_to_index resolves — different settings
-                                  // can pick different drawing indices and run different code. They met
-                                  // this rule verbatim all along (pre-existing gap, flagged by lane C).
+                                  // ADFORCE0/ADKEEP0 change what CLUT[0] holds and therefore what
+                                  // rgb_to_index resolves — different settings can pick different
+                                  // drawing indices and run different code.
                                   "ADFORCE0",
                                   "ADKEEP0",
-                                  // addm 758: ADPMLEGACY decides whether pixelType@0x1E on EVERY host
-                                  // pixmap reads 0 or the low half of a colour-table handle, and whether
-                                  // the legacy pmTable alias exists at all — both are fields a module can
-                                  // branch on, so the two settings can execute different code. Same rule.
+                                  // ADPMLEGACY decides whether pixelType@0x1E on EVERY host pixmap
+                                  // reads 0 or the low half of a colour-table handle, and whether the
+                                  // legacy pmTable alias exists at all — both are fields a module can
+                                  // branch on, so the two settings can execute different code.
                                   "ADPMLEGACY",
-                                  // addm 753: the portRect is a value the library READS BACK (the sprite
-                                  // flipper branches on its width), so PortSize/MovePortTo on or off runs
-                                  // different code. Same rule.
+                                  // ADNOPORTSIZE: the portRect is a value the library READS BACK (the
+                                  // sprite flipper branches on its width), so PortSize/MovePortTo on or
+                                  // off runs different code.
                                   "ADNOPORTSIZE",
-                                  // addm 762: ADBDJT decides whether a module whose TV band overflows s16
-                                  // gets its wrapped near-JT slots populated from the far islands, i.e.
-                                  // whether 683 of its call sites reach their real target at all — the two
-                                  // settings execute entirely different code. Same rule.
+                                  // ADBDJT decides whether a module whose TV band overflows s16 gets
+                                  // its wrapped near-JT slots populated from the far islands, i.e.
+                                  // whether 683 of its call sites reach their real target at all — the
+                                  // two settings execute entirely different code.
                                   "ADBDJT",
-                                  // addm 762: ADNODDFLIP now steers every single-A5 load carrying a far
-                                  // module-fragment DATA image (Daredevil Dan, Bugs, Nirvana), deciding
-                                  // whether their far globals are distinct cells or one shared stub — the
-                                  // two settings read different data and branch differently. Same rule.
+                                  // ADNODDFLIP steers every single-A5 load carrying a far module-
+                                  // fragment DATA image (Daredevil Dan, Bugs, Nirvana), deciding
+                                  // whether their far globals are distinct cells or one shared stub —
+                                  // the two settings read different data and branch differently.
                                   "ADNODDFLIP",
-                                  // addm 782: ADNOFCEXACT decides what bytes GetForeColor/GetBackColor
-                                  // write into the module's RGBColor — the exact last RGBForeColor/
-                                  // RGBBackColor argument, or the lossy CLUT[index] round trip — and a module
-                                  // can branch on the colour it reads back. Same rule.
+                                  // ADNOFCEXACT decides what bytes GetForeColor/GetBackColor write
+                                  // into the module's RGBColor — the exact last RGBForeColor/
+                                  // RGBBackColor argument, or the lossy CLUT[index] round trip — and a
+                                  // module can branch on the colour it reads back.
                                   "ADNOFCEXACT",
-                                  // addm 785: ADOPCOLORFG decides whether OpColor overwrites the
-                                  // port foreground index, i.e. which colour every subsequent fill/pen op
-                                  // paints with until the next RGBForeColor. Same rule.
+                                  // ADOPCOLORFG decides whether OpColor overwrites the port foreground
+                                  // index, i.e. which colour every subsequent fill/pen op paints with
+                                  // until the next RGBForeColor.
                                   "ADOPCOLORFG",
-                                  // addm 798: ADNOSNDMETHODS decides whether the dll#
-                                  // arm's CLOSESOUND/PLAYSOUND/QUIETSOUND slots run a Pascal no-op
-                                  // or the 0xAAFD allocator — the revert allocates a Handle and a
-                                  // >=0x40 B block on EVERY such call, so the two settings run
-                                  // different code AND walk a differently-laid-out heap. Same rule.
+                                  // ADNOSNDMETHODS decides whether the dll# arm's CLOSESOUND/PLAYSOUND/
+                                  // QUIETSOUND slots run a Pascal no-op or the 0xAAFD allocator — the
+                                  // revert allocates a Handle and a >=0x40 B block on EVERY such call,
+                                  // so the two settings run different code AND walk a differently-laid-
+                                  // out heap.
                                   "ADNOSNDMETHODS" };
   uint64_t he=1469598103934665603ULL;
   for(const char* k : KEYENV){ const char* v=getenv(k); he=(he^(uint64_t)(uintptr_t)0x9E37u)*1099511628211ULL;
@@ -1694,7 +1622,7 @@ static std::string pf_island_cache_path(const char* modpath, const char* selfpat
 }
 static std::string sf_probe_fork(int argc, char** argv){
   if(getenv("ADSFPROBED")) return "";                  // we ARE the probe child — never re-fork
-  // [pf perf] memoised measurement: a hit skips the fork entirely (see pf_island_cache_path).
+  // Memoised measurement: a hit skips the fork entirely (see pf_island_cache_path).
   std::string ck = pf_island_cache_path(argv[1], argv[0]);
   if(!ck.empty()){
     struct stat cs;
@@ -1714,19 +1642,17 @@ static std::string sf_probe_fork(int argc, char** argv){
   pid_t pid = fork();
   if(pid<0){ unlink(path); fprintf(stderr,"[sfprobe] fork failed (%s) — sfBand islandTop unraised\n",strerror(errno)); return ""; }
   if(pid==0){                                          // CHILD: re-exec self as the island probe
-    // *** PROBE ISOLATION (field-test fix) ***: the probe child is a HEADLESS MEASUREMENT INSTRUMENT.
-    // It inherits the parent's whole environment and fds, and under the app (which spawns the host with
-    // ADSTREAM/ADSTREAMIDX/ADSHM/ADSHMNAME + live stdout/stdin pipes) that made it a SECOND participant in
-    // the app's transport: it attached the app's shm slot, rewrote the slot header, then blocked in the
-    // ADSHM wait_go() reading the app's control pipe — CONSUMING the app's first "GO\n". The parent then
-    // blocked forever on a GO that had already been eaten. Measured under an app-equivalent driver: Rock
-    // Paper Scissors / Slow Burn / Magic Turtle presented ZERO frames for the whole run, and the probe's
-    // own cost went from 0.09s to the full 12s ADSFPROBESECS alarm because the child sat in that read.
-    // Strip every transport / presentation / lifecycle variable and give the child /dev/null stdin so it
-    // can never read (or write) the parent's channels: its ONLY output is the ADSFXOUT island file.
+    // PROBE ISOLATION: the probe child is a headless measurement instrument. It inherits the parent's whole
+    // environment and fds, and under the app (which spawns the host with ADSTREAM/ADSTREAMIDX/ADSHM/
+    // ADSHMNAME plus live stdout/stdin pipes) that would make it a SECOND participant in the app's
+    // transport: it would attach the app's shm slot, rewrite the slot header, then block in the ADSHM
+    // wait_go() reading the app's control pipe and consume the app's first "GO\n", leaving the parent
+    // blocked forever on a GO that had already been eaten. Strip every transport / presentation / lifecycle
+    // variable and give the child /dev/null stdin so it can never read (or write) the parent's channels:
+    // its ONLY output is the ADSFXOUT island file.
     static const char* STRIP[] = {
       "ADSHM","ADSHMNAME",            // zero-copy slot: never let the child map or clobber it
-      "ADSTREAM","ADSTREAMIDX",       // P8/P6 stdout transport (also restores the unpaced probe drive)
+      "ADSTREAM","ADSTREAMIDX",       // stdout transport; the child also drives itself unpaced
       "ADFRAMEDIR",                   // no frame files from a probe
       "ADFBHASH","ADFBHASHRGB",       // no census chatter
       "ADAUTORESTART","ADCYCLE",      // no re-init/cycle inside the bounded probe window
@@ -1739,11 +1665,10 @@ static std::string sf_probe_fork(int argc, char** argv){
     setenv("ADSFBAND","0",1);                          // gap empty → module reaches its full island run + no re-fork
     setenv("ADSFXPROBE","1",1); setenv("ADSFXOUT",path,1); setenv("ADSFPROBED","1",1);
     char sbuf[16]; snprintf(sbuf,sizeof sbuf,"%d",secs); setenv("ADSFPROBEALARM",sbuf,1);
-    // Frame-bound the child for DETERMINISM: the islands materialize during the module's init (measured —
-    // N=1 frame already captures RD's full 3303-slot set under the empty-gap placement), so a small fixed
-    // frame budget yields the SAME islands every run regardless of CPU load (emulation is deterministic per
-    // frame count). The alarm above is only a cost CAP for slow-init modules — which have no gap islands, so
-    // cutting them short is harmless (empty island file → islandTop unraised → identical to today).
+    // Frame-bound the child for DETERMINISM: the islands materialize during the module's init, so a small
+    // fixed frame budget yields the SAME islands every run regardless of CPU load (emulation is
+    // deterministic per frame count). The alarm above is only a cost CAP for slow-init modules — which have
+    // no gap islands, so cutting them short is harmless (empty island file → islandTop unraised).
     const char* pf=getenv("ADSFPROBEFRAMES"); setenv("ADFRAMES", pf?pf:"30", 1);
     setenv("ADNOPACE","1",1);                          // headless (no ADSTREAM) is already unpaced; belt-and-suspenders
     if(!getenv("ADSFPROBEVERBOSE")){ freopen("/dev/null","w",stdout); freopen("/dev/null","w",stderr); }
@@ -1754,7 +1679,7 @@ static std::string sf_probe_fork(int argc, char** argv){
   double dt=(t1.tv_sec-t0.tv_sec)+(t1.tv_usec-t0.tv_usec)*1e-6;
   long n=0; if(FILE* f=fopen(path,"r")){ int v; while(fscanf(f,"%d",&v)==1) n++; fclose(f); }
   fprintf(stderr,"[sfprobe] execution-island probe: %.2fs budget=%ds, %ld island slot(s) → %s\n", dt, secs, n, path);
-  // [pf perf] memoise the measurement for subsequent launches. Written via a temp + rename so a concurrent
+  // Memoise the measurement for subsequent launches. Written via a temp + rename so a concurrent
   // launch never reads a half-written set; a failure here is silent and simply means the next run re-probes.
   if(!ck.empty() && WIFEXITED(st)){
     std::string tmp = ck + ".tmp" + std::to_string((long)getpid());
@@ -1771,17 +1696,17 @@ static std::string sf_probe_fork(int argc, char** argv){
 }
 int main(int argc, char** argv){
   if(argc<2){ fprintf(stderr,"usage: adhost68k <module.rsrc> [selector]\n"); return 2; }
-  // addm 804: emulator precondition FIRST, before any guest code runs. The module load itself
-  // executes LIB510 init under the emulator, so checking at hook-install time would already have run
-  // thousands of mis-emulated instructions before refusing. Five one-instruction runs; startup-only.
+  // Emulator precondition FIRST, before any guest code runs. The module load itself executes LIB510
+  // init under the emulator, so checking at hook-install time would already have run thousands of
+  // mis-emulated instructions before refusing. Five one-instruction runs; startup-only.
   pf_probe_emulator_opcodes();
-  if(getenv("ADSFLIVEPROBE")){ g_sfLiveProbe=true; atexit(sf_live_dump);     // addm 670 near-JT liveness probe
+  if(getenv("ADSFLIVEPROBE")){ g_sfLiveProbe=true; atexit(sf_live_dump);     // near-JT liveness probe
     struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_handler=[](int){ sf_live_dump(); fflush(stderr); _exit(0); };
     sigaction(SIGTERM,&sa,nullptr); sigaction(SIGINT,&sa,nullptr); sigaction(SIGALRM,&sa,nullptr); }
   if(getenv("ADJTXPROBE")){ g_jtx=true; atexit(jtx_dump);
     struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_handler=[](int){ jtx_dump(); fflush(stderr); _exit(0); };
     sigaction(SIGTERM,&sa,nullptr); sigaction(SIGINT,&sa,nullptr); sigaction(SIGALRM,&sa,nullptr); }
-  if(getenv("ADJTLIVE")){ g_jtlive=true; atexit(jtl_dump);                   // addm 719 low-band near-JT execution census
+  if(getenv("ADJTLIVE")){ g_jtlive=true; atexit(jtl_dump);                   // low-band near-JT execution census
     struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_handler=[](int){ jtl_dump(); fflush(stderr); _exit(0); };
     sigaction(SIGTERM,&sa,nullptr); sigaction(SIGINT,&sa,nullptr); sigaction(SIGALRM,&sa,nullptr); }
   if(getenv("ADSFFP")){ g_sffp=true; atexit(sffp_dump);                     // near-JT completion: write-footprint recorder
@@ -1800,19 +1725,15 @@ int main(int argc, char** argv){
   if(getenv("ADSTRICT")) mem->set_strict(true);   // fault on writes outside allocated blocks (culprit hunt)
   // Low-memory globals page (classic Mac globals live at 0..0x3000).
   mem->allocate_at(0x0, 0x4000); mem->memset(0x0, 0, 0x4000);
-  // Big shared heap arenas: without these, allocate() spins up a fresh arena sized EXACTLY to
-  // each NewPtr block, so any module that reads a struct field a hair past a block's end (or
-  // page-flips through many buffers) hits "address/data not within one arena". Preallocating
-  // generous zeroed arenas lets allocations pack contiguously, so edge reads land in adjacent
-  // zeroed heap instead of faulting. Gated for A/B safety; on by default unless ADNOHEAP set.
-  // Low heap only: a big shared arena below CODE so NewPtr blocks pack contiguously and a field
-  // read a hair past a block lands in adjacent zeroed heap instead of faulting ("data not within
-  // one arena"). Fixes Gravity's per-frame CGrafPort page-flip fault. NOTE: a HIGH heap (0x400000+)
-  // was also tried but it REGRESSED String Theory (its allocations live there and shifted), so we
-  // deliberately preallocate ONLY the low region. ADNOHEAP disables for A/B.
+  // Big shared low heap: without it, allocate() spins up a fresh arena sized EXACTLY to each NewPtr
+  // block, so any module that reads a struct field a hair past a block's end (or page-flips through
+  // many buffers) hits "address/data not within one arena". Preallocating one generous zeroed arena
+  // below CODE lets allocations pack contiguously, so edge reads land in adjacent zeroed heap instead
+  // of faulting (Gravity's per-frame CGrafPort page-flip). Only the LOW region is preallocated: a high
+  // heap (0x400000+) moves String Theory's allocations and breaks it. ADNOHEAP disables for A/B.
   if(!getenv("ADNOHEAP")) mem->preallocate_arena(0x00004000, 0x000FA000);   // low heap 0x4000..0xFE000
 
-  // Embedded AD 3.0 '+ODE' runtime (dll# unlock). Inert unless ADENGINE is set (zero regression).
+  // Embedded AD 3.0 '+ODE' runtime (dll# unlock). Inert unless ADENGINE is set.
   // Loads the runtime + builds its ADdl vtable; module-link wiring (LinkModule) follows.
   OdeRuntime g_ode;
   std::vector<uint32_t> ode_retstack;   // A5-switch trampoline: saved shim return addrs (LIFO, supports nesting)
@@ -1821,7 +1742,7 @@ int main(int argc, char** argv){
     g_ode = load_ode_runtime(mem, getenv("ADENGINEPATH"));
     if(g_ode.ok){ ode_restore_stub=mem->allocate(2); mem->write_u16b(ode_restore_stub,0xAAF5); }
   }
-  // ---- two-A5 model cross-boundary A5 switch (addm 363b), OPT-IN via ADMOD2A5SWITCH ----
+  // ---- two-A5 model cross-boundary A5 switch, OPT-IN via ADMOD2A5SWITCH ----
   // When a large 4.0 module (running with A5=a5_mod) calls a LIBRARY export, the module world's copy of
   // that export's TV island can be an A5-switch TRAMPOLINE {movea.l #target,A0 ; 0xAAF6} rather than a plain
   // jmp: the 0xAAF6 handler saves the module return addr, installs the 0xAAF7 restore stub as the callee's
@@ -1829,18 +1750,18 @@ int main(int argc, char** argv){
   // globals. On rts the library lands on the restore stub (0xAAF7), which switches A5 back to a5_mod and
   // resumes the module. Uses the SAME host-side-return-stack technique as the ODE trampoline (no 68K stack
   // args are disturbed: only the return slot is rewritten in place). DEFAULT is plain jmp (no switch) — see
-  // emitTvMod below; the switch is WIP (also needs the reverse library->module callback direction).
+  // emitTvMod below; the switch also needs the reverse library->module callback direction.
   std::vector<uint32_t> mod_retstack;   // saved module return addrs across module->library calls (LIFO, nesting)
   uint32_t mod_restore_stub=0;          // 0xAAF7 stub; allocated ONLY when the two-A5 model activates (below),
-                                        // so classic/AD3 loads see an unperturbed arena (zero-regression gate).
-  // ---- addm 460: bidirectional, nestable two-A5 switch (the addm-363b next step). Both the module->library
-  // AND the library->module (C++ virtual callback) directions must switch A5 to the TARGET fragment's world
-  // and restore the CALLER's world on rts. A single universal ENTER trap (0xAAFA) reads its target INLINE from
+                                        // so classic/AD3 loads see an unperturbed arena.
+  // ---- bidirectional, nestable two-A5 switch. Both the module->library AND the library->module (C++
+  // virtual callback) directions must switch A5 to the TARGET fragment's world and restore the CALLER's
+  // world on rts. A single universal ENTER trap (0xAAFA) reads its target INLINE from its island,
   // classifies its world by fragment range (module code -> a5_mod, else a5_lib), pushes {currentA5, realRet}
   // onto a5sw_stack, installs the 0xAAEE RESTORE stub as the callee return, sets A5=targetA5, jmp target. On
   // rts the callee lands on 0xAAEE which pops the pair -> restores the caller's A5 + resumes. Saving the
   // CURRENT A5 (not a hardcoded a5_mod/a5_lib) makes it bidirectional and nestable; same-world calls become a
-  // harmless no-op switch. Gated ADTWOA5SWITCH / name-gated Bad Dog! -> canaries byte-identical.
+  // harmless no-op switch. Gated ADTWOA5SWITCH.
   std::vector<std::pair<uint32_t,uint32_t>> a5sw_stack;  // {savedA5, savedRet} LIFO — supports arbitrary nesting
   uint32_t a5sw_restore_stub=0;         // 0xAAEE stub addr (allocated only when the switch subsystem activates)
 
@@ -1852,11 +1773,10 @@ int main(int argc, char** argv){
   // standard 600E/'ADgm' code — so they then run through the exact same ABI.
   map<pair<uint32_t,int16_t>,string> rez;
   map<uint32_t,vector<int16_t>> rez_ids;
-  // addm 534: NAMED-resource index (type,lowercased-name)->id. Populated at load so Get1NamedResource
-  // (A820) can resolve by name. The Resource Manager matches names case-insensitively; we lowercase both
-  // sides. Marbles(3.0) calls Get1NamedResource('PICT',"marbles"/"mmarble") to detect its art; a NULL
-  // return (the old "names not indexed -> 0" stub) drove it into a fallback that points a 40x40 composite
-  // PixMap.baseAddr at A5-0x546 (its own globals) and self-scribbles. Its PICT "marbles"/"mmarble" DO exist.
+  // NAMED-resource index (type,lowercased-name)->id. Populated at load so Get1NamedResource (A820) can
+  // resolve by name. The Resource Manager matches names case-insensitively; we lowercase both sides.
+  // Marbles(3.0) calls Get1NamedResource('PICT',"marbles"/"mmarble") to detect its art; on a NULL return
+  // it falls back to pointing a 40x40 composite PixMap.baseAddr at its own globals and self-scribbling.
   map<pair<uint32_t,string>,int16_t> rez_name2id;
   auto lc_str=[](const string& s){ string o=s; for(char& c:o) c=(char)tolower((unsigned char)c); return o; };
   auto add_name=[&](uint32_t typ,int16_t id,const string& nm){
@@ -1872,7 +1792,7 @@ int main(int argc, char** argv){
   auto FOURCC=[](const char* s){ return (uint32_t)((uint8_t)s[0]<<24|(uint8_t)s[1]<<16|(uint8_t)s[2]<<8|(uint8_t)s[3]); };
   // ADRESDUMP="TYPE:id" — print the first bytes of a loaded resource AS THE HOST HAS IT (post-decompression).
   // Used to confirm whether compressed resources (AD3 art records carry the 0xA89F 'er' compressed-resource
-  // signature) actually got decompressed before the module parses them (addm 318).
+  // signature) actually got decompressed before the module parses them.
   if(getenv("ADRESDUMP")){ char tb[16]={0}; int rid=0;
     if(sscanf(getenv("ADRESDUMP"),"%4[^:]:%d",tb,&rid)==2){
       while(strlen(tb)<4) strcat(tb," ");
@@ -1890,7 +1810,7 @@ int main(int argc, char** argv){
     if(it!=rez.end()) adgm=it->second; }
   if(adgm.empty()){ fprintf(stderr,"no ADgm resource in %s\n", argv[1]); return 1; }
   fprintf(stderr,"[adhost68k] loaded %zu resources; ADgm %zu bytes from %s\n", rez.size(), adgm.size(), argv[1]);
-  // ---- COMPANION DATA FILE merge (addm 278) ---------------------------------
+  // ---- COMPANION DATA FILE merge --------------------------------------------
   // ~10 Deluxe modules keep their ARTWORK in a companion file under
   //   <After Dark Files>/After Dark Images/<Name>
   // whose RESOURCE FORK holds the RLE art (RLEP/Rdat) + PICT/clut/snd. The real engine finds it via
@@ -1931,19 +1851,17 @@ int main(int argc, char** argv){
     }
   }
 
-  // ---- shared "AD 3.0 Resources" merge (addm 316/317) ------------------------
+  // ---- shared "AD 3.0 Resources" merge ---------------------------------------
   // On a real Mac the AD engine OPENS the shared files, so their resources sit in the module's search
   // chain. Clocks' XArtDatabase::GetArtClassInfo probes Get1Resource('aInf',4000) in its own fork (found)
   // and then needs the SHARED art-class record — and "AD 3.0 Sound" is the only file carrying aInf id=100.
-  // We have no resource chain, so that lookup returned NULL and the AD3 runtime threw (reported via its
-  // STR# table as "Out of memory."), which longjmp'd out of the module ctor and left the instance
-  // unpublished => every message handler dereferenced null => nothing ever rendered.
-  // Merge NON-CODE resources only; the module's own always wins.
-  // STATUS (addm 317): this DID make aInf 100 reachable, but Clocks still requests aInf **0** — an id that
-  // exists in no file — so the failing lookup is a computed-zero, NOT a missing resource. The merge is
-  // therefore faithful-but-inert for this bug; kept OPT-IN via ADSHAREDRES=1 rather than changing every
-  // module's resource map for no demonstrated benefit. Verified regression-free (30/62) when enabled.
-  if(getenv("ADSHAREDRES")){          // OPT-IN: see addm 317 — faithful, but fixes nothing yet
+  // We have no resource chain, so without this merge that lookup returns NULL and the AD3 runtime throws
+  // ("Out of memory." from its STR# table), longjmp'ing out of the module ctor and leaving the instance
+  // unpublished, so every message handler dereferences null and nothing renders.
+  // Merge NON-CODE resources only; the module's own always wins. OPT-IN via ADSHAREDRES=1: the merge is
+  // faithful but inert for the Clocks case, which requests aInf 0 — an id that exists in no file, i.e. a
+  // computed zero rather than a missing resource.
+  if(getenv("ADSHAREDRES")){          // OPT-IN: faithful, but inert for the Clocks case
     std::string mp2(argv[1]); const std::string tail2="/..namedfork/rsrc";
     if(mp2.size()>tail2.size() && mp2.compare(mp2.size()-tail2.size(),tail2.size(),tail2)==0) mp2.resize(mp2.size()-tail2.size());
     size_t sl=mp2.find_last_of('/');
@@ -1969,7 +1887,7 @@ int main(int argc, char** argv){
 
   // ---- LIB510 shared-library foundation (dll# two-stage modules) -------------
   // Only dll# modules need the deLuxe runtime; loading is inert for everyone else
-  // (so the whole rendering-regression set is untouched). Load the 14 CODE/DATA
+  // (the load is skipped for every other module). Load the 14 CODE/DATA
   // fragments from "After Dark 4.0 Library", lay them into a dedicated arena, and
   // decode their reloc + link tables. Relocation/A5-world/LinkModule follow.
   AdLib510 lib510;
@@ -1993,10 +1911,10 @@ int main(int argc, char** argv){
       // not the AD3 NewByClassID factory) — so prefer the AD 3.0 library when present.
       std::string ad3 = parent + "/AD 3.0 Resources/AD 3.0 Code" + NF;
       std::string ad4 = parent + "/After Dark 4.0 Library" + NF;
-      // addm 337: choose by the MODULE'S OWN import list, not by which file exists. The 19 Bucket-A
-      // modules (Art Critic et al.) import LIB510_* — the 4.0 Library — and mounting the AD3 file for
-      // them binds the wrong export map. Cheap and robust: the dll# resource carries the import names
-      // verbatim, so a "LIB510" substring means the 4.0 set. (Clocks-style AD3_* importers keep AD3.)
+      // Choose by the MODULE'S OWN import list, not by which file exists. The 19 Bucket-A modules (Art
+      // Critic et al.) import LIB510_* — the 4.0 Library — and mounting the AD3 file for them binds the
+      // wrong export map. The dll# resource carries the import names verbatim, so a "LIB510" substring
+      // means the 4.0 set. (Clocks-style AD3_* importers keep AD3.)
       bool want40=false;
       { auto it=rez.find({FOURCC("dll#"),(int16_t)0});
         if(it==rez.end() && !rez_ids[FOURCC("dll#")].empty()) it=rez.find({FOURCC("dll#"),rez_ids[FOURCC("dll#")][0]});
@@ -2041,21 +1959,18 @@ int main(int argc, char** argv){
         fr.dreRecs=ad_decode_reloc(fr.drel);
         fr.exports=ad_parse_symrecs(fr.syms);                  // SYMS export table
         for(size_t k=0;k+1<fr.jump.size();k+=8) fr.jumpOff.push_back((uint16_t)((uint8_t)fr.jump[k]<<8|(uint8_t)fr.jump[k+1]));
-        // 4.0 library (addm 340): SYMS.u32[0:4] points at the nameLen byte inside NAME. Resolve every
-        // record's symbol name up front; the resolver binds imports BY NAME (addend&0xFFF = SYMS index).
+        // 4.0 library: SYMS.u32[0:4] points at the nameLen byte inside NAME. Resolve every record's
+        // symbol name up front; the resolver binds imports BY NAME (addend&0xFFF = SYMS index).
         if(!fr.name_tbl.empty()){
           const std::string& nb=fr.name_tbl;
           for(size_t k=0;k+14<=fr.syms.size();k+=14){
             const uint8_t* pp=(const uint8_t*)fr.syms.data()+k;
             uint32_t np=(uint32_t)(pp[0]<<24|pp[1]<<16|pp[2]<<8|pp[3]);
             std::string nm;
-            // Name-length cap raised 64 -> 255 (addm 391): long CW mangled names (e.g. 72-char
-            // ICompoundSprite__14CompoundSpriteFP16CompoundSequenceP10BackgroundP2XRUs, LIB510_Sprite1
-            // jumpIndex=5) parsed EMPTY under the 64 cap -> missing from nameExports -> the module's
-            // vtable DRLT import fell to the key12 fallback (SYMT/SYMS key spaces differ) -> unres-data
-            // stub -> Art Critic's init virtual call [vt+0x78] hit a bare-rts stub (callee-clean rtd
-            // #0x12 expected) -> stack skew -> derail @0x02020000. Pascal len is u8; the np+1+L bound
-            // check below already rejects garbage.
+            // The Pascal name length is a full u8: CW mangled names run well past 64 chars (e.g. the
+            // 72-char ICompoundSprite__14CompoundSpriteFP16CompoundSequenceP10BackgroundP2XRUs in
+            // LIB510_Sprite1), and a name that parses EMPTY drops the symbol from nameExports, leaving
+            // its import to fall through to the key12 fallback. The np+1+L bound check below rejects garbage.
             if(np<nb.size()){ uint8_t L=(uint8_t)nb[np];
               if(L>0 && np+1+L<=nb.size()) nm=nb.substr(np+1,L); }
             fr.symNames.push_back(nm);
@@ -2064,7 +1979,6 @@ int main(int argc, char** argv){
         lib510.frags.push_back(std::move(fr));
       }
       // Lay CODE then DATA of every fragment into one arena (16-byte aligned).
-      // Placement only for now; self-relocation + shared A5 world is the next step.
       const uint32_t LIB_ARENA=0x01000000, LIB_ARENA_SZ=0x00600000; // 16MB, 6MB
       mem->allocate_at(LIB_ARENA, LIB_ARENA_SZ); mem->memset(LIB_ARENA,0,LIB_ARENA_SZ);
       uint32_t cur=LIB_ARENA;
@@ -2107,7 +2021,7 @@ int main(int argc, char** argv){
       // JOHN (id 129+), dcmp-compressed; rez already holds them decompressed.
       // Treat each like a library fragment (own per-fragment A5) and self-relocate
       // it the same way; SYMT (imports) is stored in the syms slot. The ADdl
-      // LinkModule (next step) will hand module_main back to the shim.
+      // LinkModule hands module_main back to the shim.
       for(int16_t mid : rez_ids[FOURCC("CODE")]){
         auto rq=[&](uint32_t typ,int16_t id)->std::string{ auto it=rez.find({typ,id}); return it==rez.end()?std::string():it->second; };
         AdLibFragment mf; mf.id=mid; mf.libName=std::string("MODULE_")+std::to_string(mid);
@@ -2116,10 +2030,10 @@ int main(int argc, char** argv){
         mf.jump=rq(FOURCC("JUMP"),mid); mf.syms=rq(FOURCC("SYMT"),mid);
         // 4.0 modules (Bucket A: Art Critic etc.) name their link tables SYMS/CREL/DREL (the
         // C++ 4.0 library convention) instead of the AD3 SYMT/CRLT/DRLT. Mirror the library
-        // loader's fallback (lines ~653) so the module's OWN 8580B CREL / 1554B SYMS are read;
-        // without this the module's internal relocations never applied and its exports (incl.
-        // the module entry point) were empty, so module_main resolved to code+0. AD3 modules
-        // (Clocks) have SYMT/CRLT/DRLT and no SYMS/CREL/DREL, so they are unaffected.
+        // loader's fallback so the module's OWN CREL/SYMS are read; without it the module's
+        // internal relocations never apply and its exports (including the module entry point)
+        // are empty, so module_main resolves to code+0. AD3 modules (Clocks) have SYMT/CRLT/DRLT
+        // and no SYMS/CREL/DREL, so they are unaffected.
         if(mf.crel.empty()) mf.crel=rq(FOURCC("CREL"),mid);
         if(mf.drel.empty()) mf.drel=rq(FOURCC("DREL"),mid);
         if(mf.syms.empty()) mf.syms=rq(FOURCC("SYMS"),mid);
@@ -2141,7 +2055,7 @@ int main(int argc, char** argv){
             const uint8_t* pp=(const uint8_t*)mf.syms.data()+k;
             uint32_t np=(uint32_t)(pp[0]<<24|pp[1]<<16|pp[2]<<8|pp[3]);
             std::string nm;
-            if(np<nb.size()){ uint8_t L=(uint8_t)nb[np];   // cap 64 -> 255 (addm 391, see library-side note)
+            if(np<nb.size()){ uint8_t L=(uint8_t)nb[np];   // Pascal length is a full u8 (see library-side note)
               if(L>0 && np+1+L<=nb.size()) nm=nb.substr(np+1,L); }
             mf.symNames.push_back(nm);
           }
@@ -2154,8 +2068,8 @@ int main(int argc, char** argv){
           }
         }
         mf.codeBase=place(mf.code, mf.johnCodeSize);
-        // addm 775 (promoted from the addm-756 lane): ADRD2MAP dumps every CODE export as
-        // "[rd2map] <absolute addr> <frag> <symbol>" so a PC from any trace resolves to a name.
+        // ADRD2MAP dumps every CODE export as "[rd2map] <absolute addr> <frag> <symbol>" so a
+        // PC from any trace resolves to a name.
         if(getenv("ADRD2MAP")){
           for(size_t k=0;k<mf.exports.size() && k<mf.symNames.size();k++){
             auto& e=mf.exports[k]; if(!e.isCode) continue;
@@ -2203,16 +2117,15 @@ int main(int argc, char** argv){
         bool uniform = !getenv("ADNONUNIFORM");                 // dll# modules are message dispatchers
         uint32_t moduleDbss=0;                                  // module DATA+BSS (JOHN a5DataSize)
         for(auto& f : lib510.modFrags) moduleDbss += (f.johnA5Data>f.data.size()?f.johnA5Data:(uint32_t)f.data.size());
-        // ---- two-A5 gate (addm 363b): 4.0 (a library fragment carries NAME resources => nameMode) AND a
-        // LARGE module (>=0x8000 DATA+BSS, the ones that overflow the shared s16 window and all currently
-        // fault). AD3 (Clocks/Rebound, no NAME) and small modules take the UNCHANGED shared-A5 path below,
-        // so the passing baseline is structurally untouched. ADNO2A5 forces the old shared-A5 path (A/B).
+        // ---- two-A5 gate: 4.0 (a library fragment carries NAME resources => nameMode) AND a LARGE
+        // module (>=0x8000 DATA+BSS, the ones that overflow the shared s16 window). AD3 (Clocks/Rebound,
+        // no NAME) and small modules take the shared-A5 path below. ADNO2A5 forces the shared-A5 path (A/B).
         bool is40=false; for(auto& f : lib510.frags) if(!f.symNames.empty()){ is40=true; break; }
         bool twoA5 = is40 && (moduleDbss >= 0x8000) && !getenv("ADNO2A5");
         // Library DATA size below A5 (packed at A5-0x278 downward). The module DATA/BSS block is placed
         // starting at A5-shift going DOWN; if shift < libDataBytes the module block's TOP overlaps the
-        // library DATA region and the two clobber each other (Bucket A: Art Critic's frag-129 DATA landed
-        // on top of a library fragment's globals with the 0x3000 floor < 0x35A0 library size). Compute the
+        // library DATA region and the two clobber each other (Art Critic's frag-129 DATA lands on top of
+        // a library fragment's globals when the 0x3000 floor falls below the 0x35A0 library size). Compute the
         // library DATA extent so the shift floor can clear it. (Small AD3 modules are unaffected: their
         // shift = 0x8000-moduleDbss is already far larger than libDataBytes.)
         uint32_t libDataBytes=0x278;
@@ -2223,68 +2136,51 @@ int main(int argc, char** argv){
         else        shift = 0x7000;
         // Raise the shift floor so the module block clears the library DATA (no overlap). Only grows shift
         // when the default floor is below libDataBytes+margin, which happens only for LARGE modules whose
-        // moduleDbss>=0x8000 pins shift to the 0x3000 floor; those all currently fault, so this cannot
-        // regress the passing baseline. ADNOMODLIBSEP restores the old (overlapping) behaviour for A/B.
+        // moduleDbss>=0x8000 pins shift to the 0x3000 floor. ADNOMODLIBSEP restores the overlapping
+        // behaviour for A/B.
         if(!getenv("ADNOMODLIBSEP") && shift < libDataBytes + 0x80) shift = (libDataBytes + 0x80 + 0xF) & ~0xFu;
         if(getenv("ADMODSHIFT")) shift = (uint32_t)strtoul(getenv("ADMODSHIFT"),0,16);
         // The below-A5 region must hold the module DATA+BSS block (placed from A5-shift down to
         // A5-shift-moduleDbss) PLUS the library DATA (packed just below A5, ~0x278+). A fixed 0x8800
-        // underflows the arena base for modules whose DATA+BSS exceeds it (Nirvana: LIB510 load faulted
-        // at 0x01FFE74C = 0x02000000-0x18B4, i.e. the module block ran ~0x8B4 below the 0x8800 region).
-        // Size the below-A5 region to the actual module block + library-DATA + margin; only GROWS beyond
-        // 0x8800 when needed, so small modules (Clocks) are unaffected. (Data beyond A5-0x8000 is reachable
-        // only if the module uses 32-bit A5-relative/pointer access for its far BSS; the alloc fix at least
-        // stops the load-time fault so we can see how far the module gets.)
+        // underflows the arena base for modules whose DATA+BSS exceeds it (Nirvana's module block runs
+        // ~0x8B4 below it). Size the below-A5 region to the actual module block + library-DATA + margin;
+        // it only GROWS beyond 0x8800 when needed, so small modules (Clocks) are unaffected. (Data beyond
+        // A5-0x8000 is reachable only if the module uses 32-bit A5-relative/pointer access for its far BSS.)
         uint32_t needBelow = shift + moduleDbss + 0x400 + 0x800;   // module block top(A5-shift)+DBSS+libDATA margin
         uint32_t globalsSize = (needBelow > 0x8800) ? ((needBelow + 0xF) & ~0xFu) : 0x8800;
         if(getenv("ADLIBGLOBSZ")) globalsSize = (uint32_t)strtoul(getenv("ADLIBGLOBSZ"),0,16);
         uint32_t blockSz=globalsSize + (TVOFF>0x3800?TVOFF:0x3800) + tvBytes + 0x100;
-        // XHeap-arena fix (addm 382): allocate_at() rounds its arena UP to a whole page, so a block
-        // whose size isn't page-aligned leaves a FREE tail in the SAME arena (e.g. module block ends
-        // ~0x0301C000 but the arena runs to the page boundary ~0x03020000). MemoryContext::allocate()
-        // uses a "smallest free block that fits" heuristic, so that small module-world tail is PREFERRED
-        // over the big low heap -> dynamic NewPtr/NewHandle blocks land at 0x0301xxxx, ON TOP of the
-        // module's own a5-above data (TV islands / mirrored library DATA) and alias each other. The
-        // overlap corrupts the XHeap bookkeeping and cascades into misaligned movem restores that trash
-        // callee-saved regs (A2 -> 1) -> Art Critic's XHeap::UseHeap deref faults at 0x010205AE (this was
-        // mis-diagnosed as a "ror8"-packed pointer; it is actually [garbageA2=1 +0xA] = a read at odd
-        // addr 0xB straddling a valid 0x0301F888 pool ptr stored at 0xC -> 0x880301F8). Fix: page-align
-        // blockSz so the arena == the allocated block (no free tail) -> allocate() falls back to the low
-        // heap. Only grows the module's unused a5-above region; a5_mod/TV/data layout are unchanged.
-        // Gated to is40 (AD4.0 LIB510) — covers BOTH twoA5 (Art Critic/Slow Burn) AND single-A5 4.0
-        // modules (Guernsey/Life & All/Time Flies): all share the XHeap allocator whose dynamic NewPtr/
-        // NewHandle land in the A5_BLOCK=0x02000000 arena's page-rounding free tail (ADNPLOG: Guernsey
-        // 0x020128E8.. on top of aYmm/TV structs), corrupting the free-list -> misaligned movem restore
-        // -> garbage vtable pointer fault (Guernsey A3FA0201 @0103DE04, Life&All @010205AE == Art Critic's
-        // old pc). Page-align blockSz so the A5 arena == the allocated block (no free tail) -> allocate()
-        // falls back to the low heap. AD3 modules (Rebound/Clocks, is40=0) keep the EXACT blockSz they
-        // depend on -> byte-identical. (addm 384)
+        // Page-align blockSz: allocate_at() rounds its arena UP to a whole page, so a block whose size
+        // isn't page-aligned leaves a FREE tail in the SAME arena. MemoryContext::allocate() uses a
+        // "smallest free block that fits" heuristic, so that small module-world tail is PREFERRED over the
+        // big low heap -> dynamic NewPtr/NewHandle blocks land on top of the module's own a5-above data
+        // (TV islands / mirrored library DATA) and alias each other, corrupting the XHeap free list and
+        // cascading into misaligned movem restores that trash callee-saved registers -> garbage vtable
+        // pointer faults. Page-aligning makes the arena == the allocated block (no free tail) so allocate()
+        // falls back to the low heap; it only grows the module's unused a5-above region, leaving
+        // a5_mod/TV/data layout unchanged. Gated to is40 (AD 4.0 LIB510), which covers both twoA5 and
+        // single-A5 4.0 modules — all share the XHeap allocator. AD3 modules (is40=0) keep the exact blockSz.
         if(is40){ size_t pg=mem->get_page_size(); if(pg) blockSz=(uint32_t)((blockSz + (pg-1)) & ~(pg-1)); }
         const uint32_t A5_BLOCK=0x02000000;
         mem->allocate_at(A5_BLOCK, blockSz); mem->memset(A5_BLOCK,0,blockSz);
-        // XHeap-arena fix (addm 384): single-A5 4.0 modules (Guernsey/Life & All/Time Flies) need the
-        // same contiguous low-heap extension as twoA5 (addm 382). With the page-align above, their dynamic
-        // NewPtr/NewHandle now route out of the A5 arena, but the default 1MB low heap (0x4000..0xFE000)
-        // overflows and they spill into tight EXACTLY-sized fresh arenas at 0x30xxxx/0x4Dxxxx where a
-        // struct field read a hair past a block's end faults ("not within any arena"). Extend the low heap
+        // Single-A5 4.0 modules need the same contiguous low-heap extension as twoA5. With the page-align
+        // above their dynamic NewPtr/NewHandle route out of the A5 arena, but the default 1MB low heap
+        // (0x4000..0xFE000) overflows and they spill into tight EXACTLY-sized fresh arenas where a struct
+        // field read a hair past a block's end faults ("not within any arena"). Extend the low heap
         // contiguously up to the library arena so blocks pack together and edge reads land in adjacent
-        // zeroed heap. Gated is40 && !twoA5 so the already-merged twoA5 path (its extension fires later,
-        // after MOD_BLOCK/mod_restore_stub) keeps its exact arena-creation order -> byte-identical. AD3
-        // (Rebound, is40=0) untouched. ADNOHEAP opts out.
-        // Placed in the free gap 0x00340000..0x01000000 (page-aligned) — the region ABOVE all of the
-        // later fixed allocate_at arenas (CODE_BASE 0x00100000, 0x00280000, 0x00320000) and BELOW the
-        // library arena (0x01000000). It cannot start at 0xFE000 (the twoA5 path's value): on 0x4000-page
-        // hosts (Apple Silicon) the default low heap (line ~496, preallocate 0x4000..0xFE000) page-rounds
-        // UP to end at 0x00100000, so a 0xFE000-based arena overlaps it and throws ("fixed-address arena
-        // overlaps existing arena", caught by the library try -> "dll# module will not render"). Nor can
-        // it swallow 0x00100000..0x00340000 as one big arena: a dynamic allocate() would land at its
-        // 0x00100000 base and the later fixed allocate_at(CODE_BASE=0x00100000) then finds no free block
-        // ("arena contains no free blocks"). 0x00340000 clears every fixed region, so overflow dynamic
-        // NewPtr/NewHandle (which without this spill into tight EXACTLY-sized fresh arenas that edge-fault)
-        // pack contiguously here. (addm 384)
+        // zeroed heap. Gated is40 && !twoA5 so the twoA5 path (whose extension fires later, after
+        // MOD_BLOCK/mod_restore_stub) keeps its arena-creation order. ADNOHEAP opts out.
+        // The start MUST be the page-aligned free gap 0x00340000..0x01000000: above every later fixed
+        // allocate_at arena (CODE_BASE 0x00100000, 0x00280000, 0x00320000) and below the library arena
+        // (0x01000000). It cannot start at 0xFE000 — on 0x4000-page hosts (Apple Silicon) the default low
+        // heap page-rounds UP to end at 0x00100000, so a 0xFE000-based arena overlaps it and throws
+        // ("fixed-address arena overlaps existing arena", caught by the library try -> "dll# module will
+        // not render"). Nor can it swallow 0x00100000..0x00340000 as one big arena: a dynamic allocate()
+        // would land at its 0x00100000 base and the later fixed allocate_at(CODE_BASE=0x00100000) then
+        // finds no free block ("arena contains no free blocks").
         if(is40 && !twoA5 && !getenv("ADNOHEAP")) mem->preallocate_arena(0x00340000, 0x01000000 - 0x00340000);
         lib510.a5        = A5_BLOCK + globalsSize;
-        g_jtl_a5         = lib510.a5;                       // addm 719: publish for the ADJTLIVE census
+        g_jtl_a5         = lib510.a5;                       // publish for the ADJTLIVE census
         if(g_jtx){ g_jtx_lo=lib510.a5+2; g_jtx_hi=lib510.a5+TVOFF; }
         lib510.tvBaseAddr= lib510.a5 + TVOFF;
         lib510.tvCount   = tvSlots;
@@ -2300,7 +2196,7 @@ int main(int argc, char** argv){
           a5_mod        = MOD_BLOCK + globalsSize;
           tvBaseAddrMod = a5_mod + TVOFF;
           lib510.twoA5=true; lib510.a5_mod=a5_mod; lib510.tvBaseAddrMod=tvBaseAddrMod;
-          g_sf_a5mod=a5_mod; g_sf_tvbase=tvBaseAddrMod;   // publish for the ADSFLIVEPROBE recorder (addm 670)
+          g_sf_a5mod=a5_mod; g_sf_tvbase=tvBaseAddrMod;   // publish for the ADSFLIVEPROBE recorder
           if(g_sffp){ // near-JT completion: window bounds; default whole s16 [a5_mod-0x8000, a5_mod+0x8000)
             int32_t wlo = getenv("ADSFFPWINLO") ? (int32_t)strtol(getenv("ADSFFPWINLO"),0,16) : -0x8000;
             int32_t whi = getenv("ADSFFPWINHI") ? (int32_t)strtol(getenv("ADSFFPWINHI"),0,16) :  0x8000;
@@ -2310,21 +2206,18 @@ int main(int argc, char** argv){
             uint32_t rhi=getenv("ADSFRDHI")?(uint32_t)strtoul(getenv("ADSFRDHI"),0,16):TVOFF;
             g_sfrd_a5=a5_mod; g_sfrd_lo=a5_mod+rlo; g_sfrd_hi=a5_mod+rhi; g_sfrd_a5lib=lib510.a5; }
           mod_restore_stub=mem->allocate(2); mem->write_u16b(mod_restore_stub,0xAAF7); // A5-switch return stub
-          // XHeap-arena fix (addm 382, cont.): with the page-align fix above, twoA5 dynamic NewPtr/
-          // NewHandle blocks now correctly route to the LOW heap — but the default low arena is only
-          // 0x4000..0xFE000 (~1MB) and this module's XHeap + 640x480 offscreen buffers overflow it,
-          // spilling into fresh EXACTLY-sized arenas (0x30xxxx) where a struct field read a hair past a
-          // block's end faults ("not within any arena"). Extend the low heap contiguously up to the
-          // library arena (0x01000000) for twoA5 loads only, so blocks pack together and edge reads land
-          // in adjacent zeroed heap. Gated on twoA5 -> classic/AD3 keep the original 1MB heap (the HIGH
-          // 0x400000+ heap that regressed String Theory is NOT twoA5, so it is untouched). ADNOHEAP opts out.
-          // addm 384 CORRECTION: the original 0x000FE000 start is BROKEN on 0x4000-page hosts (Apple
-          // Silicon): the default low heap (line ~496, preallocate 0x4000..0xFE000) page-rounds UP to end at
-          // 0x00100000, so a 0xFE000 arena overlaps it and throws "fixed-address arena overlaps existing
-          // arena" — caught by the library try -> "dll# module will not render" (Art Critic et al. never
-          // loaded their library here). Use the same page-aligned 0x00340000 start as the single-A5 path
-          // (above): it clears the low heap AND every fixed allocate_at region (CODE_BASE 0x100000,
-          // 0x280000, 0x320000) and packs overflow dynamic allocations contiguously below the library arena.
+          // twoA5 dynamic NewPtr/NewHandle blocks route to the LOW heap, but the default low arena is only
+          // 0x4000..0xFE000 (~1MB) and a twoA5 module's XHeap + 640x480 offscreen buffers overflow it,
+          // spilling into fresh EXACTLY-sized arenas where a struct field read a hair past a block's end
+          // faults ("not within any arena"). Extend the low heap contiguously up to the library arena
+          // (0x01000000) for twoA5 loads only, so blocks pack together and edge reads land in adjacent
+          // zeroed heap. Gated on twoA5 -> classic/AD3 keep the 1MB heap. ADNOHEAP opts out.
+          // The start must be the page-aligned 0x00340000 used by the single-A5 path above: on 0x4000-page
+          // hosts (Apple Silicon) the default low heap page-rounds UP to end at 0x00100000, so a 0xFE000
+          // arena overlaps it and throws "fixed-address arena overlaps existing arena" (caught by the
+          // library try -> "dll# module will not render"). 0x00340000 clears the low heap and every fixed
+          // allocate_at region (CODE_BASE 0x100000, 0x280000, 0x320000) and packs overflow dynamic
+          // allocations contiguously below the library arena.
           if(!getenv("ADNOHEAP")) mem->preallocate_arena(0x00340000, 0x01000000 - 0x00340000);
         }
         // --- library DATA: packed just below A5 (near A5), disjoint from the module block ---
@@ -2356,19 +2249,18 @@ int main(int argc, char** argv){
             uint32_t slot=lib510.tvBaseAddr + g_tvStride()*(f.tvBase+j);
             uint32_t target=f.codeBase + f.jumpOff[j] + g_jtBias();   // ADJTBIAS: the host's fr.code INCLUDES the
             // 4-byte near-model header, but JUMP codeOffsets are relative to the code AFTER it, so every
-            // island target is 4 bytes early (observed: landing on disasm 0x8C, mid-instruction, when the
-            // intended entry was disasm 0x90). ADJTBIAS=4 corrects it.
+            // island target would be 4 bytes early and land mid-instruction. ADJTBIAS=4 corrects it.
             mem->write_u16b(slot+0,0x4EF9); mem->write_u32b(slot+2,target); if(g_tvStride()>=8) mem->write_u16b(slot+6,0);
           }
         };
         for(auto& f : lib510.frags)    emitTv(f);
         for(auto& f : lib510.modFrags) emitTv(f);
         // ADLOWJT: populate the CodeWarrior NEAR-model A5 jump table (LOW band) for EVERY fragment, not just
-        // the module. Layout (recovered addm 253-258 + Lunacy): entry g at A5+0x20+8g = {u16 codeOff, 0x4EF9,
-        // u32 target}, so a compiled `jsr (0x22+8g, A5)` lands on the 4EF9. g is the SAME global index used for
-        // the high TV band (f.tvBase+j). Without this the low band is zeros, which is why (a) C++ vtable slots
-        // resolved via DRLT self-relocs (ptr=a5+cur, cur<0x3800) point at nothing, and (b) frag136's static-ctor
-        // walker `jsr (0,A5,D1.w)` @__start+0x20 derails (addm 253/255; PASS0 "invalid opcode" at A5+0).
+        // the module. Layout: entry g at A5+0x20+8g = {u16 codeOff, 0x4EF9, u32 target}, so a compiled
+        // `jsr (0x22+8g, A5)` lands on the 4EF9. g is the SAME global index used for the high TV band
+        // (f.tvBase+j). Without this the low band is zeros, so (a) C++ vtable slots resolved via DRLT
+        // self-relocs (ptr=a5+cur, cur<0x3800) point at nothing, and (b) frag136's static-ctor walker
+        // `jsr (0,A5,D1.w)` @__start+0x20 derails.
         if(getenv("ADLOWJT")){
           uint32_t lowN=0;
           auto emitLow=[&](AdLibFragment& f){
@@ -2389,9 +2281,9 @@ int main(int argc, char** argv){
         // A5 jump table at a SMALL base (header at A5+0x20, 8-byte entries [offset.w][4EF9][target.l],
         // so the compiled `jsr (0x22+8*k, A5)` lands on the 4EF9 at entry+2). Our shared TV at A5+0x3800
         // satisfies the runtime CRLT imports but NOT these hardcoded module-internal near-JT calls
-        // (Clocks: 0x01017B56 jsr [A5+0x42]=export_4 -> unpopulated A5 gap -> derail, addenda 128-129).
+        // (Clocks: 0x01017B56 jsr [A5+0x42]=export_4 -> unpopulated A5 gap -> derail).
         // Emit a SECOND island set for the module frag at A5+0x22+8*k pointing at the real export code.
-        // Env-gated (default off) until validated regression-clean across the dll# cluster.
+        // Env-gated (default off).
         if(getenv("ADMODJT") || getenv("ADMULONLY")){  // ADMULONLY: populate ONLY the __mul32 slot (skip the near-JT
                                         // emission, which has wrong targets -> garbage derail). Tests whether just the
                                         // A5+0x42 helper suffices. ADMODJT: env-gated full near-JT (targets misaligned).
@@ -2423,7 +2315,7 @@ int main(int argc, char** argv){
           // ADMODJTMUL=hexDisp: overlay a specific near-JT slot with a callee-clean 32x32 MULU.L helper.
           // The module's compiled `jsr (0x42,A5)` (slot 4) is CodeWarrior's __mul32 runtime helper — a pure
           // arithmetic routine the Runtime fragment's jumpOff[] ordering does NOT align to (Runtime.jumpOff[4]
-          // resolves to a wrong-signature function, addendum 131). Backing that ONE slot with a real MULU.L
+          // resolves to a wrong-signature function). Backing that ONE slot with a real MULU.L
           // (identical result, no fidelity loss for a math helper) lets rand()/scaling proceed. Default slot
           // = A5+0x42 (the observed __mul32 site); comma-list for multiple. The stub is: move.l (4,A7),D0;
           // move.l (8,A7),D1; mulu.l D1,D0; rtd #8  (callee-clean, pops the 2 long args, product in D0).
@@ -2438,22 +2330,11 @@ int main(int argc, char** argv){
               // ADMULSKIP="name1,name2": far-model AD3 dll# modules use lib510.a5+0x42 as a genuine near-model
               // JT/data slot the library drives on a DIFFERENT sub-path, NOT the __mul32 helper the near-JT
               // users (Rebound/Clocks/Daredevil Dan) need. Overwriting it with the MULU.L island diverts the
-              // library init (rtd #8 stack unbalance) -> module bails (0px). Nirvana is such a module: it
-              // renders WITHOUT the island (19267px) and blanks WITH it. Skip the write for listed modules so
-              // the mission's ADMULONLY config also renders them, while canaries still receive the helper.
-              // Default list = "Nirvana"; ADMULSKIP="" disables the skip. Self-gated to the argv path so
-              // classic/ADgm and unlisted modules are byte-untouched. (addm 436)
-              // gate-c lane, census correction + KEPT DELIBERATELY: this reads like a default-path name gate
-              // (the built-in "Nirvana" default makes a module name the shipping value) but it is NOT
-              // reachable on a shipping run — the enclosing block requires ADMODJTMUL or ADMULONLY, and that
-              // block in turn sits under ADMODJT||ADMULONLY. It is a DIAGNOSTIC lever, not a doctrine
-              // violation. The DEFAULT path's equivalent was already dissolved name-free by addm 637 (see the
-              // structural __mul32 installer below: install IFF the slot holds the wrong XImage-dtor binding).
-              // That discriminator CANNOT be hoisted here: measured with ADMULONLY=1 ADMULPROBE=1, the slot
-              // lib510.a5+0x42 reads w0=0000 l2=00000000 at THIS point in the load for all four relevant
-              // modules (Nirvana, Rebound, Clocks, Daredevil Dan) — the binding only materialises after
-              // relocation, which is exactly where addm 637 put its test. Deleting the name list here would
-              // therefore break the legacy A/B this lever exists for, with zero default-path gain. Kept.
+              // library init (rtd #8 stack unbalance) and the module bails. Nirvana is such a module: it
+              // renders without the island and blanks with it. Skip the write for listed modules; the default
+              // list is "Nirvana" and ADMULSKIP="" disables the skip. This whole block is diagnostic — it is
+              // reachable only under ADMODJTMUL or ADMULONLY; the default path installs the __mul32 helper
+              // structurally, by testing whether the slot holds the wrong XImage-dtor binding.
               { const char* mskip = getenv("ADMULSKIP") ? getenv("ADMULSKIP") : "Nirvana";
                 bool skip=false; if(mskip && *mskip && argc>1){ std::string sk=mskip; size_t q=0;
                   while(q<sk.size()){ size_t e=sk.find(',',q); std::string t=sk.substr(q,e==std::string::npos?e:e-q);
@@ -2487,29 +2368,22 @@ int main(int argc, char** argv){
         // module world. The islands are plain `jmp target.L` (same absolute library-code target) — i.e. NO
         // A5 switch: library functions that don't read their A5 globals are A5-agnostic and run correctly
         // under a5_mod. If Art Critic's construction calls a library fn that DOES read library A5 globals,
-        // that surfaces as a NEW (deeper) fault to address with an A5-switching thunk (design addm 363b). ----
+        // that surfaces as a deeper fault to be addressed with an A5-switching thunk. ----
         if(twoA5){
           // Cross-boundary A5 handling for module->library calls. DEFAULT = plain jmp (no switch): library
-          // functions that don't read their A5 globals are A5-agnostic and run correctly under a5_mod; this
-          // cleanly drives Art Critic deep past its shared blocker. ADMOD2A5SWITCH = opt-in A5-switch
-          // trampoline (still WIP: it also needs the reverse library->module callback direction to switch
-          // A5 back, else nested vtable callbacks corrupt the stack — the next design step, addm 363b).
+          // functions that don't read their A5 globals are A5-agnostic and run correctly under a5_mod.
+          // ADMOD2A5SWITCH = opt-in A5-switch trampoline; it also needs the reverse library->module callback
+          // direction to switch A5 back, else nested vtable callbacks corrupt the stack.
           bool doSwitch = getenv("ADMOD2A5SWITCH")!=nullptr;
-          // addm 460: the bidirectional switch subsystem. ON by default for Bad Dog! (real flip in a plain
-          // sweep, name-gated so every other module is byte-identical), or forced for ANY twoA5 module via
-          // ADTWOA5SWITCH. Disable lever ADNOTWOA5SWITCH (A/B). When active, EVERY island in the module world
-          // becomes a self-reading universal ENTER island {0xAAFA ; target.L}; the 0xAAFA handler classifies
-          // target by fragment (module->a5_mod, library->a5_lib), saves the CURRENT A5, and installs the 0xAAEE
-          // restore stub. This handles both the module->library forward call and the library->module virtual
-          // callback (which reaches a module vtable's module-world island while running under a5_lib) with one
-          // reentrant mechanism. ADTWOA5LIBBAND additionally converts the LIBRARY-world band islands the same
-          // way, so a module method (a5_mod) dispatching on a LIBRARY child (whose vtable points at a
+          // The bidirectional switch subsystem, DEFAULT-OFF behind ADTWOA5SWITCH (applies to ANY twoA5
+          // module when set). When active, EVERY island in the module world becomes a self-reading universal
+          // ENTER island {0xAAFA ; target.L}; the 0xAAFA handler classifies target by fragment
+          // (module->a5_mod, library->a5_lib), saves the CURRENT A5, and installs the 0xAAEE restore stub.
+          // This handles both the module->library forward call and the library->module virtual callback
+          // (which reaches a module vtable's module-world island while running under a5_lib) with one
+          // reentrant mechanism. ADTWOA5LIBBAND additionally converts the LIBRARY-world band islands the
+          // same way, so a module method (a5_mod) dispatching on a LIBRARY child (whose vtable points at a
           // library-world island) also switches to a5_lib.
-          // DEFAULT-OFF, pure lever ADTWOA5SWITCH (applies to ANY twoA5 module when set) so a plain sweep is
-          // byte-identical for EVERY module, Bad Dog! included. (Empirically the switch does not flip Bad Dog!:
-          // its wall is an upstream NULL-construction — the object reaching the library base CalcMemoryNeeded is
-          // already null before any library->module callback, so the reverse direction never fires. Auto-on
-          // would only perturb Bad Dog!'s heap with no gain, so keep the subsystem lever-gated.)
           bool twoA5switch = getenv("ADTWOA5SWITCH")!=nullptr;
           if(twoA5switch && !a5sw_restore_stub){ a5sw_restore_stub=mem->allocate(2); mem->write_u16b(a5sw_restore_stub,0xAAEE); }
           auto emitTvMod=[&](AdLibFragment& f, bool isLib){
@@ -2535,7 +2409,7 @@ int main(int argc, char** argv){
           };
           for(auto& f : lib510.frags)    emitTvMod(f, /*isLib=*/true);
           for(auto& f : lib510.modFrags) emitTvMod(f, /*isLib=*/false);
-          // addm 460: optionally convert the LIBRARY-world band islands (tvBaseAddr) to the same universal
+          // Optionally convert the LIBRARY-world band islands (tvBaseAddr) to the same universal
           // ENTER trampoline, so a module method running under a5_mod that dispatches on a LIBRARY child object
           // (whose vtable slots point into the library-world band) switches to a5_lib. Gated ADTWOA5LIBBAND
           // (default off) so the minimal module-world-only fix can be A/B'd against the full both-bands fix.
@@ -2558,8 +2432,8 @@ int main(int argc, char** argv){
           fprintf(stderr,"[lib510] two-A5: a5_mod=%08X TVmod@%08X (module world mirrors lib TV band + stubs)\n",
             a5_mod, tvBaseAddrMod);
           // ADZEROSLOTS="disp[,disp...]" (hex A5-displacements) — experiment: zero these cells in BOTH
-          // A5 worlds after the TV band is built. Chasing the Bad Dog! collision where a library near-data
-          // global (e.g. +0x7A30) falls inside the TV island band and reads island bytes as a GrafPtr.
+          // A5 worlds after the TV band is built. Diagnoses collisions where a library near-data global
+          // (e.g. +0x7A30) falls inside the TV island band and reads island bytes as a GrafPtr.
           if(getenv("ADZEROSLOTS")){ std::string s=getenv("ADZEROSLOTS"); size_t q=0;
             while(q<s.size()){ size_t e=s.find(',',q); std::string t=s.substr(q,e==std::string::npos?e:e-q);
               uint32_t d=(uint32_t)strtoul(t.c_str(),0,16);
@@ -2590,7 +2464,7 @@ int main(int argc, char** argv){
           // Callee-clean 32x32->32 MULU.L helper (move.l (4,A7),D0; move.l (8,A7),D1; mulu.l D1,D0; rtd #8).
           // The AD3 CRT (frag136) calls its integer-multiply runtime helper via hardcoded `jsr (disp,A5)`
           // at FIXED A5 offsets the original AD3.0 host populated. Known slots: 0x6F38 (rand mult) and 0x3806
-          // (the rand()-LCG multiply the +ODE boot's init hits, addendum-110). ADMULSTUBOFF=hex adds one more.
+          // (the rand()-LCG multiply the +ODE boot's init hits). ADMULSTUBOFF=hex adds one more.
           const uint8_t stub[]={0x20,0x2F,0x00,0x04, 0x22,0x2F,0x00,0x08, 0x4C,0x01,0x00,0x00, 0x4E,0x74,0x00,0x08};
           for(uint32_t off : {0x6F38u, 0x3806u}){ uint32_t s=lib510.a5+off;
             for(size_t i=0;i<sizeof(stub);i++) mem->write_u8(s+i,stub[i]); }
@@ -2620,7 +2494,7 @@ int main(int argc, char** argv){
               s.kind=2; s.frag=f; s.off=e.off; s.tv=0;
             }
           }
-          // 4.0 name map (addm 340): exports index-aligns with symNames; kind/jtOff parse identically.
+          // 4.0 name map: exports index-aligns with symNames; kind/jtOff parse identically.
           if(!f->symNames.empty()){
             for(size_t k=0;k<f->exports.size() && k<f->symNames.size();k++){
               const std::string& nm=f->symNames[k]; if(nm.empty()) continue;
@@ -2630,8 +2504,8 @@ int main(int argc, char** argv){
                 if(!lib510.nameExports.count(nm))
                   lib510.nameExports[nm]=AdLib510::SymBind{1,(uint16_t)(f->tvBase+e.jumpIndex),f,0};
               } else {
-                // data export: bytes[12:14] (already in e.off) is the A5-data offset — verified 100%
-                // across all fragments' kind==0 records (all < JOHN a5DataSize; addm 341).
+                // data export: bytes[12:14] (already in e.off) is the A5-data offset — verified across
+                // all fragments' kind==0 records (all < JOHN a5DataSize).
                 if(!lib510.nameExports.count(nm))
                   lib510.nameExports[nm]=AdLib510::SymBind{2,0,f,e.off};
               }
@@ -2672,21 +2546,20 @@ int main(int argc, char** argv){
         // A5-disps use the value directly as an import ordinal, so this threshold is DREL-only.)
         auto ordBaseOf=[&](AdLibFragment& f)->uint16_t{
           uint16_t m=0xFFFF; for(auto& e:f.exports) if(e.key12<m) m=e.key12; return m; };
-        bool noSelfPrio=getenv("ADNOSELFPRIO")!=nullptr;       // self-priority ON by default now
+        bool noSelfPrio=getenv("ADNOSELFPRIO")!=nullptr;       // self-priority is ON by default
         // Resolve key to a binding. `wantData`: true => want a DATA symbol (kind 0xFFFF reloc),
         // false => want a CODE symbol (kind 0xFFFE reloc). Self-priority checks the fragment's own
         // exports of the matching class first, then the corresponding global map.
         auto resolveKey=[&](AdLibFragment& f, uint32_t value, bool wantData)->AdLib510::SymBind{
           uint16_t key=(uint16_t)(value & 0xFFF);
-          // *** 4.0 name-import model (addm 357, agent-decoded from the engine's own resolver @0x040197C6,
-          // verified 3777/3777 records, 0 misses): the FULL 32-bit addend is a byte offset into the
-          // IMPORTING fragment's OWN NAME resource, pointing at the nameLen byte of the imported symbol's
-          // mangled name. Resolve that name against the global export map. Special addends (0, 0xFFFFFFFF,
-          // 0xFFFFFFFC) fall through naturally (out of NAME range). The CREL `index` field is NOT used.
-          // AD3-file fragments and module fragments have empty name_tbl and skip this path entirely.
-          // (Supersedes the addm-341 ADNAME40 SYMS-index model, which was wrong: it masked the addend.)
+          // 4.0 name-import model (decoded from the engine's own resolver @0x040197C6): the FULL 32-bit
+          // addend is a byte offset into the IMPORTING fragment's OWN NAME resource, pointing at the
+          // nameLen byte of the imported symbol's mangled name. Resolve that name against the global export
+          // map. Special addends (0, 0xFFFFFFFF, 0xFFFFFFFC) fall through naturally (out of NAME range).
+          // The CREL `index` field is NOT used. AD3-file fragments and module fragments have empty
+          // name_tbl and skip this path entirely.
           if(lib510.nameMode && !f.name_tbl.empty() && value>0 && value<f.name_tbl.size()){
-            uint8_t L=(uint8_t)f.name_tbl[value];        // cap 64 -> 255 (addm 391): long mangled names
+            uint8_t L=(uint8_t)f.name_tbl[value];        // Pascal length is a full u8: long mangled names
             if(L>0 && value+1+L<=f.name_tbl.size()){
               auto it=lib510.nameExports.find(f.name_tbl.substr(value+1,L));
               if(it!=lib510.nameExports.end()) return it->second;
@@ -2707,13 +2580,13 @@ int main(int argc, char** argv){
         // in relocFrag before use (both lambdas capture by reference).
         uint32_t effA5 = lib510.a5;
         uint32_t effTv = lib510.tvBaseAddr;
-        // ==== module-world data DE-ALIASING (addm 393) ====
-        // In two-A5 mode every A5-relative DATA ref from a module fragment whose displacement
-        // exceeds signed-16 was previously CLAMPED to one shared 8-byte stub cell (addm 367/392),
-        // collapsing 42 distinct globals onto one address -> `_vtbl__5XJpeg` aliased `theException`
-        // etc. -> vtable dispatch jsr'd into a setjmp buffer (pc=0x2FFE3E). De-alias in two parts:
+        // ==== module-world data DE-ALIASING ====
+        // In two-A5 mode an A5-relative DATA ref from a module fragment whose displacement exceeds
+        // signed-16 would otherwise be CLAMPED to one shared 8-byte stub cell, collapsing dozens of
+        // distinct globals onto one address (`_vtbl__5XJpeg` aliasing `theException`, so vtable dispatch
+        // jsr's into a setjmp buffer). De-alias in two parts:
         //  CAT-1 (library-DATA global referenced from module code): resolve the disp against lib_a5
-        //        (NOT a5_mod). The addm-372 mirror already placed the RELOCATED library DATA at the
+        //        (NOT a5_mod). The library-DATA mirror already placed the RELOCATED library DATA at the
         //        SAME lib_a5-relative disp inside the module world [a5_mod-libDataBytes,a5_mod), so
         //        `(disp16,A5)` with A5=a5_mod lands on the correct mirrored global. Zero new storage.
         //  CAT-2 (module-DATA far global, MODULE_131/132/133): relocate into MODULE_129's provably-
@@ -2721,175 +2594,84 @@ int main(int argc, char** argv){
         //        contiguous sub-bands (target T -> nearBase_f + (T-farMin_f)); s16-reachable. No
         //        absolute pointer targets this region (verified: zero DRLT ptr in [0x03000000,a5_mod)),
         //        so the far storage is dead once every disp16 ref is repointed -> aliasing-safe.
-        // Gated on twoA5 -> classic/AD3 (single-A5) never enter this path = zero-regression by
-        // construction. ADNODEALIAS restores the addm-367 shared-clamp behaviour for A/B.
+        // Gated on twoA5 -> classic/AD3 (single-A5) never enter this path.
+        // ADNODEALIAS restores the shared-clamp behaviour for A/B.
         bool deAlias = lib510.twoA5 && lib510.a5_mod && !getenv("ADNODEALIAS");
         std::map<AdLibFragment*, uint32_t> farMin, farMax, farNearBase, farNearEnd;
-        // ADSFBAND (addm 426): structural de-alias band allocator + copy-after-relocate.
-        //  Old (addm 393) behaviour: pack CAT-2 near bands contiguously UP from a5_mod-0x8000 and copy
-        //  far->near in the PRE-PASS (before relocFrag). Two defects (root-caused addm 425):
-        //   (1) contiguous packing runs straight THROUGH non-de-aliased fragments' live DATA images
-        //       (e.g. RPS: MODULE_130 DATA [0300F760,0301006A) sits inside the packed band range) ->
-        //       the band copy clobbers live data AND relocFrag's writes to those far sites corrupt the band.
-        //   (2) the far->near copy happens BEFORE relocFrag applies DRLT, so near-mirror C++ vtables hold
-        //       raw (unrelocated) offsets -> every virtual dispatch returns null (RPS getCanvas [vt+0x68]=0).
-        //  ADSFBAND fix: a free-list allocator places each exporter's band in a gap that overlaps NO
-        //  fragment DATA image, NO other band, and NOT the CAT-1 mirror (BSS gaps are candidate-free);
-        //  the far->near copy is DEFERRED until AFTER relocFrag so the near band inherits the RELOCATED
-        //  (DRLT-patched) far bytes. If no gap fits an exporter it stays clamped (fall back, no corruption).
-        // addm 447: name-gate the structural allocator ON for Rock Paper Scissors automatically. The
-        // allocator+vptr-mirror repairs RPS's null getCanvas vtable (addm 425/426) which is REQUIRED for
-        // RPS to render; enabling it GLOBALLY perturbs Art Critic (its render is band-placement-sensitive,
-        // addm 426), so we restrict it to the RPS module path — every other module (incl. all canaries)
-        // stays on the verbatim addm-393 !sfBand branch => byte-identical. ADSFBAND=1/0 still force on/off.
-        // (addm 762: the `rps_dealias` name test itself is DELETED — see the SHIP note below. This
-        // paragraph is retained as the addm-447 provenance record for why the allocator exists.)
-        // addm 506: Bad Dog! ROOT FIX. The addm-393 default near-band pack (contiguous UP from
-        // a5_mod-0x7000 for baddog, to dodge the addm-502 JT band) OVERRUNS MODULE_129's own live DATA
-        // image: MODULE_130's 0x84C-byte far-global band lands at a5_mod-0x7000..a5_mod-0x67B4, and
-        // MODULE_129 DATA begins at dataBase=a5_mod-0x6914 — so the band (and its post-reloc code-ptr
-        // mirror) overwrite the first 0x160 bytes of MODULE_129 DATA, INCLUDING _vtbl__9Clipboard at
-        // dataBase+0xA. The overwrite replaces the (correct, 2-mod-4-aligned, export-off-0xA) Clipboard
-        // vtable with MODULE_130's 4-aligned TV-island array, so the object's virtual dispatch
-        // [*(obj)+0x78] reads a 2-byte-misaligned long (0x9EC80302) -> wild jsr -> fault. (The export
-        // offset 0xA and the on-disk reloc were BOTH correct all along; the addm-504 "alignment
-        // mismatch" was a symptom of this clobber, not a symbol/reloc-offset defect.) The sfBand
-        // free-list allocator (addm 426) places every band in a gap that provably overlaps NO fragment
-        // DATA image (it adds each modFrag [dataBase,dataBase+data.size()) to the occupied set), so it
-        // never touches MODULE_129's live vtables. With the addm-502 JT resolver + addm-504 Microseconds
-        // fix now in place, enabling it for Bad Dog! clears the gate and renders the genuine dog-vs-icons
-        // animation (colors=16, distinct=8). Name-gated: every other module keeps rps-only sfBand ->
-        // the addm-393 !sfBand branch stays byte-identical (canaries unchanged).
-        // (addm 762: the `baddog_dealias` name test itself is DELETED — see the SHIP note below. This
-        // paragraph is retained as the addm-506 provenance record for the root cause it documents.)
-        // ==== addm 670 (HOLD — parity-clean, default byte-identical to main): sfBand stays name-gated exactly as
-        // before (RPS + Bad Dog!); the corpus-wide default flip is NOT shipped. The S1 (addm 637) framing —
-        // "RD-vs-Bad Dog! near-JT placement conflict; needs live/dead near-JT slot analysis" — was investigated
-        // with the execution-based classifier the task asked for (ADSFLIVEPROBE) and REFRAMED with evidence; the
-        // honest verdict is a documented HOLD rather than a new per-module name exception (which the zero-gates
-        // program exists to eliminate) and rather than a regression:
-        //   (1) ADSFNEARSCAN is a NO-OP on current main for RD and Bad Dog! (DRE-islandTop already above every
-        //       pea/lea site; placements BYTE-IDENTICAL with/without it — ADSFBANDLOG). Bad Dog! is byte-
-        //       identical under sfBand (it already used it). The conflict is NOT RD-vs-Bad Dog!.
-        //   (2) near-JT LIVE/DEAD classifier (ADSFLIVEPROBE): record module-world (A5==a5_mod) near-JT slots
-        //       JUMPED-through (jsr/jmp (d16,A5)) — true island liveness — vs merely ADDRESS-TAKEN (pea/lea,
-        //       which INSIDE a band are the band's own relocated-global targets, not clobbers). For ALL SIX
-        //       twoA5 modules {AC 215, RPS 282, Bad Dog! 445, RD 212, Super Guy 82, Slow Burn 155 jumped}: ZERO
-        //       bands overlap a live jumped island. The near-JT dimension is SAFE corpus-wide; NOT the RD issue.
-        //   (3) THE REAL RD REGRESSION (robust auto-restart census, addm 639): forcing sfBand on RD (ADSFBAND=1)
-        //       renders it BLANK (census distinct=1, 31k frames identical) vs distinct=64 on the addm-393 pack —
-        //       deterministic. Isolated: NOT the vptr mirror (ADSFNOMIRROR still blanks), NOT near-JT (0
-        //       clobbers). It is the above-a5 band PLACEMENT: RD reads/writes its OWN near-A5 data in the clean
-        //       above-a5 gap where its band lands. Art Critic is the EXACT MIRROR — it FREEZES on the addm-393
-        //       BELOW-a5 placement (census d=2) and only animates ABOVE-a5 (d=64); both place all 4 bands.
-        //   (4) WHY NO STRUCTURAL (LOAD-TIME) DISCRIMINATOR EXISTS (ADSFOCCDUMP proof): at allocation time the
-        //       clean above-a5 region [a5_mod+islandTop, tvBase) is ENTIRELY ZERO for BOTH RD and Art Critic
-        //       (0 non-zero runs). RD's clobbered data is written at RUNTIME during init, not present at load —
-        //       so no load-time memory/reference scan can tell RD (needs below-a5) from Art Critic (needs above-
-        //       a5); the two are only separable by EXECUTING the module and observing its near-A5 data footprint
-        //       (ADSFDATASCAN, a static (d16,A5) scan, confirms this: it flags Art Critic's WORKING band and
-        //       misses RD's, because de-alias-target refs are indistinguishable from clobbers). The genuine fix
-        //       is a per-module A5-data-FOOTPRINT occupied set from an EXECUTION probe feeding the allocator
-        //       (2-pass: MemoryContext is non-copyable so it needs a probe subprocess or a callable load) — a
-        //       real subsystem, scoped as the next task. Until then the honest choice is this HOLD.
-        // DELIVERED: the ADSFLIVEPROBE near-JT classifier (proves the near-JT dimension safe) + the corrected
-        // root-cause + the ADSFOCCDUMP load-time-zero proof. DEFAULT unchanged (RPS + Bad Dog! only) so this is
-        // byte-identical to main; Art Critic's verified-correct render remains available via ADSFBAND=1.
-        // Levers: ADSFBAND=1/0 (force sfBand on/incl-RD = the regressing full flip / off), ADSFLIVEPROBE
-        // (near-JT classifier + band-overlap validator), ADSFDATASCAN (static footprint scan — insufficient),
-        // ADSFOCCDUMP (load-time occupancy of the clean above-a5 gap — proves it is zero), ADSFNEARSCAN (no-op).
-        // SHIP (near-JT completion): sfBand is the ZERO-NAME default for EVERY twoA5 de-alias module. The
-        // addm-447/506 name gate (rps_dealias || baddog_dealias) is DISSOLVED — the execution-island probe
-        // below places each module's de-alias bands off the slots that module executes code in, which is what
-        // the name gate was standing in for. ADSFBAND=1/0 still force on/off for A/B.
-        // addm 762 (name-gate audit, lane A): the two dissolved name tests and their `(void)` casts are
-        // DELETED. They computed two booleans no consumer read; the provenance they anchored lives in the
-        // addm-447/506 paragraphs above, which stay. Rebuilt binary byte-identical (modulo the Mach-O
-        // LC_UUID + ad-hoc signature, which differ between any two builds of identical source here).
+        // ADSFBAND: structural de-alias band allocator + copy-after-relocate. A free-list allocator places
+        // each exporter's band in a gap that overlaps NO fragment DATA image, NO other band, and NOT the
+        // CAT-1 mirror (BSS gaps are candidate-free) — contiguous packing up from a5_mod-0x8000 would run
+        // straight THROUGH non-de-aliased fragments' live DATA images, so the band copy would clobber live
+        // data and relocFrag's writes to those far sites would corrupt the band. The far->near copy is
+        // DEFERRED until AFTER relocFrag so the near band inherits the RELOCATED (DRLT-patched) far bytes;
+        // copying first leaves near-mirror C++ vtables holding raw offsets, so every virtual dispatch
+        // returns null. If no gap fits an exporter it stays clamped.
+        // Band placement cannot be decided at load time: the clean above-a5 region [a5_mod+islandTop,
+        // tvBase) is entirely zero for every module at allocation time, and a module that needs a below-a5
+        // placement (Rodger Dodger, which blanks when its band lands above a5) writes the conflicting data
+        // only at RUNTIME during init. A static (d16,A5) scan cannot separate that from Art Critic, which is
+        // the exact mirror — it freezes on a below-a5 placement and only animates above a5 — because
+        // de-alias-target refs are indistinguishable from clobbers. Hence the execution-island probe: sfBand
+        // is the zero-name default for EVERY twoA5 de-alias module and the probe places each module's
+        // de-alias bands off the slots that module executes code in. The near-JT dimension itself is safe
+        // corpus-wide: measured with ADSFLIVEPROBE, no band overlaps a live jumped island in any twoA5
+        // module. Levers: ADSFBAND=1/0 (force sfBand on/off), ADSFLIVEPROBE (near-JT live/dead classifier
+        // + band-overlap validator), ADSFDATASCAN (static footprint scan, insufficient on its own),
+        // ADSFOCCDUMP (load-time occupancy of the clean above-a5 gap), ADSFNEARSCAN (pea/lea site scan; a
+        // no-op while islandTop already clears every site).
         bool sfBand = deAlias && (getenv("ADSFBAND")
                         ? strcmp(getenv("ADSFBAND"),"0")!=0
                         : true);
-        // SHIP: when sfBand is the default and no island file was supplied, run the deterministic
-        // execution-island probe fork now (before the allocator) and route its output through the ADSFXIN
-        // path so the allocator raises islandTop above this module's live near-JT islands.
+        // When sfBand is on and no island file was supplied, run the deterministic execution-island probe
+        // fork now (before the allocator) and route its output through the ADSFXIN path so the allocator
+        // raises islandTop above this module's live near-JT islands.
         if(sfBand && !getenv("ADSFXIN") && !getenv("ADSFPROBED") && !getenv("ADSFNOPROBE")){
           std::string isl = sf_probe_fork(argc, argv);
           if(!isl.empty()){ if(!g_sf_from_cache){ g_sf_islandfile=isl; atexit(sf_islandfile_cleanup); } setenv("ADSFXIN", isl.c_str(), 1); }
         }
-        // addm 451: Bad Dog! shares RPS's null-C++-vtable gate but from a DIFFERENT half of the
-        // addm-425/426 defect. Its MODULE_130 far vtable (0x03012324, the MacScreenCanvas-factory /
-        // ScreenDevice object's vtable) IS inside the default addm-393 near band [farMin,farMax+8], so
-        // the band is NOT truncated (RPS's gate-3 / bandHiFor problem does not apply here) — but the
-        // addm-393 default path copies the far bytes PRE-relocFrag, so every DRLT'd C++ method slot in
-        // the near mirror is left at its raw pre-reloc value (0). The MacScreenCanvas factory dispatches
-        // through near vtable[+0x34] == 0 (jsr 0) -> returns null -> IScreenCanvas(this=null) -> the
-        // singleton [A5-0x2320] is never stored -> every draw derails on the null singleton (fault
-        // pc=0103F730). The sfBand allocator's post-reloc code-pointer vptr mirror repairs exactly this
-        // class, but it (a) also RELOCATES the bands (above a5_mod), which for Bad Dog! shifts every
-        // de-alias disp and corrupts init (invalid opcode @0301BEBE), and (b) is gated sfBand-only.
-        // Fix: keep the proven addm-393 band PLACEMENT untouched and additionally run the post-reloc
-        // code-pointer mirror on those bands, name-gated to Bad Dog!. This ONLY writes relocated code
-        // pointers into DRLT vtable slots that were zero — every other near cell stays byte-identical to
-        // addm 393 (proven), so it can only turn a null vptr into a real one. sfBand stays OFF for Bad Dog!.
-        // addm 762 (gate-B retirement): the addm-451/502 repairs are not keyed to the title "Bad Dog!" but
-        // to a structural property of the LINK — a module whose TV/import band runs past a5_mod+0x7FFF.
-        // `jsr (d16,A5)` reads d16 SIGNED, so every import at TVOFF+8*tv > 0x7FFF is written with a
-        // displacement that wraps negative and lands in the near-A5 BSS instead of its far island; that
-        // wrap is what creates both the "212-slot jump table" the addm-502 repair populates and the band
-        // placement conflict the addm-451 cursor dodges. Measured over the whole twoA5 corpus: Bad Dog!
-        // tvEnd=0x8780 (212 wrapped slots, 683 call sites); every other twoA5 module ends below the limit
-        // (Art Critic 0x7F78, FT 0x7C08, RPS 0x7D20, RD 0x7BB0, SG 0x7A48, SB 0x7920, MT 0x78A0) and has
-        // ZERO wrapped slots — so every consumer below is inert for them by construction, not by name.
+        // A twoA5 module whose TV/import band runs past a5_mod+0x7FFF needs extra repairs, keyed to that
+        // structural property of the LINK rather than to any module name. `jsr (d16,A5)` reads d16 SIGNED, so
+        // every import at TVOFF+8*tv > 0x7FFF is written with a displacement that wraps negative and lands in
+        // the near-A5 BSS instead of its far island; that wrap creates both the wrapped near-JT slot table the
+        // resolver below populates and the band-placement conflict the placement cursor dodges. Measured over
+        // the whole twoA5 corpus: Bad Dog! tvEnd=0x8780 (212 wrapped slots, 683 call sites); every other twoA5
+        // module ends below the limit (Art Critic 0x7F78, FT 0x7C08, RPS 0x7D20, RD 0x7BB0, SG 0x7A48,
+        // SB 0x7920, MT 0x78A0) and has ZERO wrapped slots, so every consumer below is inert for them by
+        // construction.
         bool tvWrapS16 = lib510.twoA5
                       && ((uint64_t)TVOFF + (uint64_t)g_tvStride()*lib510.tvCount) > 0x8000;
         struct SfBand{ AdLibFragment* ef; uint32_t nearBase; uint32_t farLo; uint32_t sz; };
         std::vector<SfBand> sfCopyBands;
-        // ==== addm 452: SINGLE-A5 far module-fragment data de-alias (Daredevil Dan) ====
-        // Daredevil Dan is a single-A5 (uniform, twoA5=0) dll# module with TWO module fragments
-        // (MODULE_129 main + MODULE_130). The two share one A5 and their combined DATA+BSS (0xB386)
-        // overflows the signed-16 A5 window, so the loop above stacks MODULE_130's data entirely
-        // >32KB below A5 (dataBase A5-0xBA34). MODULE_130 holds its animation sub-object's C++ vtable
-        // (DATA export key 0x6B6 @off 0x4C, DRLT-filled with method-island pointers). Every (d16,A5)
-        // reference into MODULE_130 (the vtable `lea (0x71A0,A5)` at MODULE_130 code+0xCAE, plus 135
-        // other own-data refs, all in the tiny referenced window [0,0xD6]) overflows s16, and
-        // ADA5DISPGUARD (addm 364/365) clamps them ALL to the one shared zeroed data-stub cell -> the
-        // sub-object's vtable reads all-null -> its draw method (vtable+0x8) is a jsr through 0 -> the
-        // sprite blit is a silent no-op (blank, no fault). This is the single-A5 analog of the twoA5
-        // addm-393 CAT-2 far-data de-alias (which is twoA5-gated and never fires here). Fix: mirror each
-        // far module fragment's small referenced init-data window into a near cell just above the data
-        // stub (inside s16), and repoint its (d16,A5) refs at the mirror. The copy is DEFERRED until after
-        // module relocFrag so the mirror inherits the DRLT-relocated vtable slots. Name-gated (single
-        // module) so every other module is byte-identical by construction. ADDDDEALIAS=1/0 forces on/off.
-        // NOTE (addm 452): this fix is DEFAULT-OFF. It correctly populates the sub-object vtable (verified:
-        // near mirror byte-identical to the DRLT-relocated far vtable, vtable+0x8 = the real draw island),
-        // but doing so lets MODULE_130's construction run its full path, which hits a SEPARATE deeper gate
-        // (a LIB510_Coord list-traversal advances A3 by a wrong per-element increment returned from the
-        // MODULE_130 element method @0x01035196, walking A3 into the low heap -> jsr through a zeroed heap
-        // cell -> "invalid opcode" @0x000B6CFA during init). The identical fault appears for ANY method that
-        // makes MODULE_130 reachable (fragment-reorder placement OR this de-alias), so it is NOT a mirror
-        // defect but a genuine construction/aliasing gate requiring a complete aliasing-safe single-A5
-        // far-data relocation (repoint DRLT self-pointers too) — beyond a targeted vtable mirror. Left
-        // behind ADDDDEALIAS so the vtable root-cause fix is reproducible for follow-up work; DEFAULT-OFF
-        // keeps Daredevil Dan (and every module) byte-identical to the snapshot.
-        // addm 492: FLIP. Daredevil Dan's de-alias + JT-fix + walk-bound are default-ON by name (opt-out
-        // ADNODDFLIP), matching the Bugs/Boris/Punch Out merged-flip pattern, so DD renders+animates in the
-        // lane40 sweep (which sets neither ADDDDEALIAS nor ADMULONLY). Still requires the linked single-A5
-        // dll# path (!twoA5 && lib510.a5), so every non-Daredevil / non-linked run is byte-identical.
-        // addm 762 (gate-B retirement): the mechanism is not "this module is called Daredevil Dan", it is
-        // "this single-A5 load stacked a module fragment's DATA image outside the signed-16 A5 window, so
-        // every (d16,A5) reference into it overflows and ADA5DISPGUARD collapses them onto one shared stub
-        // cell". That is exactly the loop below, so read it off the fragments instead of the title.
-        // The predicate selects Daredevil Dan, Bugs and Nirvana; all three genuinely have such a fragment
-        // (measured via ADDDRANGE: DD 235 refs into MODULE_130, Bugs 241, Nirvana 42 into MODULE_131).
+        // ==== single-A5 far module-fragment data de-alias ====
+        // A single-A5 (uniform, twoA5=0) dll# module can carry TWO module fragments whose combined DATA+BSS
+        // overflows the signed-16 A5 window, so the loop above stacks the second fragment's data entirely
+        // >32KB below A5 (Daredevil Dan: MODULE_130 at dataBase A5-0xBA34). MODULE_130 holds its animation
+        // sub-object's C++ vtable (DATA export key 0x6B6 @off 0x4C, DRLT-filled with method-island pointers).
+        // Every (d16,A5) reference into it (the vtable `lea (0x71A0,A5)` at MODULE_130 code+0xCAE plus 135
+        // other own-data refs, all in the tiny referenced window [0,0xD6]) overflows s16, and ADA5DISPGUARD
+        // clamps them ALL to the one shared zeroed data-stub cell -> the sub-object's vtable reads all-null
+        // -> its draw method (vtable+0x8) is a jsr through 0 -> the sprite blit is a silent no-op (blank, no
+        // fault). This is the single-A5 analog of the twoA5 CAT-2 far-data de-alias, which is twoA5-gated and
+        // never fires here. Fix: mirror each far module fragment's small referenced init-data window into a
+        // near cell just above the data stub (inside s16) and repoint its (d16,A5) refs at the mirror. The
+        // copy is DEFERRED until after module relocFrag so the mirror inherits the DRLT-relocated vtable
+        // slots. ADDDDEALIAS=1/0 forces on/off.
+        // The de-alias + JT-fix + walk-bound are ON by default (opt-out ADNODDFLIP) for any single-A5 load
+        // that stacked a module fragment's DATA image outside the signed-16 A5 window — the condition under
+        // which every (d16,A5) reference into it overflows and ADA5DISPGUARD collapses them onto one shared
+        // stub cell. The predicate below reads that off the fragments rather than off the module title; it
+        // selects Daredevil Dan, Bugs and Nirvana (measured via ADDDRANGE: DD 235 refs into MODULE_130,
+        // Bugs 241, Nirvana 42 into MODULE_131). It also requires the linked single-A5 dll# path
+        // (!twoA5 && lib510.a5).
         bool ddFarData = false;
         for(auto& f : lib510.modFrags)
           if(!f.data.empty() && (int64_t)f.dataBase - (int64_t)lib510.a5 < -0x8000){ ddFarData = true; break; }
         bool ddDealias = ((getenv("ADDDDEALIAS") && strcmp(getenv("ADDDDEALIAS"),"0")!=0)
                           || (ddFarData && !getenv("ADNODDFLIP"))) && !twoA5 && lib510.a5;
-        if(ddDealias) g_ddWalkFix = true;   // addm 472: enable the LIB510_Glue section-walk host bound
-        // addm 478: DD region-steering is a DOCUMENTED NEGATIVE RESULT — opt-in ONLY (never auto). Steering the
-        // section regions off-heap regresses DD (colors 201->1) and does NOT flip distinct. Default-off keeps
-        // addm-472 behaviour intact for every run. Reproduce the experiment with ADDDRGNSTEER=1.
+        if(ddDealias) g_ddWalkFix = true;   // enable the LIB510_Glue section-walk host bound
+        // DD region-steering is a documented negative result and is opt-in only, never automatic:
+        // steering the section regions off-heap regresses DD (colors 201->1) and does not flip distinct.
+        // Reproduce the experiment with ADDDRGNSTEER=1.
         if(ddDealias && getenv("ADDDRGNSTEER")) g_ddRgnSteer = true;
         struct DdMirror{ AdLibFragment* f; uint32_t farLo, sz, nearBase; };
         std::vector<DdMirror> ddMirrors;
@@ -2913,12 +2695,12 @@ int main(int argc, char** argv){
         };
         auto applyReloc=[&](AdLibFragment& f, uint32_t site, uint16_t kind, uint32_t value){
           uint16_t key=(uint16_t)(value & 0xFFF);
-          // addm 719: {kind=0xFFFF, addend=0xFFFFFFFF} = a reference to THIS fragment's own jump-table
-          // slot; the stored (d16,A5) displacement is 8k+2 counted from the fragment's own table base, so
-          // rebase it onto the base this load assigned. (The sibling class addend=0xFFFFFFFC is an
-          // ABSOLUTE displacement — the CodeWarrior runtime block at A5+0x42..0x6A — and still falls
-          // through to the leave-the-site-alone path below.) Inert when the authentic layout is off
-          // (ADNOJTBASE leaves every jtSlots at 0), so the old resolution stays byte-identical.
+          // {kind=0xFFFF, addend=0xFFFFFFFF} = a reference to THIS fragment's own jump-table slot; the
+          // stored (d16,A5) displacement is 8k+2 counted from the fragment's own table base, so rebase it
+          // onto the base this load assigned. (The sibling class addend=0xFFFFFFFC is an ABSOLUTE
+          // displacement — the CodeWarrior runtime block at A5+0x42..0x6A — and still falls through to the
+          // leave-the-site-alone path below.) Inert when the authentic layout is off (ADNOJTBASE leaves
+          // every jtSlots at 0).
           if(kind==0xFFFF && value==0xFFFFFFFFu && f.jtSlots>0){
             uint16_t d16=0; try{ d16=mem->read_u16b(site); }catch(...){}
             uint32_t ks=(d16>=2)?(uint32_t)((d16-2)/8):0xFFFFFFFFu;
@@ -2932,8 +2714,8 @@ int main(int argc, char** argv){
             }
           }
           bool wantData=(kind==0xFFFF);                        // CRLT/CREL kind: 0xFFFF=data, 0xFFFE=code
-          auto s=resolveKey(f,value,wantData);   // full 32-bit addend (addm 357 name-import model)
-          // addm 502 (Bad Dog! import-resolver RE): dump per-import resolution for module code imports.
+          auto s=resolveKey(f,value,wantData);   // full 32-bit addend (name-import model)
+          // Dump per-import resolution for module code imports.
           if(getenv("ADBDIMPRES") && f.libName.rfind("MODULE_",0)==0 && kind==0xFFFE){
             std::string nm="?";
             if(!f.name_tbl.empty() && value>0 && value<f.name_tbl.size()){ uint8_t L=(uint8_t)f.name_tbl[value];
@@ -2945,17 +2727,12 @@ int main(int argc, char** argv){
           }
           // data-ref (kind 0xFFFF) to a symbol that only exists as a CODE export = a FUNCTION POINTER
           // (address-of a proc, e.g. a sprite-blit vtable slot). No fragment exports it as data, so it
-          // cannot be a real data symbol; bind it to the callable TV island (its A5-disp). Without this
-          // the ref fell through to a zeroed udataCell -> the module read a null proc ptr and drew
-          // nothing (dll# sprite savers: Flying Toasters Pro et al ran clean but 0 pixels).
+          // cannot be a real data symbol; bind it to the callable TV island (its A5-disp).
           // value==0 (key==0) is NOT a keyed import — it is the own-DATA self-reference sentinel handled
           // below (kind==0xFFFF && value==0). The DATA->CODE fallback must NOT fire for it: resolveKey(0)
-          // spuriously matches a code export with key12==0 (an island, e.g. tv 2118 = A5+0x7A30), which
-          // hijacked all 926 own-data self-refs across every fragment onto ONE code island. LIB510_module's
-          // port/counter globals then read island bytes as a GrafPtr (Bad Dog! IsColorPort fault). Gate the
-          // fallback on value!=0 so value==0 reaches the own-DATA branch (addm 397).
-          // Gated on deAlias (twoA5) so classic/AD3/single-A5 loads keep the exact old fallback behaviour
-          // -> zero regression by construction on the standard sweep (like addm 393).
+          // spuriously matches a code export with key12==0 (an island), which would hijack every own-data
+          // self-ref across every fragment onto ONE code island. Gate the fallback on value!=0 so value==0
+          // reaches the own-DATA branch, and on deAlias so single-A5 loads keep the plain fallback.
           bool dataToCodeFallback=false;
           if(wantData && s.kind==0 && (value!=0 || !deAlias)){
             auto sc=resolveKey(f,value,/*wantData=*/false);
@@ -2971,19 +2748,14 @@ int main(int argc, char** argv){
             crOk++; return;
           }
           // ADA5DISPGUARD (default ON): a (d16,A5) displacement field is a SIGNED 16-bit value, so it can
-          // only reach A5-32768..A5+32767. Large modules (Fish! Pro: moduleDbss=0x12DA4, ~76KB, already
-          // logged as "far edge ... beyond s16 floor") place fragment DATA far enough below A5 that a
-          // self/data-export reference's true displacement (observed: MODULE_130's own-data ref at
-          // A5-0xB4F8+0x4F8 = A5-0xB000) falls WAY outside that range. The old code just did
-          // `(uint16_t)disp`, silently WRAPPING the out-of-range value — -0xAFFC wrapped to +0x5004,
-          // landing exactly inside the shared TV-island table (A5+0x3800+). A module clearing what it
-          // thinks are two of its OWN globals at that address instead zeroed 8 live bytes of the
-          // DoBlankScreen TV island; the next `jsr (0x5000,A5)` fell through the zeroed island into the
-          // ADJACENT one (BlankOtherMonitors) with the wrong argument on the stack -> out-of-bounds
-          // write -> fault (Fish! Pro, addm 364/365). Redirect any out-of-range displacement to the
-          // existing harmless zeroed scratch cell (lib510.dataStubDisp, already used for unresolved-
-          // import overflow, addm-era udataCell) instead of wrapping into live memory. ADA5DISPGUARD=0
-          // restores the old wrap-and-clobber behaviour for A/B.
+          // only reach A5-32768..A5+32767. Large modules (Fish! Pro: moduleDbss=0x12DA4, ~76KB) place
+          // fragment DATA far enough below A5 that a self/data-export reference's true displacement falls
+          // well outside that range. Truncating it to `(uint16_t)disp` silently WRAPS into live memory —
+          // e.g. -0xAFFC wraps to +0x5004, exactly inside the shared TV-island table at A5+0x3800+, so a
+          // module storing to what it thinks are its own globals overwrites a live island and the next
+          // `jsr (d16,A5)` through it derails. Redirect any out-of-range displacement to the harmless
+          // zeroed scratch cell (lib510.dataStubDisp, also used for unresolved-import overflow) instead.
+          // ADA5DISPGUARD=0 restores the wrapping behaviour for A/B.
           bool a5dispGuard = !getenv("ADA5DISPGUARD") || strcmp(getenv("ADA5DISPGUARD"),"0")!=0;
           auto clampDisp16=[&](int32_t disp)->int16_t{
             if(a5dispGuard && (disp<-32768 || disp>32767)) return (int16_t)lib510.dataStubDisp;
@@ -2994,12 +2766,12 @@ int main(int argc, char** argv){
             // A5 back, recovering the exporter's absolute DATA addr regardless of which world it lives in.
             int32_t disp=(int32_t)(s.frag->dataBase + s.off - effA5);
             try{ disp += (int16_t)mem->read_u16b(site); }catch(...){}
-            // --- de-aliasing (addm 393): module-world data ref, re-resolve far/aliased targets ---
+            // --- de-aliasing: module-world data ref, re-resolve far/aliased targets ---
             if(deAlias && effA5==lib510.a5_mod && s.frag){
               int32_t origD16=0; try{origD16=(int16_t)mem->read_u16b(site);}catch(...){}
               uint32_t target=(uint32_t)((int64_t)s.frag->dataBase + s.off + origD16);
               if(s.frag->dataBase < 0x03000000){
-                // CAT-1: library-DATA global -> address it in the addm-372 mirror (disp vs lib_a5).
+                // CAT-1: library-DATA global -> address it in the library-DATA mirror (disp vs lib_a5).
                 disp = (int32_t)((int64_t)target - lib510.a5);
               } else if(farNearBase.count(s.frag) && target>=farMin[s.frag] && target<farNearEnd[s.frag]){
                 // CAT-2: module far global -> its relocated near cell.
@@ -3008,7 +2780,7 @@ int main(int argc, char** argv){
               }
               // else: already s16-near (MODULE_129 own DATA) -> keep the computed disp above.
             }
-            // addm 452: single-A5 far module-data ref -> repoint at the near mirror (else it clamps to stub).
+            // Single-A5 far module-data ref -> repoint at the near mirror (else it clamps to stub).
             if(ddDealias && s.frag){
               int32_t origD16=0; try{origD16=(int16_t)mem->read_u16b(site);}catch(...){}
               uint32_t tgt=(uint32_t)((int64_t)s.frag->dataBase + s.off + origD16);
@@ -3030,11 +2802,11 @@ int main(int argc, char** argv){
           if(kind==0xFFFF && value==0){                        // own-DATA self reference
             int32_t origD16=0; try{origD16=(int16_t)mem->read_u16b(site);}catch(...){}
             int32_t disp=(int32_t)(f.dataBase - effA5) + origD16;
-            // De-aliasing (addm 397, same model as the data-export branch above): in the module world the
-            // fragment's own data lives either in the library world (CAT-1 -> mirror) or in a far module
-            // band (CAT-2 -> relocated near cell). Without this a library-frag own-data self-ref computes a
-            // huge disp (lib data 0x0201xxxx vs a5_mod 0x0302xxxx) and clamps to the shared scratch cell,
-            // re-aliasing exactly what addm 393 de-aliased.
+            // De-aliasing (same model as the data-export branch above): in the module world the fragment's
+            // own data lives either in the library world (CAT-1 -> mirror) or in a far module band
+            // (CAT-2 -> relocated near cell). Without this a library-frag own-data self-ref computes a huge
+            // disp (lib data 0x0201xxxx vs a5_mod 0x0302xxxx) and clamps to the shared scratch cell,
+            // re-aliasing what the de-alias pass separated.
             if(deAlias && effA5==lib510.a5_mod){
               uint32_t target=(uint32_t)((int64_t)f.dataBase + origD16);
               if(f.dataBase < 0x03000000){                     // CAT-1: library DATA -> mirror (vs lib_a5)
@@ -3043,7 +2815,7 @@ int main(int argc, char** argv){
                 disp=(int32_t)((int64_t)(farNearBase[&f]+(target-farMin[&f])) - effA5);   // CAT-2 relocated near cell
               }
             }
-            // addm 452: single-A5 far own-data self-ref -> repoint at the near mirror.
+            // Single-A5 far own-data self-ref -> repoint at the near mirror.
             if(ddDealias){
               uint32_t tgt=(uint32_t)((int64_t)f.dataBase + origD16);
               int64_t nr=ddNear(tgt);
@@ -3063,9 +2835,7 @@ int main(int argc, char** argv){
           // Lunacy (_dll_apply_crlt §4): a valid ordinal requires the value byte at +0x0A (<<8 field)
           // to be < 0x10. Values like 0xFFFFFFFF / 0xFFFFFFFC (byte+0x0A = 0xFF) are NOT ordinal imports
           // — they are DIRECT A5-relative data refs whose disp16 is ALREADY correct at the site (e.g.
-          // 0x6F30/0x6F38 = AD3 runtime-helper slots). Previously we mis-parsed key=value&0xFFF=0xFFF/0xFFC
-          // and OVERWROTE the correct disp with an unresolved stub -> the module's runtime-helper/vtable
-          // ref derailed (the "/: This module" vtable-into-string fault). Leave the site untouched.
+          // 0x6F30/0x6F38 = AD3 runtime-helper slots). Leave the site untouched.
           if(kind==0xFFFF && ((value>>8)&0xFF) >= 0x10){
             crOk++; return;   // keep existing A5-relative disp16 (self/runtime reference)
           }
@@ -3102,18 +2872,16 @@ int main(int argc, char** argv){
             //                          (absolute); code fallback -> g_tv_base + 8*tv (absolute).
             // DRLT writes 32-bit ABSOLUTE pointers — there is NO disp16/A5-relative data case.
             uint32_t site=f.dataBase + r.off; const char* how="skip";
-            // *** addm 756: {kind=0xFFFF, addend=0} on the DATA side is the OWN-DATA SELF REFERENCE ***
-            // The code side already implements this exact record class (the `kind==0xFFFF && value==0`
-            // branch of applyReloc): the site already holds an offset into THIS fragment's own DATA image
-            // and the loader adds the base it assigned that fragment — there, as a (d16,A5) displacement
+            // {kind=0xFFFF, addend=0} on the DATA side is the OWN-DATA SELF REFERENCE.
+            // The code side implements this same record class (the `kind==0xFFFF && value==0` branch of
+            // applyReloc): the site holds an offset into THIS fragment's own DATA image and the loader adds
+            // the base it assigned that fragment — there, as a (d16,A5) displacement
             // `f.dataBase - effA5 + origD16`. DRLT/DREL sites are 32-bit ABSOLUTE pointers, so the same
-            // record here means `*(u32*)site += f.dataBase`. The host skipped them, leaving raw offsets in
-            // every static pointer table a module builds into its own data: Rodger Dodger's 24-entry level
-            // table read back as 0x1BEE..0x332A (low-memory addresses), so Game::LoadLevel walked zeros,
-            // the 18x14 wall grid stayed empty and the whole play field never drew.
-            // Corpus proof (all 19 dll# modules + both shipped libraries): 223 such records, and the value
-            // stored at every one of them is inside its own fragment's DATA section (largest 0x332A in a
-            // 0x3ED0 section). Not one lies outside. ADNODRELSELF restores the skip.
+            // record here means `*(u32*)site += f.dataBase`. This is what fills the static pointer tables a
+            // module builds into its own data (level tables, sprite tables): skipping them leaves raw
+            // offsets that read back as low-memory addresses. Across all 19 dll# modules and both shipped
+            // libraries there are 223 such records, and the value stored at every one of them is inside its
+            // own fragment's DATA section. ADNODRELSELF restores the skip.
             if(r.addend==0){
               if(!getenv("ADNODRELSELF")){
                 uint32_t cur32=0; try{cur32=mem->read_u32b(site);}catch(...){}
@@ -3135,41 +2903,37 @@ int main(int argc, char** argv){
               // CodeWarrior packs into the code section — so it must be relocated with += f.codeBase.
               // (Empirically ALL of Clocks' 0xFFFFFFFF self-relocs are code-section refs; "+= g_a5"
               // sent every one into the A5+0..0x3800 zero window -> jsr into zeros -> arena fault.)
-              // off >= codeSize keeps the legacy A5-world data-self behavior for any genuine case.
+              // off >= codeSize keeps the A5-world data-self behavior for any genuine case.
               uint32_t ptr;
               // ADDRLTSELFDATA: DRLT records are ALL kind=0xFFFF (DATA) — so self-relocs (addend=FFFFFFFF) are
               // self-DATA per the reloc table, i.e. ptr = a5 + cur (a DATA->DATA pointer into the A5 world), NOT
-              // codeBase+cur. The legacy cur<codeSize heuristic mis-classifies small data offsets as code -> the
-              // C++ vtable/data pointers land mid-method (addm 241-243). Test the kind-correct resolution.
-              // ADDLLVT: Lunacy-recovered self-reloc GATE (_dll_apply_drlt, LIB510 addm 248-250). A self-reloc
-              // whose value has (cur&7)==2 && cur<0x3800 is an A5-world JT/TV-slot ref (C++ vtable entry) ->
-              // ptr = cur + a5 (+ per-import adjustment for cross-fragment methods). ONLY those; other self-
-              // relocs keep the codeBase/a5 heuristic. (My earlier ADDRLTSELFDATA forced ALL -> broke non-gated.)
-              // DEFAULT-ON since addm 309. The gate below is the Lunacy-recovered self-reloc rule and the
-              // resolution is STATICALLY PROVEN: for cur=8k+2 the C++ virtual method is fragment-local at
-              // f.codeBase + f.jumpOff[k], and k=0,1,2,13,29,87,89,90 of JUMP_128 ALL land exactly on a
-              // `link A6` prologue (checked against the CODE_128 listing via the addm-308 disasm=host-4
-              // calibration). The old `cur32 < f.code.size() -> codeBase+cur32` heuristic below resolved
-              // these MID-INSTRUCTION (Clocks: cur=0x6A -> 0x0100006A, 2 bytes into a 6-byte move.l).
-              // Full 62-module sweep: 30/62, identical set, ZERO regressions; Clocks renders its first
-              // pixels. ADNODLLVT restores the old heuristic for A/B.
+              // codeBase+cur. Tests the kind-correct resolution; the cur<codeSize heuristic can mis-classify
+              // small data offsets as code, landing the C++ vtable/data pointers mid-method.
+              // ADDLLVT: Lunacy-recovered self-reloc GATE (_dll_apply_drlt). A self-reloc whose value has
+              // (cur&7)==2 && cur<0x3800 is an A5-world JT/TV-slot ref (C++ vtable entry) -> ptr = cur + a5
+              // (+ per-import adjustment for cross-fragment methods). ONLY those; other self-relocs keep the
+              // codeBase/a5 heuristic.
+              // DEFAULT-ON. The gate below is the Lunacy-recovered self-reloc rule: for cur=8k+2 the C++
+              // virtual method is fragment-local at f.codeBase + f.jumpOff[k], verified against the CODE_128
+              // listing (k=0,1,2,13,29,87,89,90 of JUMP_128 all land exactly on a `link A6` prologue). The
+              // plain `cur32 < f.code.size() -> codeBase+cur32` heuristic resolves these MID-INSTRUCTION
+              // (Clocks: cur=0x6A -> 0x0100006A, 2 bytes into a 6-byte move.l). ADNODLLVT selects it for A/B.
               if(!getenv("ADNODLLVT") && (cur32 & 7)==2 && cur32 < 0x3800){
                 // cur = 8k+2 -> k = (cur-2)/8 = TV-island index. The module does `jsr (A0)` on the vtable value,
-                // so it must be an EXECUTABLE jmp-island ENTRY. My host builds those in the HIGH band at
-                // tvBaseAddr + 8*k (NOT the low a5+cur band Lunacy uses). So map the vtable entry to the host's
+                // so it must be an EXECUTABLE jmp-island ENTRY. The host builds those in the HIGH band at
+                // tvBaseAddr + 8*k (NOT the low a5+cur band Lunacy uses), so map the vtable entry to the host's
                 // existing high-band island entry. ADDLLVTLOW keeps the raw a5+cur (Lunacy low-band layout).
                 uint32_t k = (cur32 - 2) / 8;
                 uint32_t gk = (f.tvBase>=0 ? (uint32_t)f.tvBase : 0) + k;   // fragment-relative k -> global TV index
                 if(!getenv("ADDLLVTLOW") && !getenv("ADDLLVTREL") && !getenv("ADDLLVTISLAND")){
-                  // CORRECTED (addm 263): vtable value = cur+a5 = a NEAR-JT 4EF9 position; the island for
-                  // fragment-local method j is at a5+(cur-2) with 4EF9 at +2 (=a5+cur). j=(cur-2)/8, and the method
-                  // is FRAGMENT-LOCAL: f.codeBase + f.jumpOff[j] (NOT the global high-band island - that was the bug).
-                  // AD3_Canvas1's JUMP has 152 entries, so j up to 115 is in range. Build {4EF9, method} at a5+cur.
-                  // addm 719: the rebase applies ONLY to a well-formed own-JT slot reference — one whose
-                  // index is inside this fragment's own JUMP table AND inside the window the layout pass
-                  // reserved for it. A value that merely looks like 8k+2 but names no real export is not a
-                  // jump-table slot, so it keeps the old resolution (and never lands in another fragment's
-                  // reserved window).
+                  // vtable value = cur+a5 = a NEAR-JT 4EF9 position; the island for fragment-local method j
+                  // is at a5+(cur-2) with 4EF9 at +2 (=a5+cur). j=(cur-2)/8, and the method is FRAGMENT-LOCAL:
+                  // f.codeBase + f.jumpOff[j], not the global high-band island. AD3_Canvas1's JUMP has 152
+                  // entries, so j up to 115 is in range. Build {4EF9, method} at a5+cur.
+                  // The rebase applies ONLY to a well-formed own-JT slot reference — one whose index is inside
+                  // this fragment's own JUMP table AND inside the window the layout pass reserved for it. A
+                  // value that merely looks like 8k+2 but names no real export is not a jump-table slot, so it
+                  // keeps the unrebased resolution (and never lands in another fragment's reserved window).
                   uint32_t jslot=(cur32>=2)?(cur32-2)/8:0;
                   bool jtOk = f.jtSlots>0 && cur32>=2
                            && jslot < f.jumpOff.size()
@@ -3178,16 +2942,16 @@ int main(int argc, char** argv){
                     if(j < f.jumpOff.size() && !g_reservedJT.count(effA5+cur32)){
                       uint32_t method = f.codeBase + f.jumpOff[j];
                       uint32_t entry  = jtOk ? (effA5 + f.jtBase + 8u*j) : (effA5 + cur32 - 2);
-                      // addm 719: the C++ vtable longword is the same "my own jump-table slot k" reference
-                      // the code side carries, so it resolves against the same per-fragment base. The entry
-                      // was already built by the layout pass; rewriting it is idempotent.
+                      // The C++ vtable longword is the same "my own jump-table slot k" reference the code
+                      // side carries, so it resolves against the same per-fragment base. The entry was
+                      // already built by the layout pass; rewriting it is idempotent.
                       try{ if(jtOk) mem->write_u16b(entry, f.jumpOff[j]);
                            mem->write_u16b(entry+2, 0x4EF9); mem->write_u32b(entry+4, method); }catch(...){} } }
                   ptr = jtOk ? (effA5 + f.jtBase + cur32) : (cur32 + effA5);
                 }
                 else if(getenv("ADDLLVTLOW"))  ptr = cur32 + effA5;
                 else if(getenv("ADDLLVTREL"))  ptr = effTv + 8u*gk;  // + fragment tvBase
-                else                           ptr = effTv + 8u*k;   // ADDLLVTISLAND: high-band island (runaway recursion — see addm 309)
+                else                           ptr = effTv + 8u*k;   // ADDLLVTISLAND: high-band island (causes runaway recursion)
                 how="dllvt";
               }
               else if(getenv("ADDRLTSELFDATA")){ ptr = cur32 + effA5; how="self-data(kind)"; }
@@ -3207,9 +2971,9 @@ int main(int argc, char** argv){
                     if(p0==0x0000 && (p1 & 0xF000)==0x6000){ ptr = ptr-back+2; break; } } }  // -> the bra
               }
               // ADVTSTUB=hexoff[,hexoff]: for a self-code reloc at DATA offset <off> whose value is dcmp-corrupt
-              // (lands mid-instruction, e.g. Clocks vtable method[0] @0x254 = 0x6A -> 0x0100006A mid-instr,
-              // addendum 201), redirect to a shared callee-clean RTS stub so a vtable `jsr method[0]` returns
-              // safely instead of derailing. Tests whether the corrupt method is critical or skippable.
+              // (lands mid-instruction, e.g. Clocks vtable method[0] @0x254 = 0x6A -> 0x0100006A mid-instr),
+              // redirect to a shared callee-clean RTS stub so a vtable `jsr method[0]` returns safely
+              // instead of derailing. Tests whether the corrupt method is critical or skippable.
               if(getenv("ADVTSTUB")){ std::string sp=getenv("ADVTSTUB"); size_t q=0;
                 while(q<sp.size()){ size_t c=sp.find(',',q); std::string tok=sp.substr(q,c==std::string::npos?std::string::npos:c-q);
                   if((uint32_t)strtoul(tok.c_str(),0,16)==r.off){
@@ -3237,9 +3001,9 @@ int main(int argc, char** argv){
             }
           }
         };
-        // ================= addm 719: AUTHENTIC NEAR-MODEL JUMP-TABLE LAYOUT =================
+        // ================= AUTHENTIC NEAR-MODEL JUMP-TABLE LAYOUT =================
         // RE (scratchpad/ad3_loader_evidence.md). The KAHL link format carries TWO distinct classes of
-        // A5-relative self-relocation, and the host had been treating them as one:
+        // A5-relative self-relocation:
         //
         //   {kind=0xFFFF, addend=0xFFFFFFFF} = "MY OWN jump-table slot k". The stored value is 8k+2 —
         //       on the CODE side the (d16,A5) displacement of a `jsr/jmp/pea/lea`, on the DATA side a C++
@@ -3260,15 +3024,12 @@ int main(int argc, char** argv){
         //       shipped libraries export as JUMP index 4 of their own 10-entry "Runtime" fragment.
         //
         // So __mul32 is not an unrecoverable engine export: it is `runtimeFragment.codeBase + jumpOff[4]`,
-        // already in memory on every dll# load. The host used to resolve BOTH classes as "leave/add A5"
-        // with no per-fragment base, which put every fragment's slot k at A5+8k+2 — aliasing all fragments
-        // onto one band AND landing any fragment's slot 8 exactly on __mul32 at A5+0x42. That is the whole
-        // of the collision the forged MULU.L island, ADMULSKIP and the addm-637 XImage-dtor discriminator
-        // were patching over, and it is also what the addm-483/486 hand-installed near-JT back-fills were
-        // doing by hand for two fragments.
-        // THIS PASS: give the runtime fragment the absolute base 0x20 (10 slots) and allocate every other
-        // fragment a disjoint base above it, then build each fragment's table as real loaded jump-table
-        // entries {u16 routineOffset, 0x4EF9, u32 target}. ADNOJTBASE restores the old shared-base model.
+        // already in memory on every dll# load. Resolving BOTH classes as "leave/add A5" with no
+        // per-fragment base puts every fragment's slot k at A5+8k+2 — aliasing all fragments onto one
+        // band AND landing any fragment's slot 8 exactly on __mul32 at A5+0x42.
+        // The runtime fragment therefore gets the absolute base 0x20 (10 slots) and every other fragment
+        // a disjoint base above it; each fragment's table is then built as real loaded jump-table entries
+        // {u16 routineOffset, 0x4EF9, u32 target}. ADNOJTBASE restores the shared-base model.
         const bool jtAuth = !getenv("ADNOJTBASE");
         AdLibFragment* jtRuntimeFrag=nullptr;
         uint32_t jtSpanEnd=0;          // A5-relative end of the whole jump-table span (0 = layout not built)
@@ -3305,7 +3066,7 @@ int main(int argc, char** argv){
           // The prologue bytes are a CodeWarrior link-version artifact: they match in both shipped libraries,
           // but a differently-linked runtime fragment could carry a variant. Do not fail silently — a
           // 10-export fragment that misses the test is a NEAR MISS worth reporting, because it means the
-          // absolute helper block would go unbuilt and the old aliasing would silently return.
+          // absolute helper block would go unbuilt and the aliasing would silently return.
           AdLibFragment* rtf=nullptr;
           for(auto* f : jtAll){
             if(f->jumpOff.size()!=10 || f->code.empty()) continue;
@@ -3366,7 +3127,7 @@ int main(int argc, char** argv){
           }
         }
         for(auto& f : lib510.frags)    relocFrag(f, /*modWorld=*/false);
-        // ==== de-aliasing PRE-PASS (addm 393): find far module-DATA targets, build near sub-bands ====
+        // ==== de-aliasing PRE-PASS: find far module-DATA targets, build near sub-bands ====
         // Runs AFTER library reloc (so effA5/effTv there are untouched) and BEFORE module reloc (so
         // applyReloc can consume farNearBase). Only CAT-2 (module exporter) targets get a band; CAT-1
         // (library exporter) is handled inline via the mirror. The module DATA image is already written
@@ -3397,12 +3158,12 @@ int main(int argc, char** argv){
           // tables) carry their values and BSS globals stay zero; the far storage is thereafter dead.
           uint32_t totB=0;
           if(!sfBand){
-            // ---- addm 393 (default): contiguous pack UP from a5_mod-0x8000, copy far->near in-place ----
-            // addm 502: for Bad Dog! the overflow near-JT resolver owns [a5_mod-0x7FD0, a5_mod-0x7888]
-            // (the 212 s16-wrapped import slots). The addm-393 pack from a5_mod-0x8000 runs straight
-            // through that band and clobbers the JT islands (and vice-versa). Start the de-alias pack
-            // ABOVE the JT band (a5_mod-0x7000) so both live disjointly inside the same near-BSS zero-run
-            // [a5_mod-0x8000, a5_mod-0x39A0). Everything stays s16-reachable. Non-Bad Dog! unchanged.
+            // ---- default: contiguous pack UP from a5_mod-0x8000, copy far->near in-place ----
+            // When the overflow near-JT resolver is active it owns [a5_mod-0x7FD0, a5_mod-0x7888] (the 212
+            // s16-wrapped import slots), and a pack from a5_mod-0x8000 would run straight through that band
+            // and clobber the JT islands (and vice-versa). In that case start the de-alias pack ABOVE the
+            // JT band (a5_mod-0x7000) so both live disjointly inside the same near-BSS zero-run
+            // [a5_mod-0x8000, a5_mod-0x39A0). Everything stays s16-reachable.
             uint32_t cursor = (tvWrapS16 ? lib510.a5_mod - 0x7000 : lib510.a5_mod - 0x8000); // disp min valid s16
             const uint32_t bandLimit = lib510.a5_mod - 0x39A0 - 0x40;   // stay clear of 129 DATA + margin
             for(auto& kv : farMin){
@@ -3414,7 +3175,7 @@ int main(int argc, char** argv){
                 continue; }
               farNearBase[ef]=cursor; farNearEnd[ef]=lo + sz;      // valid target window [lo, lo+sz)
               if(g_sffp){ if(!g_sffp_bandlo||cursor<g_sffp_bandlo)g_sffp_bandlo=cursor; if(cursor+sz>g_sffp_bandhi)g_sffp_bandhi=cursor+sz; }
-              if(tvWrapS16) sfCopyBands.push_back({ef,cursor,lo,sz});       // addm 451: post-reloc vptr mirror
+              if(tvWrapS16) sfCopyBands.push_back({ef,cursor,lo,sz});       // post-reloc vptr mirror
               for(uint32_t o=0;o<sz;o++){ uint8_t b=0; try{b=mem->read_u8(lo+o);}catch(...){} try{mem->write_u8(cursor+o,b);}catch(...){} }
               fprintf(stderr,"[dealias] %s far[%08X..%08X] -> near %08X (a5_mod%+d) size=0x%X\n",
                 ef->libName.c_str(), lo, hi, cursor, (int)(cursor-lib510.a5_mod), sz);
@@ -3423,27 +3184,27 @@ int main(int argc, char** argv){
             fprintf(stderr,"[dealias] CAT-2 relocated %zu module far-global bands, %u B, into 129 near-BSS [a5_mod-0x8000..a5_mod%+d)\n",
               farNearBase.size(), totB, (int)(cursor-lib510.a5_mod));
           } else {
-            // ---- addm 426 (ADSFBAND): priority free-list allocator + copy-after-relocate ----
+            // ---- ADSFBAND: priority free-list allocator + copy-after-relocate ----
             // The s16 window spans [a5_mod-0x8000, a5_mod+0x8000). Two very different kinds of free space:
             //  * CLEAN (priority 0): the region ABOVE a5_mod between the top of the C++ near-JT vtable
             //    islands and the module TV band [a5_mod+islandTop, tvBaseAddrMod), plus above the TV band.
             //    This is genuine unused A5 space (verified all-zero post-reloc) — no fragment lives there.
             //  * RISKY (priority 1): BSS holes between fragment DATA images below a5_mod. These are the
-            //    addm-393 candidates, but for large modules (RPS: moduleDbss=0x12780) the s16 part of the
-            //    block is ENTIRELY 129/130 live DATA+BSS, and those BSS cells ARE used at runtime — a band
-            //    there corrupts the owning fragment (RPS init derail 0x00310140). So prefer CLEAN space and
-            //    fall back to BSS only when a band cannot fit in clean space.
+            //    default-pack candidates, but for large modules (RPS: moduleDbss=0x12780) the s16 part of
+            //    the block is ENTIRELY 129/130 live DATA+BSS, and those BSS cells ARE used at runtime — a
+            //    band there corrupts the owning fragment. So prefer CLEAN space and fall back to BSS only
+            //    when a band cannot fit in clean space.
             uint32_t floor = lib510.a5_mod - 0x8000;
             uint32_t ceil  = lib510.a5_mod + 0x8000;
             // C++ near-JT vtable islands are written by module DRLT self-relocs (cur=8k+2,<0x3800) at
             // a5_mod+cur (see relocFrag dllvt path). Pre-scan the module DRE records to find the highest
             // island so the clean above-a5 region starts safely above every island.
             uint32_t islandTop=0x40;                               // near-A5 QD/param globals floor
-            // addm 719: with the authentic layout live, the near-JT islands no longer sit at a5_mod+cur —
-            // every fragment's table lives inside [0x20, jtSpanEnd), and the layout pass builds those tables
-            // in the MODULE world too for a twoA5 load. The DRE pre-scan below models the OLD placement and
-            // would therefore under-estimate the occupied region, letting a de-alias band land on top of a
-            // live jump table. Start the floor at the real end of the span. (Inert when the layout is off.)
+            // With the authentic layout live, the near-JT islands do not sit at a5_mod+cur — every
+            // fragment's table lives inside [0x20, jtSpanEnd), and the layout pass builds those tables in the
+            // MODULE world too for a twoA5 load. The DRE pre-scan below models the shared-base placement and
+            // would under-estimate the occupied region, letting a de-alias band land on top of a live jump
+            // table, so start the floor at the real end of the span. (Inert when the layout is off.)
             if(jtSpanEnd > islandTop){ islandTop = jtSpanEnd;
               if(getenv("ADJTBASELOG")) fprintf(stderr,"[jtbase] sfBand islandTop floor raised to 0x%X (jump-table span end)\n",islandTop); }
             for(auto& mf : lib510.modFrags) for(auto& r : mf.dreRecs){
@@ -3451,19 +3212,18 @@ int main(int argc, char** argv){
               uint32_t cur=0; try{ cur=mem->read_u32b(mf.dataBase+r.off); }catch(...){ continue; }
               if((cur&7)==2 && cur<0x3800){ uint32_t top=cur+8; if(top>islandTop) islandTop=top; }
             }
-            // ADSFNEARSCAN (OPT-IN, addm 637): partial completion of the above-a5 occupied-set for the
-            // corpus-wide sfBand experiment (see the sfBand default note above). The DRE scan just above only
-            // covers C++ vtable islands built by module DRLT self-relocs; a module populates MANY more near-JT
-            // slots (pea-callback back-fill addm 486, __mul32 at A5+0x42, Coord converters) whose islands are
-            // written LATER in load, so islandTop UNDER-estimates the near-JT band top and a relocated band can
-            // land INSIDE it and clobber live near-JT (the Rodger Dodger / Super Guy blank under ADSFBAND=1).
-            // Raise islandTop above every near-JT ISLAND-ADDRESS-TAKING site — `pea (d16,A5)` (486D) and
-            // `lea (d16,A5),An` (4xED), which are the sites the loader materialises into a real 4EF9 island —
-            // with (d16&7)==2 (the island position). This restores RD/Super Guy. DEFAULT-OFF because it is
-            // INCOMPLETE: it also evicts Bad Dog!'s working low above-a5 placement (Bad Dog! references high
-            // near-JT slots that are never populated/DEAD, so the eviction blanks it). A complete fix needs
-            // live-vs-dead near-JT slot analysis; until then this stays opt-in so the name-gated default
-            // (RPS + Bad Dog!) is byte-identical to main.
+            // ADSFNEARSCAN (OPT-IN): partial completion of the above-a5 occupied-set for the corpus-wide
+            // sfBand experiment. The DRE scan just above only covers C++ vtable islands built by module DRLT
+            // self-relocs; a module populates MANY more near-JT slots (pea-callback back-fill, __mul32 at
+            // A5+0x42, Coord converters) whose islands are written LATER in load, so islandTop UNDER-estimates
+            // the near-JT band top and a relocated band can land INSIDE it and clobber live near-JT (the
+            // Rodger Dodger / Super Guy blank under ADSFBAND=1). Raise islandTop above every near-JT
+            // ISLAND-ADDRESS-TAKING site — `pea (d16,A5)` (486D) and `lea (d16,A5),An` (4xED), which are the
+            // sites the loader materialises into a real 4EF9 island — with (d16&7)==2 (the island position).
+            // This restores RD/Super Guy. DEFAULT-OFF because it is INCOMPLETE: it also evicts Bad Dog!'s
+            // working low above-a5 placement (Bad Dog! references high near-JT slots that are never
+            // populated/DEAD, so the eviction blanks it). A complete fix needs live-vs-dead near-JT slot
+            // analysis; until then this stays opt-in so the name-gated default stays unchanged.
             // ADSFISLIN (near-JT completion): LIVE-restricted NEARSCAN — the genuine live/dead discriminator.
             // NEARSCAN alone raises islandTop above EVERY raw pea/lea (d16,A5) site (fixes RD but its dead-site
             // over-approximation evicts Bad Dog!, per the comment above). The fix is raw ∩ EXECUTED: only raise
@@ -3501,11 +3261,11 @@ int main(int argc, char** argv){
                       mf.libName.c_str(),d16,top,liveOnly?" (LIVE)":""); } } }
             }
             uint32_t tvEndMod = lib510.tvBaseAddrMod + g_tvStride()*(lib510.tvCount + 64) + 0x100; // TV band + slack
-            // ADSFOCCDUMP (addm 670): proves there is NO load-time structural discriminator for the RD/AC
+            // ADSFOCCDUMP: proves there is NO load-time structural discriminator for the RD/AC
             // placement conflict — the clean above-a5 gap [a5_mod+islandTop, tvBase) is scanned for non-zero
             // runs at ALLOCATION time (before the band copy). For BOTH RD and Art Critic it is ENTIRELY ZERO
             // (0 runs), so RD's clobbered data is written at RUNTIME during init, not present at load; the
-            // occupied-set completion is therefore an execution property (see the sfBand HOLD note above).
+            // occupied-set completion is therefore an execution property.
             if(getenv("ADSFOCCDUMP")){
               uint32_t lo=lib510.a5_mod+islandTop, hi=lib510.tvBaseAddrMod;
               fprintf(stderr,"[occdump] clean above-a5 [a5_mod+%X, a5_mod+%X) load-time non-zero runs (islandTop=%X):\n",islandTop,(unsigned)(hi-lib510.a5_mod),islandTop);
@@ -3541,18 +3301,14 @@ int main(int argc, char** argv){
               fprintf(stderr,"[sfband] free gap [%08X,%08X) (a5_mod%+d) sz=%X prio=%d\n",g.lo,g.hi,(int)(g.lo-lib510.a5_mod),g.hi-g.lo,g.prio);
             // Allocate each exporter (largest band first) into the first gap (clean-first) that fits.
             std::vector<std::pair<AdLibFragment*,uint32_t>> want;   // {exporter, size}
-            // addm 448: some C++ vtables sit at the very END of a fragment's referenced range — their
-            // BASE is the highest referenced far address (== farMax, an object holds the vtable ptr), but
-            // their METHOD-POINTER body extends PAST it. The band sized to [farMin, farMax+8] then TRUNCATES
-            // the vtable, so the near mirror leaves the trailing slots zero -> a virtual dispatch through a
-            // null slot -> `jsr 0` -> the callee never pops its Pascal `this` -> -4 A7 drift. That is RPS's
-            // gate-3 bug: ArenaControl helper 0x0105738A calls RPSFighter vtable slot +0x1C (far 0300D00C,
-            // 0x1C past the vtable base 0300CFF0 which is the last cell of the old band 0300CFF8), the null
-            // slot corrupts A2/A3/A4 via the shifted movem restore, and TryPaperAttack faults -> the CW catch
-            // nulls the singleton -> every draw frame identical (distinct=1). Fix: extend the band upper bound
-            // to swallow the contiguous run of DRLT reloc sites (vtable slots are 4-byte-spaced relocated code
-            // pointers) that begins at/after farMax, so the whole vtable is copied AND vptr-mirrored. sfBand is
-            // RPS-only (name-gated above), so this only affects Rock Paper Scissors.
+            // Some C++ vtables sit at the very END of a fragment's referenced range — their BASE is the
+            // highest referenced far address (== farMax, an object holds the vtable ptr), but their
+            // METHOD-POINTER body extends PAST it. A band sized to [farMin, farMax+8] TRUNCATES the vtable,
+            // so the near mirror leaves the trailing slots zero -> a virtual dispatch through a null slot ->
+            // `jsr 0` -> the callee never pops its Pascal `this` -> -4 A7 drift -> a faulting method and a
+            // nulled singleton. So extend the band upper bound to swallow the contiguous run of DRLT reloc
+            // sites (vtable slots are 4-byte-spaced relocated code pointers) that begins at/after farMax, so
+            // the whole vtable is copied AND vptr-mirrored.
             auto bandHiFor=[&](AdLibFragment* ef)->uint32_t{
               uint32_t hi=farMax[ef]+8;
               std::vector<uint32_t> sites; sites.reserve(ef->dreRecs.size());
@@ -3561,18 +3317,15 @@ int main(int argc, char** argv){
               bool grew=true;
               while(grew){ grew=false;
                 for(uint32_t s : sites){ if(s+4>hi && s<=hi+4){ hi=s+4; grew=true; } } }
-              // addm 741: A BAND MUST NEVER END INSIDE THE FRAGMENT'S INITIALISED DATA IMAGE.
+              // A BAND MUST NEVER END INSIDE THE FRAGMENT'S INITIALISED DATA IMAGE.
               // The rule above grows the band over the run of DRLT sites so a vtable at the end of the
-              // referenced range is copied whole (addm 448). The same truncation bites one level further
-              // out: CodeWarrior lays a class's NAME STRING immediately after its vtable, and the module
-              // reads it as vtable+0x30 -- but a string is not a reloc site and nothing holds a far
-              // pointer to it, so it falls outside both bounds. Flying Toasters' MODULE_131 band came out
-              // 0x554 long against a 0x55A DATA image, so the mirrored class name read "FlyingBi" instead
-              // of "FlyingBigGag"; ToasterControl's type dispatch then matched nothing, fell through to its
-              // default arm, left the sequence key 0, and a 426 KB heap smash followed. Only the tail of
-              // the image can ever be at stake (the band already covers everything below hi), so taking it
-              // whole is bounded by the image size and cannot reach past initialised data. ADNOSFBANDDATA
-              // restores the truncating bound for A/B.
+              // referenced range is copied whole. The same truncation bites one level further out:
+              // CodeWarrior lays a class's NAME STRING immediately after its vtable, and the module reads
+              // it as vtable+0x30 -- but a string is not a reloc site and nothing holds a far pointer to
+              // it, so it falls outside both bounds, and a truncated mirror yields a truncated class name
+              // and a type dispatch that matches nothing. Only the tail of the image can ever be at stake
+              // (the band already covers everything below hi), so taking it whole is bounded by the image
+              // size and cannot reach past initialised data. ADNOSFBANDDATA restores the truncating bound.
               { uint32_t dend = ef->dataBase + (uint32_t)ef->data.size();
                 static const bool k_nodata = getenv("ADNOSFBANDDATA")!=nullptr;
                 if(!k_nodata && hi > ef->dataBase && hi < dend) hi = dend; }
@@ -3590,21 +3343,21 @@ int main(int argc, char** argv){
               uint32_t base=gaps[best].lo; gaps[best].lo += (sz+1)&~1u;
               farNearBase[ef]=base; farNearEnd[ef]=lo+sz;
               if(g_sffp){ if(!g_sffp_bandlo||base<g_sffp_bandlo)g_sffp_bandlo=base; if(base+sz>g_sffp_bandhi)g_sffp_bandhi=base+sz; }
-              // Copy the INITIALIZED (pre-reloc) far bytes now (exactly as addm 393): non-relocated data
-              // globals, jpeg tables etc. keep their loaded values. DRLT relocation has not run yet, so the
-              // C++ vtable method slots are still raw offsets here; they are patched selectively AFTER
-              // relocFrag (post-reloc code-pointer mirror below) so only genuine vptr slots are relocated,
-              // leaving every other cell byte-identical to the proven addm-393 behaviour.
+              // Copy the INITIALIZED (pre-reloc) far bytes now: non-relocated data globals, jpeg tables etc.
+              // keep their loaded values. DRLT relocation has not run yet, so the C++ vtable method slots
+              // are still raw offsets here; they are patched selectively AFTER relocFrag (post-reloc
+              // code-pointer mirror below) so only genuine vptr slots are relocated, leaving every other
+              // cell byte-identical to the default pack.
               for(uint32_t o=0;o<sz;o++){ uint8_t b=0; try{b=mem->read_u8(lo+o);}catch(...){} try{mem->write_u8(base+o,b);}catch(...){} }
               sfCopyBands.push_back({ef,base,lo,sz});               // remember for post-reloc vptr mirror
-              if(g_sfLiveProbe) g_sfBands.push_back({(int32_t)(base-lib510.a5_mod),(int32_t)(base+sz-lib510.a5_mod)}); // addm 670: band range (a5_mod-relative) for the overlap validator
+              if(g_sfLiveProbe) g_sfBands.push_back({(int32_t)(base-lib510.a5_mod),(int32_t)(base+sz-lib510.a5_mod)}); // band range (a5_mod-relative) for the overlap validator
               fprintf(stderr,"[sfband] %s far[%08X..%08X] -> near %08X (a5_mod%+d) size=0x%X (pre-reloc copy; vptr mirror deferred)\n",
                 ef->libName.c_str(), lo, farMax[ef]+8, base, (int)(base-lib510.a5_mod), sz);
               totB+=sz;
             }
             fprintf(stderr,"[sfband] CAT-2 allocated %zu/%zu bands, %u B, into disjoint s16 gaps (copy-after-relocate)\n",
               farNearBase.size(), want.size(), totB);
-            // ADSFDATASCAN (addm 670): DOCUMENTED NEGATIVE RESULT — a static per-module A5-data-footprint scan
+            // ADSFDATASCAN: DOCUMENTED NEGATIVE RESULT — a static per-module A5-data-footprint scan
             // does NOT reliably predict the sfBand placement regression. Motivation: the above-a5 "clean gap"
             // occupied model only reserves near-JT ISLANDS, not the module's own near-A5 DATA accessed via
             // `(d16,A5)` data moves, so a band can clobber live data (the real, non-near-JT cause of the RD
@@ -3615,7 +3368,7 @@ int main(int argc, char** argv){
             // (d16,A5) refs to a de-alias band ARE the band's own legitimate relocated-global targets,
             // INDISTINGUISHABLE from a clobber, and RD's clobbered data is written at RUNTIME (init) so no static
             // code scan sees it. Conclusion: the occupied-set completion is a RUNTIME (execution) property, not
-            // statically recoverable — see the addm-670 verdict. Kept as evidence.
+            // statically recoverable. Kept as evidence.
             if(getenv("ADSFDATASCAN")){
               std::set<int32_t> refOff;
               for(auto& mf : lib510.modFrags){ const std::string& cb=mf.code;
@@ -3633,28 +3386,27 @@ int main(int argc, char** argv){
           }
         }
         for(auto& f : lib510.modFrags) relocFrag(f, /*modWorld=*/true);
-        // addm 719: the CodeWarrior runtime block is ABSOLUTE — re-assert it after every relocation pass
-        // so nothing can leave a stale binding in the six displacements the libraries hard-address.
+        // The CodeWarrior runtime block is ABSOLUTE — re-assert it after every relocation pass so
+        // nothing can leave a stale binding in the six displacements the libraries hard-address.
         if(g_jtAuth && jtRuntimeFrag && jtRebuild){
           jtRebuild(jtRuntimeFrag, lib510.a5);
           if(lib510.twoA5 && lib510.a5_mod) jtRebuild(jtRuntimeFrag, lib510.a5_mod);
         }
-        // ==== addm 470: LIB510_Coord near-JT island back-fill (Daredevil Dan callback rebind) ====
-        // ROOT CAUSE (H1, mis-binding): LIB510_Coord's own section-iterator construction code (e.g.
-        // Coord.jumpOff[19] @0x0101E300) hardcodes `pea (disp,A5); jsr` into its OWN near-model JT band
-        // (A5+2+8k). But LIB510_Coord ships with DRE=0 (ZERO DRLT self-relocs), so the host — which only
-        // builds near-JT islands from DRLT self-relocs — NEVER populates Coord's islands. The referenced
-        // slot (export_7 = A5+0x5A, k=11) stays ZERO, so the `jsr` falls through the zero-padding into the
-        // ADJACENT populated island (A5+0x6A = MODULE_130.jumpOff[13] = SoundState::~SoundState scalar
-        // deleting destructor `__sd`). The iterator invokes its callback 4-arg CALLER-CLEAN expecting a
-        // section-processing fn that reads the element and returns a stride; __sd is 2-arg callee-pop
-        // (rtd #8) returning `this` -> +8 A7 drift + wild stride -> the addm-452/464 fault. Coord.jumpOff[11]
-        // is the CORRECT target: 0x0101F2CC = "ConvertPackNative" (link A6,#-4; reads elem [A6+0x10]; converts
-        // an 'IHDR' section header; returns stride in D0; ends in plain RTS = 4-arg caller-clean) — an exact
-        // match for the iterator contract. Fix: back-fill Coord's UNBUILT (still-zero) near-JT islands from
-        // its jumpOff table so its hardcoded self-references resolve correctly. Only zero cells are written,
-        // so islands legitimately built by other fragments' self-relocs (e.g. MODULE_130's __sd at 0x6A) are
-        // never clobbered -> no cross-fragment perturbation. Gated to the Daredevil Dan de-alias path.
+        // ==== LIB510_Coord near-JT island back-fill (Daredevil Dan callback rebind) ====
+        // LIB510_Coord's own section-iterator construction code (e.g. Coord.jumpOff[19] @0x0101E300)
+        // hardcodes `pea (disp,A5); jsr` into its OWN near-model JT band (A5+2+8k). But LIB510_Coord ships
+        // with DRE=0 (ZERO DRLT self-relocs), and the host only builds near-JT islands from DRLT
+        // self-relocs, so Coord's islands are never populated. The referenced slot (export_7 = A5+0x5A,
+        // k=11) stays ZERO, so the `jsr` falls through the zero-padding into the ADJACENT populated island
+        // (A5+0x6A = MODULE_130.jumpOff[13] = SoundState::~SoundState scalar deleting destructor `__sd`).
+        // The iterator invokes its callback 4-arg CALLER-CLEAN expecting a section-processing fn that reads
+        // the element and returns a stride; __sd is 2-arg callee-pop (rtd #8) returning `this` -> +8 A7
+        // drift + wild stride -> fault. Coord.jumpOff[11] is the correct target: 0x0101F2CC =
+        // "ConvertPackNative" (link A6,#-4; reads elem [A6+0x10]; converts an 'IHDR' section header;
+        // returns stride in D0; ends in plain RTS = 4-arg caller-clean) — an exact match for the iterator
+        // contract. So back-fill Coord's UNBUILT (still-zero) near-JT islands from its jumpOff table so its
+        // hardcoded self-references resolve correctly. Only zero cells are written, so islands legitimately
+        // built by other fragments' self-relocs are never clobbered. Gated to the Daredevil Dan de-alias path.
         if(ddDealias && !getenv("ADDDNOJTFIX")){
           for(auto& f : lib510.frags){
             if(f.libName.find("Coord")==std::string::npos) continue;
@@ -3700,7 +3452,7 @@ int main(int argc, char** argv){
             fprintf(stderr,"[ddjtfix] fixed %u Coord near-JT callback islands (from %zu pea sites), %u colliding slots repointed\n",filled,peaCur.size(),moved);
           }
         }
-        // addm 452: DEFERRED far->near copy for the single-A5 de-alias. relocFrag has now applied MODULE_130's
+        // DEFERRED far->near copy for the single-A5 de-alias. relocFrag has now applied MODULE_130's
         // DRLT (which filled the sub-object vtable's method-island slots at dataBase+0x4C), so copying the far
         // referenced window into the near mirror carries the RELOCATED vtable. The (d16,A5) refs were already
         // repointed at the mirror in applyReloc, so the sub-object now dispatches through a populated vtable.
@@ -3712,27 +3464,22 @@ int main(int argc, char** argv){
               m.f->libName.c_str(), m.farLo, m.farLo+m.sz, m.nearBase, (unsigned)(m.nearBase-lib510.a5), m.sz);
           }
         }
-        // ===== addm 482 (Bugs gate-4): single-A5 far->near DATA-image mirror =====
-        // Bugs is single-A5 (is40=false — the AD-3.0 library fragments carry no NAME table), so the
-        // addm-393 twoA5 de-alias NEVER runs. moduleDbss=0xDFE2 (57KB) is placed entirely below the
-        // shared A5, and MODULE_130's 2614-byte DATA image lands ~45KB down — beyond the (d16,A5)
-        // signed-16 +-32K window. Every MODULE_130 kind-0xFFFF data ref therefore overflows and
-        // clampDisp16 folds them ALL onto the single shared scratch cell dataStubDisp (=A5+0x7428),
-        // COLLAPSING distinct globals: SuperBugSprite's XRect temp (DATA off 0x53C), the canvas-object
-        // temp (DATA off 0x538, export key 0x6E9) AND the compiled 'ATAN' FOURCC constant (DATA off
-        // 0x664, own-DATA self ref). GetResByID(&[A5+0x7428],1000) then reads the canvas pointer where
-        // the FOURCC belongs -> Throw 0x101 -> partial-ctor teardown -> the E270A4xx null-vtable-dtor
-        // derail (addm 480). On real hardware these three globals are DISTINCT and DATA[0x664]='ATAN'
-        // is passed as the type -> GetResByID succeeds. FIX (host = match real-HW A5 layout): mirror
-        // MODULE_130's DATA image into a near band at A5-0x8000 (the addm-393 unreferenced near-BSS
-        // region) and rewrite every code ref (in ANY fragment) whose target lands in that DATA image
-        // to the band, so distinct globals get distinct in-range near cells with their real content.
-        // Bugs-gated + ADBUGSEXT + opt-out ADNOBUGSDATABAND -> byte-inert for every other module.
-        // addm 762 (gate-B retirement): the band exists because MODULE_130's DATA image is stacked outside
-        // the signed-16 A5 window on a single-A5 load — a fact about the link, not about the title "Bugs".
-        // Structurally this selects Bugs and Daredevil Dan (Nirvana's MODULE_130 is near at A5-0x7BB0 so it
-        // is excluded, and forcing the band on it is byte-identical anyway); Daredevil Dan measured
-        // byte-identical at 200 f and 800 f on both axes with the band applied.
+        // ===== single-A5 far->near DATA-image mirror =====
+        // On a single-A5 load (is40=false — the AD-3.0 library fragments carry no NAME table) the twoA5
+        // de-alias never runs. A large moduleDbss (Bugs: 0xDFE2, 57KB) is placed entirely below the shared
+        // A5, and MODULE_130's DATA image can land tens of KB down — beyond the (d16,A5) signed-16 +-32K
+        // window. Every MODULE_130 kind-0xFFFF data ref then overflows and clampDisp16 folds them ALL onto
+        // the single shared scratch cell dataStubDisp, COLLAPSING distinct globals: for Bugs that is
+        // SuperBugSprite's XRect temp (DATA off 0x53C), the canvas-object temp (DATA off 0x538, export key
+        // 0x6E9) and the compiled 'ATAN' FOURCC constant (DATA off 0x664, own-DATA self ref), so
+        // GetResByID reads the canvas pointer where the FOURCC belongs -> Throw 0x101 -> partial-ctor
+        // teardown. On real hardware those globals are distinct. So mirror MODULE_130's DATA image into a
+        // near band at A5-0x8000 (the unreferenced near-BSS region) and rewrite every code ref (in ANY
+        // fragment) whose target lands in that DATA image to the band, giving distinct globals distinct
+        // in-range near cells with their real content. The condition is structural — the DATA image is
+        // stacked outside the signed-16 A5 window on a single-A5 load — so it selects Bugs and Daredevil
+        // Dan (Nirvana's MODULE_130 is near at A5-0x7BB0 and is excluded). ADNOBUGSEXT and
+        // ADNOBUGSDATABAND opt out.
         AdLibFragment* m130=nullptr; for(auto& mf:lib510.modFrags) if(mf.id==130) m130=&mf;
         bool m130Far = m130 && !m130->data.empty()
                     && (int64_t)m130->dataBase - (int64_t)lib510.a5 < -0x8000;
@@ -3771,7 +3518,7 @@ int main(int argc, char** argv){
             bool freeBand=true;                                  // never clobber a live global
             for(uint32_t o=0;o<dataSz && freeBand;o++){ uint8_t b=0; try{b=mem->read_u8(bandBase+o);}catch(...){} if(b)freeBand=false; }
             if(!freeBand){
-              fprintf(stderr,"[addm482] Bugs DATA-band: A5-0x8000 region not free -> skipped (no fix)\n");
+              fprintf(stderr,"[bugs-databand] Bugs DATA-band: A5-0x8000 region not free -> skipped (no fix)\n");
             } else {
               // Copy the POST-reloc DATA image (DRLT pointers already applied) into the near band.
               for(uint32_t o=0;o<dataSz;o++){ uint8_t b=0; try{b=mem->read_u8(m130->dataBase+o);}catch(...){} try{mem->write_u8(bandBase+o,b);}catch(...){} }
@@ -3799,21 +3546,21 @@ int main(int argc, char** argv){
               if(!getenv("ADBUGSBANDMODONLY")) for(auto& f:lib510.frags){ uint32_t n=redirectFrag(f); totLib+=n; }
               for(auto& f:lib510.modFrags){ uint32_t n=redirectFrag(f); totMod+=n; }
               tot=totLib+totMod;
-              fprintf(stderr,"[addm482] Bugs DATA-band: mirrored MODULE_130 DATA %uB -> near A5-0x8000, redirected %u refs (lib=%u mod=%u)\n",dataSz,tot,totLib,totMod);
+              fprintf(stderr,"[bugs-databand] Bugs DATA-band: mirrored MODULE_130 DATA %uB -> near A5-0x8000, redirected %u refs (lib=%u mod=%u)\n",dataSz,tot,totLib,totMod);
             }
           }
         }
-        // ---- addm 426 (ADSFBAND): post-reloc vptr mirror (the copy-after-relocate half of the fix) ----
+        // ---- ADSFBAND: post-reloc vptr mirror (the copy-after-relocate half) ----
         // The near bands were filled with PRE-reloc initialized far bytes above. relocFrag has now applied
         // DRLT to the FAR data sites (f.dataBase+off). The single class of cell that MUST reflect the
         // relocation in the near mirror is the C++ vtable METHOD-POINTER slot: modules dispatch virtuals
         // through the near-addressed object (RPS getCanvas = near-vtable[+0x68]), so a raw (unrelocated)
-        // slot => jsr 0 => null Canvas (addm 425). Every such slot is written by a DRLT record and, post-
-        // reloc, holds a CODE pointer: a TV island in [a5_mod, a5_mod+0x3800) or [tvBaseAddrMod, ...), or
-        // library code in [0x01000000,0x02000000). Mirror ONLY those code-pointer DRLT cells into the near
-        // band. Non-code DRLT cells (self-DATA pointers cur+a5_mod etc.) are LEFT at their pre-reloc value —
-        // this keeps every non-vptr near cell byte-identical to addm 393 (proven), so the fix is additive:
-        // it can only turn a null vptr into a real one, never disturb the working data image.
+        // slot => jsr 0 => null Canvas. Every such slot is written by a DRLT record and, post-reloc,
+        // holds a CODE pointer: a TV island in [a5_mod, a5_mod+0x3800) or [tvBaseAddrMod, ...), or
+        // library code in [0x01000000,0x02000000). Mirror ONLY those code-pointer DRLT cells into the
+        // near band. Non-code DRLT cells (self-DATA pointers cur+a5_mod etc.) are LEFT at their pre-reloc
+        // value — this keeps every non-vptr near cell byte-identical to the default pack, so the mirror is
+        // additive: it can only turn a null vptr into a real one, never disturb the working data image.
         if((sfBand || tvWrapS16) && !sfCopyBands.empty() && !getenv("ADSFNOMIRROR")){
           bool full = getenv("ADSFFULLCOPY") && strcmp(getenv("ADSFFULLCOPY"),"0")!=0;   // A/B: bulk copy
           uint32_t nmir=0;
@@ -3837,10 +3584,10 @@ int main(int argc, char** argv){
           }
           fprintf(stderr,"[sfband] post-reloc mirrored %u %s DRLT cells into near bands\n",nmir, full?"(FULL)":"code-ptr");
         }
-        // addm 497 (Bad Dog! deterministic-resolvability RE): dump every module `jsr/jmp (d16,A5)`
-        // d16<0 near-JT call site with its enclosing MacsBug (CodeWarrior) function symbol, plus the
-        // full arena symbol table, so the slot->library-target binding can be tested offline for
-        // deterministic recoverability via caller-class::method base-delegation matching. Default-off.
+        // ADBDCENSUS: dump every module `jsr/jmp (d16,A5)` d16<0 near-JT call site with its enclosing
+        // MacsBug (CodeWarrior) function symbol, plus the full arena symbol table, so the
+        // slot->library-target binding can be tested offline for deterministic recoverability via
+        // caller-class::method base-delegation matching. Default-off.
         if(tvWrapS16 && getenv("ADBDCENSUS")){
           const char* cbase=getenv("ADBDCENSUS");
           std::string sp=std::string(cbase)+".sites", yp=std::string(cbase)+".syms";
@@ -3885,36 +3632,34 @@ int main(int argc, char** argv){
           }
           fprintf(stderr,"[bdcensus] wrote %s / %s\n",sp.c_str(),yp.c_str());
         }
-        // addm 453 (Bad Dog! gate 2): cross-fragment C++ inheritance-thunk fixup.
-        // Bad Dog!'s Hole::* methods (module MODULE_129) call their library base class (XSprite in
-        // LIB510_Sprite*) via DIRECT `jsr (d16,A5)` / `jmp (d16,A5)` with a NEGATIVE d16 that lands in
-        // the module's near-A5 jump table (MODULE_130 data band, mirrored below a5_mod). CFM-68K expects
-        // that slot to hold an executable jump island, but the host's DRLT reloc + de-alias mirror leave a
-        // 4-byte POINTER to a positive TV-band island (`jmp lib-method`) there instead. A direct jsr into
-        // the slot therefore executes the pointer bytes as code and wanders the pointer table -> fault
-        // (pc=0301ADA8). The near-A5 jump table and the module's C++ VTABLES are structurally identical
+        // Cross-fragment C++ inheritance-thunk fixup (the fallback path used when the near-JT overflow
+        // resolver below is disabled). Bad Dog!'s Hole::* methods (module MODULE_129) call their library
+        // base class (XSprite in LIB510_Sprite*) via DIRECT `jsr (d16,A5)` / `jmp (d16,A5)` with a NEGATIVE
+        // d16 that lands in the module's near-A5 jump table (MODULE_130 data band, mirrored below a5_mod).
+        // CFM-68K expects that slot to hold an executable jump island, but the host's DRLT reloc +
+        // de-alias mirror leave a 4-byte POINTER to a positive TV-band island (`jmp lib-method`) there
+        // instead, so a direct jsr into the slot executes the pointer bytes as code and wanders the pointer
+        // table -> fault. The near-A5 jump table and the module's C++ VTABLES are structurally identical
         // (both are pointer-to-TV-island tables), so converting the DATA in place would also clobber the
-        // pointer-READ vtable cells (breaks the gate-1 MacScreenCanvas dispatch -> pc=4EED62A0). Instead fix
-        // the CODE: for every module-code `jsr/jmp (d16,A5)` whose slot currently holds a TV-island pointer
-        // P (i.e. the instruction expects code but finds a pointer), rewrite d16 so the instruction targets
-        // the island DIRECTLY (new d16 = P - a5_mod, a positive s16 into the TV band). jsr(island)->jmp
-        // (base method)->rts returns past the jsr. This never touches data, so every C++ vtable pointer
-        // cell stays byte-identical; only jump-table CALL SITES are redirected. Name-gated to Bad Dog!.
-        // ==== addm 502: Bad Dog! near-JT OVERFLOW resolver (the CORRECT fix; supersedes gate-2 bdjmp) ====
-        // ROOT CAUSE (RE'd this pass): the module's 314 CFM-68K far-model code imports are ALL resolved by
-        // NAME (resolveKey: CREL kind-0xFFFE addend = byte offset into the fragment's NAME resource ->
-        // mangled symbol -> UNIQUE export across the 14 LIB510 fragments PLUS the module's own 5 fragments;
-        // measured: 1481 sites / 484 names, 484/484 resolve, 0 ambiguous, 0 missing). applyReloc then writes
-        // each site's `jsr (d16,A5)` displacement as d = TVOFF + 8*tv (A5-relative offset of the resolved
-        // symbol's TV island). For the 212 imports whose island lies beyond A5+0x7FFF (tv>=2304), that u16
-        // is written verbatim but a `jsr (d16,A5)` reads d16 SIGNED, so 0x3800+8*tv WRAPS to a negative
-        // displacement in the range [-0x7FD0,-0x7888] -> the call lands in the near-A5 BSS band (the fabled
-        // "212-slot jump table") instead of the far island. The far island is EXACTLY slot+0x10000 (the
-        // wrap distance). FIX: copy each far TV island's 8 bytes down to its wrapped near slot; the disp
-        // applyReloc already wrote then targets a real `4EF9 target` island. Deterministic, per-import, no
-        // heuristic. Runs AFTER the de-alias mirror so it overrides the mirror's stale bytes in these cells
-        // (which are near-JT slots, NOT the live data the de-alias heuristic assumed). Default-on for
-        // Bad Dog!; ADBDJT=0 restores the old gate-2 bdjmp path for A/B.
+        // pointer-READ vtable cells. Fix the CODE instead: for every module-code `jsr/jmp (d16,A5)` whose
+        // slot holds a TV-island pointer P (i.e. the instruction expects code but finds a pointer), rewrite
+        // d16 so the instruction targets the island DIRECTLY (new d16 = P - a5_mod, a positive s16 into the
+        // TV band). jsr(island)->jmp(base method)->rts returns past the jsr. This never touches data, so
+        // every C++ vtable pointer cell stays byte-identical; only jump-table CALL SITES are redirected.
+        // ==== near-JT OVERFLOW resolver ====
+        // The module's CFM-68K far-model code imports are ALL resolved by NAME (resolveKey: CREL
+        // kind-0xFFFE addend = byte offset into the fragment's NAME resource -> mangled symbol -> UNIQUE
+        // export across the 14 LIB510 fragments plus the module's own fragments; for Bad Dog!, 1481 sites /
+        // 484 names, 484/484 resolve, 0 ambiguous, 0 missing). applyReloc writes each site's `jsr (d16,A5)`
+        // displacement as d = TVOFF + 8*tv (A5-relative offset of the resolved symbol's TV island). For an
+        // import whose island lies beyond A5+0x7FFF (tv>=2304) that u16 is written verbatim, but
+        // `jsr (d16,A5)` reads d16 SIGNED, so 0x3800+8*tv WRAPS to a negative displacement (Bad Dog!: 212
+        // imports, in [-0x7FD0,-0x7888]) and the call lands in the near-A5 BSS band instead of the far
+        // island. The far island is EXACTLY slot+0x10000 (the wrap distance), so copy each far TV island's
+        // 8 bytes down to its wrapped near slot and the displacement applyReloc already wrote then targets
+        // a real `4EF9 target` island. Deterministic, per-import, no heuristic. Runs AFTER the de-alias
+        // mirror so it overrides the mirror's stale bytes in these cells (which are near-JT slots, not the
+        // live data the de-alias heuristic assumes). ADBDJT=0 selects the bdjmp call-site rewrite above.
         bool bdNearJT = tvWrapS16 && a5_mod && (!getenv("ADBDJT")||strcmp(getenv("ADBDJT"),"0")!=0);
         if(bdNearJT){
           uint32_t nsites=0,nslots=0; std::set<uint32_t> doneSlot;
@@ -3959,7 +3704,7 @@ int main(int argc, char** argv){
               if(!(P>=lib510.tvBaseAddrMod && P<a5_mod+0x8000)) continue;
               uint16_t isl=0; try{ isl=mem->read_u16b(P);}catch(...){continue;}
               // host-built module-world TV island: plain `jmp abs.L` (0x4EF9, the default two-A5 path), an
-              // A5-switch trampoline (0x207C ...; 0xAAF6, ADMOD2A5SWITCH), or the addm-460 self-reading
+              // A5-switch trampoline (0x207C ...; 0xAAF6, ADMOD2A5SWITCH), or the self-reading
               // bidirectional ENTER (0xAAFA ; target.L). Any is a valid redirect target.
               if(isl!=0x4EF9 && isl!=0x207C && isl!=0xAAFA) continue;
               int32_t nd=(int32_t)(P - a5_mod);
@@ -3971,7 +3716,7 @@ int main(int argc, char** argv){
           }
           fprintf(stderr,"[bdjmp] redirected %u module jump-table call sites to TV islands (Bad Dog! gate 2)\n",nfix);
         }
-        // addm 461 (Bad Dog! gate 3 probe, DEFAULT-OFF): the near-A5 base-class delegation slots for
+        // ADBDBASEFIX (DEFAULT-OFF probe): the near-A5 base-class delegation slots for
         // the Sprite-derived desktop items (Hole/Folder/TrashCan/Window) resolve to the WRONG library
         // methods. Hole::CalcMemoryNeeded (12-byte Pascal, args XR*/short/XSpriteSystem*/ushort) delegates
         // to base via the -0x7A48 near-JT slot, whose TV island jmps 0x01030AD4 = an RLESequence-area
@@ -4037,19 +3782,19 @@ int main(int argc, char** argv){
             fprintf(stderr,"[expraw] exports=%zu symNames=%zu jumpOff=%zu\n",f.exports.size(),f.symNames.size(),f.jumpOff.size());
           }
         }
-        // ---- two-A5: mirror the RELOCATED library DATA into the module world's shift-gap (addm 372) ----
-        // Root cause of the Bucket A init-throw: module/library code entered with A5=a5_mod builds C++
-        // objects whose vtable is a LIBRARY-DATA global (e.g. PortableModule's base-class vtable, packed in
-        // the library data band below lib_a5). The vtable pointer is loaded `lea (d16,A5)` with A5=a5_mod, so
-        // it resolves into the MODULE world's shift-gap [a5_mod-shift, a5_mod) instead of the library world.
-        // That gap was left BLANK -> the vtable read all zeros -> the object's dimension-getter methods were
-        // null -> screen width/height computed as 0 -> the module's `if(w<513||h<385) Throw(0x801)` screen
-        // precondition fired -> uncaught longjmp to a null handler (pc=0x430000). Since a5_mod = lib_a5 +
-        // 0x01000000 and the module frags live BELOW a5_mod-shift (shift was raised >= libDataBytes, addm
-        // 363b), the region [a5_mod-libDataBytes, a5_mod) is unused in the module world and aliases the
-        // library data [lib_a5-libDataBytes, lib_a5) at the SAME A5-disp. Byte-copy the relocated library
-        // data there: the absolute pointers inside point to library code / TV islands (world-independent),
-        // so a raw copy is correct and makes disp16 library-DATA reads resolve identically under a5_mod.
+        // ---- two-A5: mirror the RELOCATED library DATA into the module world's shift-gap ----
+        // Module/library code entered with A5=a5_mod builds C++ objects whose vtable is a LIBRARY-DATA
+        // global (e.g. PortableModule's base-class vtable, packed in the library data band below lib_a5).
+        // The vtable pointer is loaded `lea (d16,A5)` with A5=a5_mod, so it resolves into the MODULE
+        // world's shift-gap [a5_mod-shift, a5_mod) instead of the library world. Leaving that gap blank
+        // makes the vtable read all zeros -> null dimension-getter methods -> screen width/height computed
+        // as 0 -> the module's `if(w<513||h<385) Throw(0x801)` screen precondition fires -> uncaught
+        // longjmp to a null handler. Since a5_mod = lib_a5 + 0x01000000 and the module frags live BELOW
+        // a5_mod-shift (shift is raised >= libDataBytes), the region [a5_mod-libDataBytes, a5_mod) is
+        // unused in the module world and aliases the library data [lib_a5-libDataBytes, lib_a5) at the
+        // SAME A5-disp. Byte-copy the relocated library data there: the absolute pointers inside point to
+        // library code / TV islands (world-independent), so a raw copy is correct and makes disp16
+        // library-DATA reads resolve identically under a5_mod.
         if(twoA5 && !getenv("ADNOLIBMIRROR")){
           uint32_t mirrored=0;
           for(uint32_t off=1; off<=libDataBytes; off++){
@@ -4058,22 +3803,22 @@ int main(int argc, char** argv){
           fprintf(stderr,"[lib510] two-A5: mirrored %u B library DATA into module world [a5_mod-0x%X, a5_mod)\n",
             mirrored, libDataBytes);
         }
-        // ---- two-A5: forge the MacXResourceFile "current resource server" record at [A5-0x2168] (addm 375) ----
-        // Bucket A's next gate after the library-DATA mirror: MacXResourceFile::IXResourceFile (@0x01019804)
-        // opens the module's resource file by dispatching through the global record pointer [A5-0x2168]:
+        // ---- two-A5: forge the MacXResourceFile "current resource server" record at [A5-0x2168] ----
+        // MacXResourceFile::IXResourceFile (@0x01019804) opens the module's resource file by dispatching
+        // through the global record pointer [A5-0x2168]:
         //     movea.l (A5-0x2168),A0 ; movea.l (A0+0x1A),A0 ; jsr (A0)
         // with 3 args (this+4, 0, [A5-0x2324]), callee-clean, returning a short OSErr. A NONZERO return is
         // used DIRECTLY as the C++ throw code, so the module throws its own 0x301 "can't open resource file".
         // The record pointer [A5-0x2168] is itself NULL: this "current resource server" is a library
         // file-scope global normally constructed by a CRT static ctor (fragment 136 __start's ctor walker),
         // which the two-A5 path does not run -> jsr through 0 -> garbage short -> throw 0x301. This is DISTINCT
-        // from the addm 320-322 addl scaffold at [A5-0x277E] (a different record; ADADDL1A/ADREALFS do not
-        // touch [A5-0x2168]). The module fork's resources are already served host-side (GetResource/
+        // from the addl scaffold at [A5-0x277E] (a different record; ADADDL1A/ADREALFS do not touch
+        // [A5-0x2168]). The module fork's resources are already served host-side (GetResource/
         // Get1Resource traps A9A0/A81F resolve against `rez`/get_res), so the "open" only needs to report
         // success (noErr). Forge a minimal record: +0x1A returns 0 after popping its 3 args (open ok);
-        // +0x1E/+0x22 pop one callee-clean arg (~dtor/UseResFile, addm 321); +0x26 bare rts (caller-cleaned);
+        // +0x1E/+0x22 pop one callee-clean arg (~dtor/UseResFile); +0x26 bare rts (caller-cleaned);
         // all other slots bare-rts so a stray dispatch can never become `jsr 0`. Store the pointer in BOTH
-        // worlds. Gated twoA5 -> only large 4.0 modules (all currently failing) -> cannot regress classic/AD3.
+        // Gated twoA5 -> only large 4.0 modules, so classic/AD3 loads are untouched.
         if(twoA5 && !getenv("ADNORFSERVER")){
           uint32_t rfRts   = mem->allocate(2);  mem->write_u16b(rfRts,   0x4E75);          // bare rts
           uint32_t rfClean1= mem->allocate(6);                                             // pop 1 arg, return
@@ -4090,19 +3835,19 @@ int main(int argc, char** argv){
           for(uint32_t off=0x06; off<=0x46; off+=4) mem->write_u32b(rfRec+off, rfRts);     // crash-safe default
           mem->write_u32b(rfRec+0x1A, rfOpen);    // IXResourceFile open: 3 args callee-clean, returns noErr
           mem->write_u32b(rfRec+0x1E, rfClean1);  // ~MacXResourceFile / close-use: 1 arg callee-clean
-          mem->write_u32b(rfRec+0x22, rfClean1);  // UseResFile(refNum): 1 arg callee-clean (addm 321)
+          mem->write_u32b(rfRec+0x22, rfClean1);  // UseResFile(refNum): 1 arg callee-clean
           mem->write_u32b(rfRec+0x26, rfRts);     // restore prev res file: caller-cleaned, bare rts
           try{ mem->write_u32b(lib510.a5 - 0x2168, rfRec); }catch(...){}
           try{ mem->write_u32b(a5_mod    - 0x2168, rfRec); }catch(...){}
           fprintf(stderr,"[lib510] two-A5: forged MacXResourceFile server record %08X at [A5-0x2168] (both worlds)\n", rfRec);
         }
-        // ---- two-A5: resolve the screen-BOUNDS reader entry to plumb host dims (addm 377) ----
+        // ---- two-A5: resolve the screen-BOUNDS reader entry to plumb host dims ----
         // See g_sbReaderPC note. The reader is invoked as `jsr [A5+0x61C8]`; that TV slot is a
         // {4EF9,target} island. Resolve target once here (a5_mod world) so the debug-hook intercept
-        // is robust to any load-base shift. Only armed for twoA5 -> cannot fire for classic/AD3.
+        // is robust to any load-base shift. Only armed for twoA5, so it cannot fire for classic/AD3.
         if(twoA5 && !getenv("ADNOSCREENBOUNDS")){
           try{ if(mem->read_u16b(a5_mod+0x61C8)==0x4EF9) g_sbReaderPC=mem->read_u32b(a5_mod+0x61C8+2); }catch(...){ g_sbReaderPC=0; }
-          fprintf(stderr,"[lib510] two-A5: screen-bounds reader entry @%08X (host dims plumb, addm 377)\n", g_sbReaderPC);
+          fprintf(stderr,"[lib510] two-A5: screen-bounds reader entry @%08X (host dims plumb)\n", g_sbReaderPC);
         }
         if(getenv("ADEXPORTERS")){ uint16_t wk=(uint16_t)strtoul(getenv("ADEXPORTERS"),0,16);
           fprintf(stderr,"[exporters] all fragments exporting key %X:\n",wk);
@@ -4140,10 +3885,9 @@ int main(int argc, char** argv){
           // AD3 multi-fragment modules (Bad Dog, Bugs): the MAIN-resource ordinal may bind an export in a
           // NON-frag-0 module fragment. Fragment 0 uses its own ordinal sub-space (e.g. Bugs MODULE_129 = 0x7xx)
           // while module_main lives in a later fragment (Bugs MODULE_130 ord 0x6E1, Bad Dog MODULE_132 ord 0x72F).
-          // The frag-0-only search above misses it -> module_main==0 -> only the shim's fast bail runs (0px, no crash).
-          // Fix: if frag0 didn't bind, search ALL module fragments by the same ordinal key, using each fragment's own
-          // codeBase+jumpOff. Runs BEFORE the 4.0 by-name path so 4.0 modules (Art Critic etc.) still bind by name;
-          // frag0-priority keeps Clocks/Daredevil Dan/Nirvana/Ray (which resolve in frag0) byte-identical.
+          // If frag0 does not bind, search ALL module fragments by the same ordinal key, using each fragment's
+          // own codeBase+jumpOff. This runs BEFORE the 4.0 by-name path so 4.0 modules still bind by name, and
+          // frag0 keeps priority for the modules that do resolve there.
           if(!lib510.moduleMain){
             for(auto& mf : lib510.modFrags){
               for(auto& e : mf.exports) if(e.isCode && e.key12==mkey && e.jumpIndex>=0 && (size_t)e.jumpIndex<mf.jumpOff.size()){
@@ -4175,7 +3919,7 @@ int main(int argc, char** argv){
             mainOrd, lib510.moduleMain, lib510.moduleMain?lib510.moduleMain-m.codeBase:0);
         }
         // ADJTFIX="hexA5disp:hexModCodeOff[,...]" — overwrite a MODULE near-JT island with an explicit target
-        // (addm 313 probe). Clocks' module JUMP[39] (A5+0x6C78, ordinal 0x06B0) is an all-zero record, so the
+        // (probe). Clocks' module JUMP[39] (A5+0x6C78, ordinal 0x06B0) is an all-zero record, so the
         // host emits `jmp moduleCodeBase+0`; the factory at mod+0x0910 calls it as the constructor right after
         // operator new(30), derails, never returns, and the instance is therefore never published to the A5
         // global that every message handler reads. No library fragment exports 0x06B0, so it cannot be bound
@@ -4206,12 +3950,8 @@ int main(int argc, char** argv){
         // its `jsr [A5+D1.w]` static-ctor walker is what constructs+registers every fragment's file-
         // scope class runtimes into the Required1 registry ([A5-0x277E]), filling that object's vtable
         // (incl. slot +0x1A). Without it the module dispatches through an empty/stub runtime and aborts
-        // construction. But __start ALSO (a) re-does DATA/ZERO/DREL A5-init via GetResource — which we
-        // already built manually in C — and (b) tails into `jsr [A0]` (app main) + ExitToShell. So we
-        // surgically neuter just those two: patch the data-init subroutine entry (code+0x2C) to RTS, and
-        // the app-main jsr (code+0x28, `4E90`) to RTS, leaving the static-ctor walker intact. __start
-        // then = "run the static ctors, return to caller." Safe to call repeatedly (idempotent registration).
-        // ADNORTNOOP restores the old full no-op behaviour.
+        // construction. But __start ALSO (a) re-does DATA/ZERO/DREL A5-init via GetResource — which the
+        // host already builds manually in C — and (b) tails into `jsr [A0]` (app main) + ExitToShell.
         // Two modes:
         //  - ADCRT136 (opt-in): keep __start RUNNABLE — neuter only the data-init subroutine (code+0x2C
         //    -> RTS) and the app-main jsr (code+0x28 -> RTS), leaving the static-ctor walker intact, so
@@ -4219,11 +3959,11 @@ int main(int argc, char** argv){
         //    [codeBase-4] is 0 because resource_dasm's dcmp strips the near-model CODE header.)
         //  - default: full no-op of __start (code+0) so the module's own CRT-init call to it returns
         //    cleanly without faulting (Pascal 2-byte arg -> `rtd #2`, non-zero result byte).
+        //    ADNORTNOOP suppresses that stub.
         AdLibFragment* rt=lib510.byId(136);
         if(rt && getenv("ADCRT136")){
-          // CORRECTED offsets (2026-07-16). resource_dasm's near-model decode STRIPS a 4-byte header
-          // [first_jt:u16][num:u16], but the host's fr.code INCLUDES it, so HOST offset = disasm+4.
-          // Verified via ADFRAGINIT: code+0x20 == 4EB51000 (jsr [A5+D1.w], the ctor walker). __start
+          // resource_dasm's near-model decode STRIPS a 4-byte header [first_jt:u16][num:u16], but the
+          // host's fr.code INCLUDES it, so HOST offset = disasm+4.
           // in HOST offsets: 0x04 sub.l A6,A6; 0x06 jsr (data-init fn); 0x20 jsr[A5+D1.w] (walker);
           //   0x24 movea.l [A5+0x6C],A0; 0x28 jsr(A0) (=AD APP MAIN, 4E90); 0x2A ExitToShell.
           // Neuter data-init CALL (0x06, jsr -> NOP NOP; A5-init already done in C) and stop right
@@ -4301,9 +4041,6 @@ int main(int argc, char** argv){
 
       lib510.arenaBase=LIB_ARENA; lib510.arenaEnd=cur; lib510.loaded=true;
       g_lib510CodeLo=LIB_ARENA; g_lib510CodeHi=cur;   // expose library CODE range for the sel-0x1D caller gate
-
-      // (Relocation is done above by the single-A5-world / TV-table binding block;
-      //  the old per-fragment-A5 self-reloc has been superseded and removed.)
 
       // Disassemble RELOCATED in-memory code (ADDISASM=fragName[:hexoff[:count]]),
       // e.g. ADDISASM=LIB510_module or =MODULE_129:DB8:80 — used to extract the
@@ -4417,8 +4154,8 @@ int main(int argc, char** argv){
   else if(adgm.size()>=4 && (uint8_t)adgm[0]==0x60){
     // bra header: the real entry is the branch TARGET, not a fixed +0x10. 600E->0x10 (16-byte
     // header) but 600A->0x0C, where a `movem.l regs,-(A7)` register SAVE lives that pairs with the
-    // restore in the startup glue. Hardcoding 0x10 skipped the save -> 24-byte stack over-pop ->
-    // the module's final rtd returned to garbage (Points of View / Psycho Deli / Artist).
+    // restore in the startup glue; hardcoding 0x10 skips the save, over-pops the stack by 24 bytes
+    // and the module's final rtd returns to garbage.
     int8_t d8=(int8_t)adgm[1];
     if(d8!=0) entry_off = (uint32_t)(2 + d8);                                   // bra.s: 2 + disp8
     else entry_off = (uint32_t)(2 + (int16_t)(((uint8_t)adgm[2]<<8)|(uint8_t)adgm[3])); // bra.w
@@ -4469,8 +4206,8 @@ int main(int argc, char** argv){
   // from a dc.l stored right after `bsr +6` in a self-locating helper:
   //   6104 00000000 225F 4E75  (bsr +6; dc.l A4slot; movea.l (A7)+,A1; rts)
   // The AD engine/loader normally patches that dc.l to the module's A4 base; the raw
-  // resource has it 0, so A4 becomes 0 and [A4+off] derefs low memory (Boris derailed to
-  // the framebuffer). Set every such slot to CODE_BASE so A4 resolves to the module base.
+  // resource has it 0, so A4 becomes 0 and [A4+off] derefs low memory. Set every such slot to
+  // CODE_BASE so A4 resolves to the module base.
   {
     int patched=0;
     for(size_t i=0;i+10<=adgm.size();i++){
@@ -4480,7 +4217,7 @@ int main(int argc, char** argv){
          (uint8_t)adgm[i+8]==0x4E && (uint8_t)adgm[i+9]==0x75){
         uint32_t a4v = CODE_BASE;
         // ADGETA4BASE: override the GetA4 slot value (dll# modules: the ADgm stub's GetA4 must yield the LIB510
-        // module base, not CODE_BASE, or the ctor builds structs at CODE_BASE+off = garbage mid-ADgm-code, addm 268).
+        // module base, not CODE_BASE, or the ctor builds structs at CODE_BASE+off = garbage mid-ADgm-code).
         if(getenv("ADGETA4BASE")) a4v = (uint32_t)strtoul(getenv("ADGETA4BASE"),0,16);
         mem->write_u32b(CODE_BASE+i+2, a4v); patched++;
       }
@@ -4504,14 +4241,6 @@ int main(int argc, char** argv){
   mem->allocate_at(0x00280000, 0x82000); mem->memset(0x00280000,0,0x82000);
   // A5 world for MPW-C-style modules (e.g. Rain): globals are addressed A5-relative
   // (below A5) with the jump table above. Give A5 a mid-point in a zeroed region.
-  //
-  // (HISTORICAL: a "near-model A5" experiment (ADA5NEAR, A5=0xE000) was tried for the classic
-  // ADgm object cluster on the theory that they gate construction on `tst.w obj[0]==0` where
-  // obj[0]=savedA5, needing high word 0. That theory was a MISDIAGNOSIS: the traces it rested on
-  // were corrupted by the ADDX/SUBX debug-hook shim over-matching ADDA.L/SUBA.L Dn,An (see the
-  // shim guard `((op>>6)&3)!=3`). With that emulator bug fixed, these modules persist *glob and
-  // reach their real (self-loaded) segment code at the DEFAULT A5=0x330000 — near mode made ZERO
-  // difference in output and regressed Spotlight, so it was removed.)
   const uint32_t A5 = 0x00330000;
   mem->allocate_at(0x00320000, 0x20000); mem->memset(0x00320000,0,0x20000);
   mem->write_u32b(0x0904, A5);                            // CurrentA5 lowmem global
@@ -4520,31 +4249,15 @@ int main(int argc, char** argv){
   int W = getenv("ADSCREENW")?atoi(getenv("ADSCREENW")):512;
   int Hh= getenv("ADSCREENH")?atoi(getenv("ADSCREENH")):384;
   adtoolbox::ToolboxCanvas C(mem);
-  // addm 669: SCAN-CONVERTED REGION MASKS ARE NOW DEFAULT-ON (opt-out ADNORGNMASK). The addm-661 note
-  // below explains why they were previously scoped to Spotlight (+ the addm-668 Meadow terrain): a global
-  // flip COLLAPSED Down the Drain (distinct 20->2). That collapse was a HOST BUG in the algebra, not a
-  // reason to keep masks off — rgn_mask_combine treated a mask-less operand as a global constant (a=full,
-  // b=empty) instead of its bounding rectangle, so DtD's `work ∩ portClipRect` intersected against "empty"
-  // and vanished. The corrected algebra (dm_rgn_combine, above) restores real QuickDraw set semantics and
-  // DtD/Pearls/Einstein all render correctly under masks (verified TR=120: DtD d2->147, Pearls d129==129,
-  // Einstein d2->109 — each matching its masks-off render; targeted consumer A/B = zero collapses/wipes).
-  // The flip is safe because a module that never builds a scan-mask keeps the bounds-only path unchanged
-  // (rgn_mask() returns null when no mask exists) => byte-identical for all non-consumers; and the addm-668
-  // Meadow terrain / g_spot_reveal per-module activations become a subset of the default. (Lane D:
-  // the g_spot_reveal re-forcing below is now DELETED as provably redundant, so ADNORGNMASK is a true
-  // corpus-wide mask A/B again.) Previously (addm 661): masks OFF corpus-wide, ON only for
-  // the Spotlight reveal + (addm 668) Meadow's terrain-polygon.
+  // Scan-converted region masks are default-on (opt-out ADNORGNMASK). A module that never builds a
+  // scan-mask keeps the bounds-only path unchanged (rgn_mask() returns null when no mask exists), so
+  // it stays byte-identical; consumers get real QuickDraw set semantics from dm_rgn_combine above,
+  // which treats a mask-less operand as its bounding rectangle, not as a global full/empty constant.
   C.masks_enabled = getenv("ADNORGNMASK")==nullptr;
   if(getenv("ADRGNMASK") && atoi(getenv("ADRGNMASK"))==0) C.masks_enabled=false;   // ADRGNMASK=0 forces off (A/B)
   C.force_screen = getenv("ADFORCESCREEN")!=nullptr;
-  // (Original addm-661 rationale, kept for provenance — the collapse it cites is now the algebra bug fixed above:)
-  // addm 661: CopyBits maskRgn masks (the addm-657 primitive) are activated PER-REVEAL-MODULE, not
-  // globally. A global flip (ADRGNMASK) COLLAPSES Down the Drain (distinct 20->2 — its FillRgn feedback
-  // path consumes the populated masks wrongly), so the masks stay OFF for the whole corpus and are
-  // enabled ONLY for the Spotlight reveal (g_spot_reveal, set once argv is parsed), which genuinely
-  // needs the oval mask to reveal through circular spotlights instead of hard squares.
   C.setup(W,Hh);
-  g_sbW=W; g_sbH=Hh;   // addm 377: host dims for the two-A5 screen-bounds intercept (armed only when g_sbReaderPC!=0)
+  g_sbW=W; g_sbH=Hh;   // host dims for the two-A5 screen-bounds intercept (armed only when g_sbReaderPC!=0)
   // Classic Mac low-memory globals some savers read directly for the screen:
   //   ScrnBase(0x0824) = main screen base address, MainDevice(0x08A4)/TheGDevice(0x0CC8)
   //   = the main GDevice handle. Point them at our framebuffer / GDevice so direct-write
@@ -4552,83 +4265,38 @@ int main(int argc, char** argv){
   mem->write_u32b(0x0824, C.g_fb);          // ScrnBase
   // File Manager lowmem FSFCBLen(0x3F6) = size of one File Control Block (std 94=0x5E). Slide Show's init
   // does `divu.w FSFCBLen,Dn` -> a 0 default is a division-by-zero crash before it can draw anything.
-  // GENERAL DEFAULT (addm 635, warmup Q8): 0x5E is the standard Mac constant, safe to seed for every
-  // module. The earlier regression (addm 227, count 30->29) came from ALSO seeding FCBSPtr(0x34E); that
-  // stays 0 here. ADNOFCB opts back out to the old (0-filled) behavior for experiments.
+  // 0x5E is the standard Mac constant and is safe to seed for every module; FCBSPtr(0x34E) must stay 0
+  // (a module that reads it derails into the seeded table). ADNOFCB opts back out to the 0-filled path.
   { bool wantFcb = getenv("ADNOFCB")==nullptr;
     if(wantFcb){ mem->write_u16b(0x03F6, 0x005E); } }
-  // NOTE: tried seeding File Manager lowmem FSFCBLen(0x3F6)=0x5E + FCBSPtr(0x34E) to fix Slide Show's
-  // init div-by-zero. It cleared the fault but (a) Slide Show still needs picture FILES to render
-  // (stays blank, like distortion savers needing a source image) and (b) it REGRESSED the render count
-  // 30->29 (a module reads FCBSPtr and derails into the seeded table). Net-negative -> reverted. If
-  // revisited, gate it to Slide Show by name AND keep FCBSPtr=0 (only set FSFCBLen). See LIB510 addm 227.
-  // Install a colour palette. AD 8-bit modules index into the standard Macintosh
-  // 256-colour System palette; a few ship their own 'clut'. Without this the
-  // grayscale ramp collapses their low indices to near-black. Prefer the module's
-  // own 'clut' resource, else install the authentic Mac System 7 default palette.
-  // (legacy-cleanup addm 679: the ADGRAYRAMP=1 legacy 6x6x6-cube-fallback A/B revert is
-  // retired — dead by default in main.)
+  // Install a colour palette. AD 8-bit modules index into the standard Macintosh 256-colour System
+  // palette; a few ship their own 'clut'. The startup table is the System palette, and the only thing
+  // that places a module's colours is the module's own install — a private palette only reaches the
+  // device if the module loads it (XPalette::LoadById -> GetResource('clut', id)) and installs it.
   //
-  // *** addm 754: WHERE a module palette lands on the DEVICE — the 1-BASED USABLE RANGE ***
-  // RE (shipped "After Dark 4.0 Library", LIB510_Canvas): no AD module installs a palette at index
-  // base 0. XPalette::XPalette (0x01013268) allocates a 256-ColorSpec table (NewHandleClear 0x810),
-  // writes ctSize=255, and fills the VALUE fields 1..254 — entry k of an XPalette addresses DEVICE
-  // index k+1. XPalette::SetPaletteDepth (0x0101344E) states the same intent outright: depth 8 ->
-  // palette size 254 (not 256), depth 4 -> 14 (not 16) — the first and last device entries are
-  // RESERVED (white and black, the classic Color Manager convention). XPalette::LoadById
-  // (0x0101383C) copies ONLY the RGB triples out of the 'clut' resource and leaves those value
-  // fields untouched, and MacScreenCanvas::SetPalette (0x010124EA) installs the result with
-  // SetEntries(start = -1, count = size-1); start<0 means "place each ColorSpec at the index in its
-  // own value field". So a module's N-entry 'clut' occupies device indices 1..N, and the device
-  // keeps its full 256 entries — 0 and N+1..255 stay as the System left them.
-  // MEASURED (ADSELOG, 20 frames per module, all 26 corpus clut-shippers): 15 dll#/LIB510 modules
-  // issue SetEntries start=-1 with value fields 1..N (Super Guy 1..234, Shadow Agents 1..254,
-  // Marbles! 1..235, Messages 1..226, Magic Turtle 1..229, Clocks 1..146, CYb3r W@t 1..126,
-  // Guernsey 1..29, ...) and the CLASSIC (non-library) installers pass start=1 explicitly
-  // (Zooommm! start=1 count=251 over its 252-entry clut, Frost & Fire start=1 count=253, Modern
-  // Art start=1 count=3). No module in the corpus installs its 'clut' RESOURCE at base 0; the one
-  // start=0 install anywhere is Vertigo's runtime-built FULL 256-entry table (start=0 count=255, an
-  // all-black fade) — a whole device table, i.e. the 1:1 case below, not a partial palette at 0.
-  // The 'clut' RESOURCES carry 0-based value fields (0..N-1) and this merge used them verbatim, so
-  // the host's startup table sat one index BELOW the table the module's own install produces. Put
-  // the merge where the install puts it.
-  // A 256-entry 'clut' is a whole device table rather than a palette and maps 1:1: every 256-entry
-  // module clut in the corpus already carries the reserved endpoints itself — index 0 = white and
-  // index 255 = black, matching the System palette exactly (verified for all 7: Boris / Fractal
-  // Forest / GeoBounce / Strange Attractors / Vertigo / Spheres 'clut' 1008 and Modern Art 2000).
-  // The shift is therefore keyed structurally (a partial table whose values start at 0), not by
-  // entry count alone and not by name.
+  // WHERE a module palette lands on the DEVICE — the 1-based usable range. No AD module installs a
+  // palette at index base 0. XPalette::XPalette allocates a 256-ColorSpec table, writes ctSize=255 and
+  // fills the VALUE fields 1..254, so entry k of an XPalette addresses DEVICE index k+1.
+  // XPalette::SetPaletteDepth states the same intent: depth 8 -> palette size 254 (not 256), depth 4 ->
+  // 14 (not 16) — the first and last device entries are RESERVED (white and black, the classic Color
+  // Manager convention). XPalette::LoadById copies ONLY the RGB triples out of the 'clut' resource and
+  // leaves the value fields untouched, and MacScreenCanvas::SetPalette installs the result with
+  // SetEntries(start = -1, count = size-1); start<0 means "place each ColorSpec at the index in its own
+  // value field". So a module's N-entry 'clut' occupies device indices 1..N and the device keeps its
+  // full 256 entries — 0 and N+1..255 stay as the System left them. The 'clut' RESOURCES themselves
+  // carry 0-based value fields (0..N-1), so a host-side merge has to add the 1.
   //
-  // *** addm 754b: THE PRE-MERGE IS RETIRED, EXCEPT FOR A DECLARED DEVICE TABLE. ***
-  // addm 754 fixed WHERE this merge puts a module's clut. The follow-up question was whether the
-  // merge should happen at all, and the guest answered most of it: a module's clut only reaches the
-  // device if the module LOADS it (`XPalette::LoadById` -> `GetResource('clut', id)`) and installs
-  // it. Census (addm 754, ADCLUTASK probe, 200 frames/module): the installers all load theirs first
-  // — Art Critic 26000, Clocks 1000, Fish World 16000, Life & All 10000, Magic Turtle 2000,
-  // Marbles! 8000, Messages 6000, RPS 21000, Rodger Dodger 2000+2001, Shadow Agents 9000, Guernsey
-  // 24000-24010, CYb3r W@t 3200-3203, Frost & Fire 128 — while Boris, Bugs, Draw Morph, Fractal
-  // Forest, GeoBounce, Spheres and Modern Art ask for ZERO clut resources (Modern Art issues no
-  // GetResource at all). For a module's PRIVATE palette that nothing loads, pre-merging is a host
-  // invention in either index base, so it is retired: the startup table is the System palette and
-  // the only thing that places a module's colours is the module's own install — correct for the
-  // loaders by construction (their install lands at 1..N, addm 754) and for the rest by absence.
+  // THE ONE TABLE THIS HOST MERGES AT STARTUP: a colour table whose ctFlags bit 15 is set is by
+  // definition a DEVICE colour table (Inside Macintosh: Imaging With QuickDraw, Color Manager) — the
+  // module is declaring that the table belongs on the screen device rather than being a pixmap's
+  // private palette. Spheres' 'clut' 1008 (256 entries, ctFlags 0x8000) is the corpus' only one, and it
+  // is the one module that loses content without the merge: its spheres recolour and the big sphere's
+  // smooth radial gradient bands into flat steps, because the System palette cannot carry the ramps its
+  // own device table does. A 256-entry clut is a whole device table rather than a palette and maps 1:1;
+  // every 256-entry module clut in the corpus already carries the reserved endpoints itself (index 0 =
+  // white and index 255 = black, matching the System palette).
   //
-  // THE EXCEPTION, and it is measured rather than assumed: a colour table whose ctFlags bit 15 is
-  // set is by definition a DEVICE colour table (Inside Macintosh: Imaging With QuickDraw, Color
-  // Manager) — the module is declaring that this table belongs on the screen device, not that it is
-  // a pixmap's private palette. Exactly ONE table in the corpus says that, SPHERES' 'clut' 1008
-  // (256 entries, ctFlags 0x8000; all 25 others are ctFlags 0), and it is exactly the one module
-  // that LOSES CONTENT without the merge: 200 distinct frames -> 109 (RGB 196 -> 103), its spheres
-  // recolour from yellow to blue/green and the big sphere's smooth radial gradient bands into flat
-  // steps, because the System palette cannot carry the ramps its own device table does. So "the
-  // module never calls GetResource for it" does NOT prove nothing installed it — for a declared
-  // device table the engine we replace plausibly did, and Spheres is the proof by consequence.
-  // Honouring the flag keeps that one case and retires the other 25.
-  //
-  // Reverts: ADCLUTPREMERGE=1 restores the addm-754 behaviour exactly (pre-merge every clut at
-  // 1..N), and ADCLUTPREMERGE=1 + ADNOCLUTBASE1=1 restores the pre-754 behaviour (at 0..N-1), so
-  // the whole history is reachable from the shipped default. ADNOCLUTMERGE is RETIRED: it named the
-  // behaviour that is now the default for everything but the declared device table.
+  // ADCLUTPREMERGE=1 pre-merges every module clut at 1..N; adding ADNOCLUTBASE1=1 places it at 0..N-1.
   {
     auto cit = rez.find({FOURCC("clut"),(int16_t)0});
     if(cit==rez.end() && !rez_ids[FOURCC("clut")].empty())
@@ -4639,7 +4307,7 @@ int main(int argc, char** argv){
       const string& c=cit->second; int n=((uint8_t)c[6]<<8|(uint8_t)c[7])+1;
       int v0 = n>0 && (int)c.size()>=10 ? ((uint8_t)c[8]<<8|(uint8_t)c[9]) : 0;
       // A device table's entries are index-implicit (IM: the value field is ignored), so it maps
-      // 1:1; only a partial 0-based palette takes the addm-754 1..N placement.
+      // 1:1; only a partial 0-based palette takes the 1..N placement.
       int base = (!devTable && n<256 && v0==0 && !getenv("ADNOCLUTBASE1")) ? 1 : 0;
       for(int i=0;i<n && 8+i*8+7<(int)c.size();i++){ const uint8_t* e=(const uint8_t*)c.data()+8+i*8;
         int idx=(e[0]<<8|e[1])+base; uint16_t R=e[2]<<8|e[3],G=e[4]<<8|e[5],B=e[6]<<8|e[7];
@@ -4647,37 +4315,32 @@ int main(int argc, char** argv){
       fprintf(stderr,"[adhost68k] loaded module 'clut' (%d entries) at %d..%d%s\n",n,base,base+n-1,
               devTable?" [device table]":"");
     } else {
-      // addm 632: no module 'clut' -> install the AUTHENTIC Mac System 7 default 8-bit palette
-      // (black at index 255, ramps at 215-254). setup() already seeded it, but install it
-      // explicitly here so the "no clut" path reads correctly and is robust to init ordering.
-      // This is what a real Mac gave a module that never installs its own palette.
+      // Otherwise install the authentic Mac System 7 default 8-bit palette (black at index 255, ramps
+      // at 215-254). setup() already seeded it, but install it explicitly here so this path reads
+      // correctly and is robust to init ordering. This is what a real Mac gave a module that never
+      // installs its own palette.
       uint8_t pal[256][3]; adtoolbox::mac_sys7_palette(pal);
       for(int i=0;i<256;i++) C.clut_set(i,(uint16_t)(pal[i][0]*257),(uint16_t)(pal[i][1]*257),(uint16_t)(pal[i][2]*257));
       fprintf(stderr,"[adhost68k] installed authentic Mac System 7 8-bit palette\n");
     }
   }
-  // A fresh Mac GrafPort defaults to fgColor=blackColor, bgColor=whiteColor. The member
-  // defaults (qd_fg=1, qd_bg=0) were palette-agnostic guesses; with the descending colour
-  // cube (idx0=white, idx1=cream, idx215=black) that made the default foreground CREAM.
-  // Modules that fill/draw with the foreground before ever calling ForeColor (Snake paints
-  // its background with the default fg expecting black -> got cream) came out wrong. Pin the
-  // defaults to the real Mac values by CLUT lookup so it's correct for any palette ordering.
+  // A fresh Mac GrafPort defaults to fgColor=blackColor, bgColor=whiteColor. Pin the defaults by CLUT
+  // lookup rather than to fixed indices so they are correct for any palette ordering: modules that
+  // fill or draw with the foreground before ever calling ForeColor (Snake paints its background with
+  // the default fg expecting black) depend on it.
   C.qd_fg = C.rgb_to_index(0,0,0);                    // blackColor
   C.qd_bg = C.rgb_to_index(0xFFFF,0xFFFF,0xFFFF);     // whiteColor
-  // *** addm 549 BLACK-BLANK ***: emulate the After Dark engine's DoBlank/PerformBlank, which paints the
-  // whole screen BLACK before a module draws. The framebuffer is memset to raw index 0 in
-  // ToolboxCanvas::setup() (ad_toolbox.hh) and AD's convention is that index 0 is the blanked-backdrop
-  // key (untouched pixels stay 0). Index 0 is BLACK only under the transient grayscale ramp; the REAL
-  // palette installed just above (module 'clut' or the 6x6x6 colour cube) puts WHITE at index 0. So
-  // every pixel a module never touches — the "background" the engine was supposed to have blanked —
-  // rendered WHITE (Bogglins, Globe, Can of Worms, Clocks, Bugs, Mandelbrot, ...). FIX (matches the PPC
-  // host adhost.cc's long-standing behaviour): force CLUT entry 0 -> BLACK so the memset-0 backdrop
-  // renders black. This is deliberately a PALETTE edit, NOT a framebuffer fill: the framebuffer bytes are
-  // left at index 0, so it does not re-seed feedback savers' pixel buffers. Modules that later install
-  // their own palette via SetEntries OVERWRITE entry 0 with their own value, so they are unaffected.
-  // Must run AFTER the palette install (documented ordering: force-black-after-palette). ADAUTORESTART
-  // re-execs the whole process so restarts re-apply this. Opt-out ADKEEP0=1 (same lever name as the PPC
-  // host) for the rare module that paints a real colour into index 0.
+  // BLACK-BLANK: emulate the After Dark engine's DoBlank/PerformBlank, which paints the whole screen
+  // BLACK before a module draws. The framebuffer is memset to raw index 0 in ToolboxCanvas::setup()
+  // (ad_toolbox.hh) and AD's convention is that index 0 is the blanked-backdrop key (untouched pixels
+  // stay 0), but the real palette installed just above puts WHITE at index 0, so every pixel a module
+  // never touches would render white. Force CLUT entry 0 -> BLACK so the memset-0 backdrop renders
+  // black (the PPC host adhost.cc does the same). This is deliberately a PALETTE edit, NOT a
+  // framebuffer fill: the framebuffer bytes stay at index 0, so it does not re-seed feedback savers'
+  // pixel buffers. Modules that later install their own palette via SetEntries OVERWRITE entry 0 and
+  // are unaffected. Must run AFTER the palette install. ADAUTORESTART re-execs the whole process, so
+  // restarts re-apply this. Opt-out ADKEEP0=1 (same lever name as the PPC host) for the rare module
+  // that paints a real colour into index 0.
   //
   // NAME-GATE (like Mandelbrot's SetEntries gate): a small class of plasma/fire FEEDBACK savers pick
   // their DRAWING indices at runtime via Color2Index/nearest-CLUT-match and happen to latch onto
@@ -4685,76 +4348,39 @@ int main(int argc, char** argv){
   // entry, which perturbs the index those modules draw with and derails their frame-to-frame feedback.
   // ADFORCE0 forces the black-blank even for gated modules (A/B lever).
   //
-  // *** addm 680 PROOF-OF-HOLD — SUPERSEDED. RE-MEASURED against the post-754/754b palette world. ***
-  // addm 680 held this list at TWO names with a documented "inexpressible as a deterministic predicate"
-  // argument. That argument was reasoned in the PRE-754 world, where the startup device table was a
-  // premerge of the module's own 'clut' at 0-based indices. addm 754 (module palettes live at device
-  // indices 1..N) and addm 754b (no startup premerge at all for private palettes — System palette until
-  // the module installs) moved the ground under it, so the gate-c lane re-ran every measurement the hold
-  // rests on. Result: HALF the hold survives and the list drops to ONE name.
+  // Frost & Fire is the one name on the list, and the reason is a mechanism rather than the size of
+  // the delta. It never uses index 0 as a backdrop — its backdrop is index 255, which resolves pure
+  // black, and its framebuffer holds zero index-0 pixels — so the force buys it nothing. It makes
+  // exactly two colour requests in its whole life, RGBForeColor(black) and RGBBackColor(white), whose
+  // authentic answers are 255 and 0; under the force the foreground answer becomes 0 too, so its black
+  // and its white resolve to the SAME index (occupied indices collapse 58 -> 24), which no Macintosh
+  // can produce. Its own 'clut' 128 is byte-identical to the Mac System 7 8-bit palette and it installs
+  // with SetEntries(start=1 count=253) -> device 1..254, deliberately leaving both reserved endpoints
+  // as the System had them.
+  // The exempt IMAGE is not thereby correct: F&F draws with a 23-step ramp anchored at the resolved
+  // foreground index (bands fg..fg+22), so at the authentic fg=255 its primary ramp clips off the top
+  // of the index space into its own black backdrop. It installs the System palette one slot up (device
+  // i = System colour i-1) and resolves colours against a different GDevice than the one it installed
+  // into, which this host does not model per-device — an F&F ramp / per-GDevice-palette question, not
+  // a KEEP0 one.
   //
-  // NIRVANA — RETIRED FROM THIS LIST (was the stronger of the two claims). addm 680 measured "Nirvana
-  // distinct 16->1 under ADFORCE0 (catastrophic)". That DOES NOT REPRODUCE. 200f, double-run, three axes:
-  // under ADFORCE0 Nirvana's DISPLAYED output is BYTE-IDENTICAL to the exempt path (8d679a8b, 200/200
-  // distinct, on both the raw-CLUT RGB axis and the true-display axis); only the index plane moves
-  // (a701e7e1->e6caafb4, 129 distinct BOTH sides) — the index-cosmetic class addm 691 defined. The
-  // catastrophe was an artifact of the pre-754 startup premerge and died with it.
-  //
-  // FROST & FIRE — HOLD SURVIVES, and the reason is now a MECHANISM, not the size of the delta.
-  // (addm 766 held it on "the change is large and there is no ground truth"; the frostfire lane found
-  // the ground truth and it says EXEMPT. addm 766's stated tension was INVERTED — see below.)
-  //   (a) THE ENGINE RESERVES INDEX 0 AS WHITE, in its own shipped code. XPalette::SetPaletteDepth(8)
-  //       @0101344E yields palette size 0xFE (254), depth 4 yields 0x0E (14) — the Color Manager
-  //       reservation: first entry white, last entry black, both off limits to a module's palette.
-  //       Nothing in the shipped library ever SetEntries index 0. The engine's DoBlank paints black
-  //       PIXELS; it does not edit the table. Blackening entry 0 is a host stand-in, and F&F is the
-  //       one module for which that stand-in is pure cost.
-  //   (b) THE MODULE'S OWN AUTHORED TABLE SAYS WHITE. Its 'clut' 128 (256 entries, System-7
-  //       compressed) is byte-identical to the Mac System 7 8-bit palette — 0/256 entries differ —
-  //       so its entry 0 is FFFFFF and its entry 255 is 000000. It then installs with
-  //       SetEntries(start=1 count=253) -> device 1..254, deliberately leaving both reserved
-  //       endpoints as the System had them.
-  //   (c) F&F NEVER USES INDEX 0 AS A BACKDROP, so the force buys it nothing. Its backdrop is index
-  //       255 (175,364 px @f59) — it resolves pure black and PaintRects with the answer. The exempt
-  //       framebuffer holds ZERO index-0 pixels on every frame.
-  //   (d) WHAT THE FORCE ACTUALLY BREAKS. F&F makes exactly two colour requests in its whole life:
-  //       RGBForeColor(black) and RGBBackColor(white). Authentic answers 255 and 0. Under ADFORCE0
-  //       the foreground answer becomes 0 — so its black and its white resolve to the SAME index,
-  //       which no Macintosh can produce. Occupied indices collapse 58 -> 24.
-  //   CORRECTING addm 766 ON THE RECORD: (i) the "dynamically-resolved white lands on index 0" is
-  //   F&F's BACKGROUND, and it lands on 0 in BOTH configs — addm 708c already made background
-  //   resolution force-immune, so the force never moves it; (ii) "under the force it lands on 245"
-  //   was DRAW MORPH's number (gate #10 of the same addendum), not F&F's — F&F's forced foreground
-  //   index is 0; (iii) the addm-754 contract argues for the EXEMPT side: index 0 sitting outside
-  //   F&F's installed range is not an anomaly, it IS the reservation the library encodes.
-  //   NOT CERTIFIED, and deliberately so: the exempt IMAGE is not thereby proven correct. F&F draws
-  //   with a 23-step ramp anchored at the resolved foreground index (measured fg=0/64/128/200/233 ->
-  //   bands fg..fg+22), so at the authentic fg=255 its primary ramp clips off the top of the index
-  //   space into its own black backdrop. The forced image looks smooth only because fg=0 parks that
-  //   ramp on the first rows of the 6x6x6 cube. Neither is F&F's designed render; the real defect is
-  //   that it installs the System palette one slot up (device i = System colour i-1) and resolves
-  //   colours against a different GDevice than the one it installed into, which this host does not
-  //   model per-device. That is an F&F ramp / per-GDevice-palette lane, NOT a KEEP0 question.
-  //   Evidence: scratchpad/frostfire_evidence.md.
-  //
-  // WHAT STILL HOLDS from addm 680, re-verified here and NOT to be re-litigated:
-  //  (1) The CLUT-preserving alternative — universal disp_black0 INSTEAD of editing the CLUT — still
-  //      REGRESSES white-content drawers, re-measured to the pixel: under ADKEEP0 + universal disp_black0
-  //      Snake's 10550 index-0 pixels flip white->black, and addm 680's recorded 11694->1144 displayed
-  //      nonblack px is exactly that 10550. The CLUT force is REQUIRED for the Snake class.
-  //      NOTE FOR ANYONE RE-RUNNING THIS: ADFBHASHRGB CANNOT SEE IT. That axis builds its LUT straight
-  //      from g_clut and is blind to the display-only overrides, which live in snap_build_lut(). The
-  //      divergence is visible only on a true-display hash (gate-c's ADFBHASHDISP probe) or in the PPMs.
-  //  (2) No STATIC signal separates the classes. "Installs 1..N excluding idx0" ALSO matches Zooommm!
+  // Two constraints on anyone revisiting this list:
+  //  (1) The CLUT-preserving alternative — a universal disp_black0 INSTEAD of editing the CLUT —
+  //      regresses white-content drawers: under ADKEEP0 + universal disp_black0 Snake's 10550 index-0
+  //      pixels flip white->black. The CLUT force is REQUIRED for the Snake class. ADFBHASHRGB CANNOT
+  //      SEE THIS: that axis builds its LUT straight from g_clut and is blind to the display-only
+  //      overrides, which live in snap_build_lut(); the divergence shows only on a true-display hash
+  //      (ADFBHASHDISP) or in the PPMs.
+  //  (2) No STATIC signal separates the classes. "Installs 1..N excluding idx0" also matches Zooommm!
   //      (start=1 count=251), a white-content drawer that NEEDS the force; Snake/Bogglins install ZERO
-  //      SetEntries yet need it. The discriminator is still not in the palette.
+  //      SetEntries yet need it. The discriminator is not in the palette.
   static const char* KEEP0_MODULES[] = { "Frost & Fire" };
   bool keep0 = getenv("ADKEEP0")!=nullptr;
   if(!getenv("ADFORCE0")) for(const char* nm : KEEP0_MODULES)
     if(argc>1 && strstr(argv[1],nm)){ keep0=true; break; }
   if(!keep0){
     uint32_t e0 = C.g_clut + 8;                 // entry 0: {value@0, r@+2, g@+4, b@+6}
-    // addm 708c: keep the module's real entry-0 colour so BACKGROUND resolution stays force-immune.
+    // Keep the module's real entry-0 colour so BACKGROUND resolution stays force-immune.
     g_clut0R=mem->read_u16b(e0+2); g_clut0G=mem->read_u16b(e0+4); g_clut0B=mem->read_u16b(e0+6);
     g_clut0_saved=true;
     mem->write_u16b(e0+2, 0); mem->write_u16b(e0+4, 0); mem->write_u16b(e0+6, 0);
@@ -4764,69 +4390,24 @@ int main(int argc, char** argv){
     // byte-identical; only the *display* colour of index-0 pixels flips white->black.
     fprintf(stderr,"[adhost68k] black-blank: forced CLUT index 0 -> black (qd_bg untouched=%u)\n",(unsigned)C.qd_bg);
   }
-  // *** addm 583 NIRVANA DISPLAY-BLACK-0 ***: Nirvana stays KEEP0-exempt above (CLUT[0] left WHITE so
-  // rgb_to_index and the plasma's colour selection are byte-identical to the working baseline), but its
-  // untouched background (framebuffer index 0) renders WHITE — wrong; real Nirvana grows its red plasma
-  // band on BLACK (user-flagged twice). RE (addm 583): the framebuffer is ~99% index 0 (the backdrop);
-  // the animated red band occupies non-zero indices. ADFORCE0 (blacken CLUT[0]) DOES give a black backdrop
-  // but perturbs rgb_to_index (measured qd_fg 192->0, qd_bg 0->22) and collapses the band to near-black
-  // idx255 — the exact derailment the KEEP0 exemption warned of. The correct, narrow fix is DISPLAY-ONLY:
-  // show index-0 pixels black while leaving the CLUT that rgb_to_index reads untouched (see disp_black0 in
-  // ad_toolbox.hh snap_build_lut). PROVEN display-only: over 120 deterministic frames the index plane is
-  // byte-identical with the flag on/off and only palette entry 0 differs (black vs white). Result: black
-  // backdrop + the SAME red animated band as the working baseline. Name-gated; opt-out ADNODISPBLACK0.
-  // *** RETIRED (gate-c lane): the addm-583 name gate is DELETED — it was DEAD CODE, proven three ways. ***
-  // (a) INERT FOR ITS ONLY GATED MODULE. The addm-583 premise above — "the framebuffer is ~99% index 0 (the
-  //     backdrop)" — is FALSE in the post-754/754b world: Nirvana's framebuffer holds ZERO index-0 pixels on
-  //     every one of 200 measured frames (per-frame census, min == max == 0). Nirvana now paints the whole
-  //     screen, so there is nothing at index 0 left to recolour. Measured: ADNODISPBLACK0=1 is byte-identical
-  //     to the default on ALL THREE axes (index plane a701e7e1, raw-CLUT RGB 8d679a8b, true-display 8d679a8b),
-  //     200f, double-run.
-  // (b) INERT FOR EVERY OTHER MODULE BY CONSTRUCTION. For a non-KEEP0 module the black-blank above has already
-  //     forced CLUT[0] to black, so setting ppm_lut[0] to black is a no-op. Measured corpus-wide-style on
-  //     Snake: forcing the display half universally is byte-identical to the default on all three axes.
-  // (c) Frost & Fire, the one remaining KEEP0 name, never had a display half (it fills idx255-black, so its
-  //     idx0 is never shown) — the reason this list was one name where KEEP0 was two.
-  // The addm-680 warning that a UNIVERSAL disp_black0 regresses white-content drawers (Snake 11694->1144) is
-  // NOT what this retires and remains true — see the re-measurement in the KEEP0 block above. That regression
-  // only exists when disp_black0 REPLACES the CLUT force; here the force stays and the display half is simply
-  // redundant. ADNODISPBLACK0 is kept as an accepted no-op so existing scripts and evidence files still run.
-  // NOTE: ToolboxCanvas::disp_black0 (ad_toolbox.hh) and its snap_build_lut() consumer are left in place and
-  // are now unreachable from this host — flagged for the integrator, not deleted here (copy-only lane).
-  if(getenv("ADNODISPBLACK0")){ /* accepted no-op (was: Nirvana display-black-0) */ }
-  // (legacy-cleanup addm 679: the addm-627 Warp! display-black-at-255 override is retired. It compensated
-  // for the old synthetic gray ramp ending at (17,17,17); the authentic Mac System palette (addm 632,
-  // default since) already seeds CLUT[255]=pure black, so the override was redundant post-palette —
-  // verified fbhash-identical for Warp! with/without. ADNO255BLACK is gone with it.)
-  // *** addm 553 START-BLANK (extra background index -> black) — RETIRED addm 750, default OFF. ***
-  // The premise was the SYNTHETIC startup palettes this host used to ship: a grayscale ramp (idx255 = WHITE)
-  // and a 6x6x6 fallback cube whose black landed on idx215. Two modules blank their field with an index those
-  // palettes misplaced, so the host forced that index black — for Satori also STICKY, re-blackening it after
-  // every SetEntries because the module's own palette put green there.
-  //   Zooommm! — blanked with rgb_to_index(white) = ramp idx255 -> WHITE start. Real Mac: black.
-  //   Satori   — blanked with rgb_to_index(black) = cube idx215, which its SetEntries recolors green.
-  // addm 632 replaced both synthetic palettes with the authentic Mac System 7 8-bit palette, which seeds
-  // CLUT[255] = pure black — the same fix already applied to Warp!'s addm-627 override (retired addm 679).
-  // That dissolved BOTH premises and left the compensation doing damage:
-  // (measured on the current host: qd_bg = rgb_to_index(white) = 0 and qd_fg = rgb_to_index(black) = 255,
-  //  the System palette's own endpoints — neither module resolves to the index its row names any more.)
-  //   * Zooommm!: blanks with idx0, which the black-blank block above already blackens -> the row is INERT
-  //     (measured byte-identical with and without, 60f fbhashrgb).
-  //   * Satori: rgb_to_index(black) is now 255, not 215, so the module never blanks with 215 at all. But 215
-  //     is a LIVE FIELD COLOUR — the plasma's index is mod(field,254), and 215 sits inside the module's own
-  //     green run (161..253 all map to 0,255,127). The sticky re-blacken repainted every cell that legitimately
-  //     computed 215 pure black: the scattered ~4x4/8x8 dark blocks (108 of 14985 block draws at factory
-  //     settings). The addm-553 note that idx215 was "verified content-free" was measured against the cube
-  //     palette and does not hold against the module's installed one.
-  // MECHANISM: a CLUT entry the module installs itself is the module's to own — the host must not re-colour it.
-  // Legacy A/B revert: ADSTARTBLANKLEGACY=1 restores the addm-553 behaviour exactly for both modules.
+  // ADNODISPBLACK0 is accepted and does nothing. A display-only black-at-index-0 path is redundant:
+  // for a non-KEEP0 module the black-blank above has already forced CLUT[0] to black, and Frost & Fire
+  // (the one KEEP0 name) fills its backdrop with index 255 and never shows index 0.
+  if(getenv("ADNODISPBLACK0")){ /* accepted no-op */ }
+  // START-BLANK legacy compensation, default OFF. ADSTARTBLANKLEGACY=1 force-blacks a CLUT index for
+  // Zooommm! and Satori (for Satori also STICKY, re-blackening it after every SetEntries). It is wrong
+  // under the authentic Mac System 7 8-bit palette, which seeds CLUT[255] = pure black: Zooommm! blanks
+  // with idx0, which the black-blank above already blackens, and Satori's rgb_to_index(black) is 255, so
+  // it never blanks with 215 at all — but 215 IS a live field colour for it (the plasma's index is
+  // mod(field,254) and 215 sits inside the module's own green run, 161..253 all mapping to 0,255,127), so
+  // the sticky re-blacken repaints cells that legitimately computed 215. A CLUT entry the module installs
+  // itself is the module's to own — the host must not re-colour it.
   if(getenv("ADSTARTBLANKLEGACY") && argc>1){
     struct { const char* name; int idx; bool sticky; } EXTRA_BLACK[] = {
       { "Zooommm!", 255, false },   // ramp-white field; index 255 unused by content
       { "Satori",   215, true  },   // cube-black blank index; SetEntries recolors it -> keep sticky-black
-      // NOTE: Draw Morph is NOT here — its white paper is NOT a fixed CLUT index; it derives the fill index
-      // at runtime via rgb_to_index(pure white), so a palette-blacken just walks to the next white. It is
-      // fixed at rgb_to_index instead (C.dm_white_black / g_dm_paper, addm 557).
+      // NOTE: Draw Morph is NOT here — its white paper is NOT a fixed CLUT index; it derives the fill
+      // index at runtime via rgb_to_index(pure white), so a palette-blacken just walks to the next white.
     };
     for(auto& eb : EXTRA_BLACK) if(strstr(argv[1],eb.name)){
       uint32_t d=C.g_clut+8+(uint32_t)eb.idx*8;
@@ -4866,35 +4447,28 @@ int main(int argc, char** argv){
   // (during init) AND the per-frame quit-on-input poll (during animation). Forge the
   // 'ADr' version record only while initialising; once animating, report a clean
   // nullEvent so a module's own animation loop doesn't mistake the handshake for user
-  // input and bail after a single frame (root cause of the Gravity solid-first-frame bug).
+  // input and bail after a single frame.
   bool g_anim_phase=false;
-  // *** addm 718: AUTHENTIC PRE-INIT DESKTOP SEED (seed policy flip) ***
-  // On a real Mac the screen HELD THE DESKTOP when a saver started; the blank step is the MODULE'S OWN
-  // DoBlankScreen (msg 2) — the PortableModule base implementation paints the screen black (the addm-698
-  // worker) and most modules use it, so the desktop is erased; distortion/reader savers OVERRIDE it and
-  // keep or transform what is there. So the FILTER is each module's own code, which this host drives.
-  // Therefore the host seeds a source image into g_fb ONCE, BEFORE msg 0, for EVERY module, and lets the
-  // module decide what survives. This RETIRES the read-path detector (g_copyfrom_screen/g_copy_s2s +
-  // its extra "detect" draw + the addm-712 destination discriminator) and the SEEDNAMED name list
-  // {Spin Brush, Puzzle} — both existed only to decide WHO gets a seed. Measured (addm 716 census,
-  // reproduced here): 49/61 modules are PIXEL-IDENTICAL seeded vs unseeded because their own blank
-  // erases the seed; the 12 that keep some of it include every module the retired machinery targeted.
-  // Levers: ADNOSEED (run fully unseeded — the pre-flip default, for A/B), ADSEEDIMG=<path> (explicit
-  // source image: raw fb_w*fb_h index bytes, or a binary P6 PPM mapped through the live CLUT; any other
-  // value keeps the synthetic generator, which is what ADSEEDIMG=1 meant before the flip).
+  // AUTHENTIC PRE-INIT DESKTOP SEED. On a real Mac the screen HELD THE DESKTOP when a saver started;
+  // the blank step is the MODULE'S OWN DoBlankScreen (msg 2) — the PortableModule base implementation
+  // paints the screen black and most modules use it, so the desktop is erased; distortion/reader savers
+  // OVERRIDE it and keep or transform what is there. The FILTER is each module's own code, which this
+  // host drives, so the host seeds a source image into g_fb ONCE, BEFORE msg 0, for EVERY module and
+  // lets the module decide what survives (49 of 61 modules are pixel-identical seeded vs unseeded
+  // because their own blank erases the seed).
+  // Levers: ADNOSEED (run fully unseeded, for A/B), ADSEEDIMG=<path> (explicit source image: raw
+  // fb_w*fb_h index bytes, or a binary P6 PPM mapped through the live CLUT; any other value keeps the
+  // synthetic generator).
   const bool g_seed_on = (getenv("ADNOSEED")==nullptr);
   std::vector<uint8_t> g_seed_img;    // loaded ADSEEDIMG source (empty => synthetic generator)
   std::vector<uint8_t> g_seed_snap;   // exact bytes the seed wrote (for the post-blank survival measure)
   bool g_preinit_seeded=false;        // the pre-init seed ran this process
   bool g_seed_kept=false;             // the module's OWN blank left the seed substantially intact
-  // *** Spotlight authentic full-screen reveal (distortion-saver present model, addm 661) ***
-  // Spotlight SAVES the screen into an offscreen at DoInitialize (CopyBits g_fb->offscreen, full-screen
-  // rect), then DARKENS the screen and REVEALS the saved image through moving spotlight ovals. Under the
-  // addm-718 pre-init model the desktop is ALREADY on g_fb when that save runs, so the offscreen captures
-  // it for free and the addm-661 "seed g_fb at the intercepted save" hook is retired with the rest of the
-  // seed machinery. The former g_spot_reveal name gate is retired too (lane D): its only surviving
-  // consumer re-asserted the already-default masks_enabled — see the retirement note at the old
-  // assignment site. Under ADNOSEED Spotlight reveals a black save — the honest unseeded result.
+  // Spotlight's full-screen reveal: it SAVES the screen into an offscreen at DoInitialize (CopyBits
+  // g_fb->offscreen, full-screen rect), then DARKENS the screen and REVEALS the saved image through
+  // moving spotlight ovals. Under the pre-init seed the desktop is ALREADY on g_fb when that save runs,
+  // so the offscreen captures it for free and no interception is needed. Under ADNOSEED Spotlight
+  // reveals a black save — the honest unseeded result.
   auto seed_gfb=[&](){
     const size_t n=(size_t)C.fb_w*C.fb_h;
     g_seed_snap.resize(n);
@@ -4934,21 +4508,19 @@ int main(int argc, char** argv){
     fprintf(stderr,"[adhost68k] seed image '%s' unusable (%zu bytes, need %zu raw or a %dx%d P6) -> synthetic\n",
       p,raw.size(),n,C.fb_w,C.fb_h);
   };
-  // *** addm 718b: REAL BACKGROUND PixPats (GetPixPat / BackPixPat / EraseRgn) ***
-  // Found by the seed flip: Spin Brush's screen source is NOT a desktop, it is its OWN backdrop. Its init
-  // does `GetPixPat(id); BackPixPat(pp)` and its DoBlankScreen does ONE EraseRgn over the full screen —
-  // i.e. it fills the screen with a colour PIXEL PATTERN of its own (the module ships ppat:6, selectable
-  // from its "Background" MENU/mVal control) and then smears THAT with the brush. Both traps were honest
-  // stubs (GetPixPat returned a zeroed handle, BackPixPat popped its argument), so the erase fell back to
-  // flat qd_bg = black and the brush had nothing but black to smear — which is exactly what the addm-434
-  // "Spin Brush" SEEDNAMED entry was papering over. Implemented for real here: decode the ppat resource to
-  // host CLUT indices and tile it in the EraseRgn background fill. Blast radius: a module must actually
-  // install a background PixPat, and Spin Brush is the corpus' only one (GeoBounce calls NewPixPat, which
-  // has no resource behind it -> no tile -> unchanged flat fill). ADNOPIXPAT reverts to the flat fill.
+  // REAL BACKGROUND PixPats (GetPixPat / BackPixPat / EraseRgn). Spin Brush's screen source is not a
+  // desktop, it is its OWN backdrop: its init does `GetPixPat(id); BackPixPat(pp)` and its
+  // DoBlankScreen does ONE EraseRgn over the full screen, i.e. it fills the screen with a colour PIXEL
+  // PATTERN of its own (the module ships ppat:6, selectable from its "Background" MENU/mVal control)
+  // and then smears THAT with the brush. Decode the ppat resource to host CLUT indices and tile it in
+  // the EraseRgn background fill; without it the erase falls back to flat qd_bg = black and the brush
+  // has nothing but black to smear. Blast radius: a module must actually install a background PixPat,
+  // and Spin Brush is the corpus' only one (GeoBounce calls NewPixPat, which has no resource behind it
+  // -> no tile -> unchanged flat fill). ADNOPIXPAT reverts to the flat fill.
   struct PixPatTile { int w=0,h=0; std::vector<uint8_t> idx; };
   std::map<uint32_t,PixPatTile> g_pixpats;        // guest PixPatHandle -> decoded tile
   const PixPatTile* g_bg_pixpat=nullptr;          // the port's current background PixPat (null = flat qd_bg)
-  // addm 785: the port's opColor — the operand colour for the ARITHMETIC transfer modes
+  // The port's opColor — the operand colour for the ARITHMETIC transfer modes
   // (blend weight; addPin/subPin max/min). Recorded by the AA21 OpColor trap and deliberately not
   // applied: the pen rasterizers fall back to patCopy for every mode outside 0..15 because an 8-bit
   // indexed framebuffer has no meaningful partial mix. It lives here so the value is available to a
@@ -4988,21 +4560,12 @@ int main(int argc, char** argv){
       T.idx[(size_t)y*w+x]=lut[(size_t)v]; }
     return T;
   };
-  // (lane D: the noct_bucket_rgn flag is deleted. It recorded that Nocturnes uses fresh NewRgn
-  // regions as EXCLUSION regions and needs them EMPTY; that is now the unconditional behaviour of
-  // the exact empty-region algebra, so the flag had no reader left — see the note at its old
-  // assignment site and at the NewRgn handler that dissolved gate #18.)
   // Geometrically-exact QuickDraw region algebra in UnionRgn/DiffRgn: empty is the identity for
   // union (emptyRgn ∪ B = B, NOT a bbox dragged to the origin); A−B is exactly empty when B⊇A.
-  // These are true Toolbox-correctness fixes — the legacy host did unconditional bbox min/max
-  // (pinning a union accumulator's top-left to (0,0) on its first empty operand) and an "≈srcA"
-  // DiffRgn that never went empty. Unconditional default (addm 687+): proven a correctness fix, not
-  // Einstein-specific. It fixes Einstein's pen-plot draw gate AND Nocturnes' UnionRgn streak
-  // accumulator (which the old origin-pin under-populated: streak count d30→36, EXACTLY matching
-  // real QuickDraw — see einstein_evidence.md). No other module consumes these ops (corpus A/B
-  // byte-identical). ADNOEINRGN reverts to the legacy bbox min/max for A/B.
+  // Einstein's pen-plot draw gate and Nocturnes' UnionRgn streak accumulator both depend on it; no
+  // other module in the corpus consumes these ops. ADNOEINRGN reverts to the legacy bbox min/max.
   bool g_exact_rgn=true;
-  // Boris "Out on the Town" (addm 474): the module's DoInitialize reads the demoRect-empty test
+  // Boris "Out on the Town": the module's DoInitialize reads the demoRect-empty test
   // (EmptyRect(params+0x16)) as a Pascal BYTE result via `move.b (A7)+,D0` — it reads the HIGH byte
   // of the reserved word slot (the real Mac Toolbox Boolean position). The host's default EmptyRect
   // put the boolean in the LOW byte, so Boris always saw "not empty" -> ran the control-panel PREVIEW
@@ -5010,41 +4573,39 @@ int main(int argc, char** argv){
   // 300-actor town scene was never constructed. Gate the ROM-correct high-byte EmptyRect result to
   // Boris (byte-identical for every other module) + serve the correct EMPTY full-screen demoRect.
   bool g_boris=false;
-  bool g_geobounce=false;   // addm 728: same moving-present-window trail class as Boris (poly on black)
-  // addm 709: the addm-708/708b/708c levers, resolved ONCE instead of per trap. ADNOWHITEMATTE sat in
-  // the CopyBits blit setup (Rebound issues 1334 CopyBits per 40 frames) and ADORGLEGACY/ADNOBGWHITE in
-  // the SetOrigin / LocalToGlobal / BackColor arms, so each was a __findenv on a hot trap path — the same
-  // per-instruction getenv cost the CENV() discipline exists to remove. (CENV itself is #defined further
-  // down the file than these sites, so this uses the equivalent evaluate-once form already used for
-  // g_fbhash/g_cycle_on.) Values are read at startup and never change, so behaviour is identical.
+  bool g_geobounce=false;   // same moving-present-window trail class as Boris (poly on black)
+  // These levers are resolved ONCE at startup instead of per trap: each sits on a hot trap path
+  // (ADNOWHITEMATTE in the CopyBits blit setup, ADORGLEGACY/ADNOBGWHITE in the SetOrigin /
+  // LocalToGlobal / BackColor arms), which is the per-instruction getenv cost the CENV() discipline
+  // exists to remove. CENV itself is #defined further down the file than these sites, so this uses the
+  // equivalent evaluate-once form. The values are read at startup and never change.
   const bool g_orglegacy   = getenv("ADORGLEGACY")!=nullptr;
   const bool g_orglog      = getenv("ADORGLOG")!=nullptr;
   const bool g_nowhitematte= getenv("ADNOWHITEMATTE")!=nullptr;
   const bool g_nobgwhite   = getenv("ADNOBGWHITE")!=nullptr;
-  const bool g_nocportcur  = getenv("ADNOCPORTCUR")!=nullptr;   // addm 717, see OpenCPort (0xAA00)
-  const bool g_noboristrail= getenv("ADNOBORISTRAIL")!=nullptr; // addm 728, see the sprite-present trail erase
-  // *** addm 708 SetOrigin = PixMap.bounds (the authentic QuickDraw mechanism) ***
+  const bool g_nocportcur  = getenv("ADNOCPORTCUR")!=nullptr;   // see OpenCPort (0xAA00)
+  const bool g_noboristrail= getenv("ADNOBORISTRAIL")!=nullptr; // see the sprite-present trail erase
+  // *** SetOrigin = PixMap.bounds (the authentic QuickDraw mechanism) ***
   // Real SetOrigin(h,v) has exactly ONE effect: it rewrites the CURRENT PORT's coordinate system by
   // moving portRect and portBits.bounds so their topLeft becomes (v,h). That bounds rectangle IS
   // QuickDraw's local->pixel map (pixel = local - bounds.topLeft), which is why a module can hand
   // CopyBits a rect in SCREEN coordinates for a small offscreen buffer (Boris' walking-cat
   // save-under), or address a sprite sheet in the screen's shifted frame (Bogglins' -20 inset).
-  // The host modelled it instead as a single global C.qd_org_h/v honoured only by qd_px and the pen/
-  // rect rasterisers, so (a) CopyBits/CopyMask — which read bounds straight out of guest memory —
-  // never saw the origin at all, (b) the origin was not per-port, and (c) a module that copies the
-  // screen PixMap struct to build a sheet inherited un-shifted bounds. Write the real thing into
-  // guest memory and leave C.qd_org_h/v at 0 so there is ONE mechanism, not two.
+  // Write the real thing into guest memory and leave C.qd_org_h/v at 0 so there is ONE mechanism, not
+  // two: a single global honoured only by qd_px and the pen/rect rasterisers is invisible to
+  // CopyBits/CopyMask (which read bounds straight out of guest memory), is not per-port, and leaves
+  // un-shifted bounds in a PixMap struct that a module copies to build a sheet.
   // g_org_h/v keep the current port's origin for LocalToGlobal/GlobalToLocal. ADORGLEGACY=1 reverts.
   int g_org_h=0, g_org_v=0;
-  // *** addm 749: THE ORIGIN IS PER PORT *** — the same rule as the clipRgn (addm 717b) and the
-  // fg/bkColor (addm 742). LocalToGlobal/GlobalToLocal read portBits.bounds.topLeft of the CURRENT
-  // port; g_org_h/v above is whatever port SetOrigin last touched, which is a different port as soon
-  // as a module converts coordinates while the screen is current. Dominoes does exactly that (its
-  // save-under GWorld is SetOrigin'd to the tile, then it SetPorts to the SCREEN to map its rect),
-  // and got the GWorld's origin subtracted off a screen rect. Read the port instead of remembering.
-  // cur_pm is the host's single "which bitmap is the current port drawing to" resolver (it already
-  // tells a classic GrafPort's inline BitMap from a CGrafPort's PixMapHandle), so the origin comes
-  // from the same place the rasterisers get it — one mechanism, not two.
+  // *** THE ORIGIN IS PER PORT *** — the same rule as the clipRgn and the fg/bkColor.
+  // LocalToGlobal/GlobalToLocal read portBits.bounds.topLeft of the CURRENT port; g_org_h/v above is
+  // whatever port SetOrigin last touched, which is a different port as soon as a module converts
+  // coordinates while the screen is current. Dominoes does exactly that (its save-under GWorld is
+  // SetOrigin'd to the tile, then it SetPorts to the SCREEN to map its rect), and got the GWorld's
+  // origin subtracted off a screen rect. Read the port instead of remembering. cur_pm is the host's
+  // single "which bitmap is the current port drawing to" resolver (it already tells a classic
+  // GrafPort's inline BitMap from a CGrafPort's PixMapHandle), so the origin comes from the same place
+  // the rasterisers get it — one mechanism, not two.
   auto port_origin=[&](int& ov,int& oh){
     ov=0; oh=0;
     uint32_t base; int rb,bt,bl,bb,br;
@@ -5053,7 +4614,7 @@ int main(int argc, char** argv){
          if(p0){ ov=(int16_t)mem->read_u16b(p0+0x10); oh=(int16_t)mem->read_u16b(p0+0x12); }
     }catch(...){ ov=0; oh=0; }
   };
-  // addm 753: MovePortTo's arguments are GLOBAL coordinates, i.e. relative to the port's bitmap
+  // MovePortTo's arguments are GLOBAL coordinates, i.e. relative to the port's bitmap
   // bounds.topLeft — the same origin port_origin resolves. But it is called from inside the
   // hand-built-offscreen idiom, where the pixmap's baseAddr is still 0 (the builder clears it and
   // fills it in only when the pixel handle is locked), so cur_pm — which requires a live base — is
@@ -5067,36 +4628,33 @@ int main(int argc, char** argv){
          else { bt=(int16_t)mem->read_u16b(port+0x08); bl=(int16_t)mem->read_u16b(port+0x0A); }
     }catch(...){ bt=0; bl=0; }
   };
-  // addm 753: PortSize/MovePortTo are the two IM I-165 portRect editors; one lever covers both
+  // PortSize/MovePortTo are the two IM I-165 portRect editors; one lever covers both
   // because they are one mechanism (the library that calls PortSize is the library that calls
   // MovePortTo, and half of it is worse than neither).
   const bool g_noportsize = getenv("ADNOPORTSIZE")!=nullptr;
   const bool g_pslog      = getenv("ADPSLOG")!=nullptr;
-  // *** addm 708b GENERAL SPRITE-MATTE INDEX ***: a fresh GrafPort's background colour is WHITE, and the
-  // sprite engines build their cel sheets by erasing an offscreen to that background before drawing the
-  // cel — so the matte a transparent/srcOr CopyBits must suppress is "whatever index this palette calls
-  // white". The host hardcoded index 0. That was right only while white happened to sit at index 0: the
-  // addm-549 black-blank blackens CLUT entry 0 for DISPLAY, which necessarily walks rgb_to_index(white)
-  // to the next-nearest white (Boris' 16-entry clut: index 14 = 237,237,237), so every matte the module
-  // resolved at runtime landed on an index the blit no longer skipped — Boris' cat wore an opaque
-  // light-grey box, and each save-under step smeared a row of it into a trail. (The addm-561 g_boris
-  // "skip 255" patch was this same rule measured under the OLD grayscale ramp, where white WAS index
-  // 255; the authentic Mac palette of addm 632 moved it, which is why the gate had to be re-measured.)
-  // Resolve it from the live CLUT instead of naming a module or an index. Refreshed once per frame
-  // (SetEntries/palette animation can move it); ADNOWHITEMATTE=1 restores the index-0-only rule.
+  // *** GENERAL SPRITE-MATTE INDEX ***: a fresh GrafPort's background colour is WHITE, and the sprite
+  // engines build their cel sheets by erasing an offscreen to that background before drawing the cel —
+  // so the matte a transparent/srcOr CopyBits must suppress is "whatever index this palette calls
+  // white". That is not a fixed index: the black-blank blackens CLUT entry 0 for DISPLAY, which walks
+  // rgb_to_index(white) to the next-nearest white (Boris' 16-entry clut: index 14 = 237,237,237), so a
+  // matte the module resolved at runtime lands on an index a hardcoded index-0 rule would not skip
+  // (Boris' cat wears an opaque light-grey box, and each save-under step smears a row of it into a
+  // trail). Resolve it from the live CLUT instead of naming a module or an index. Refreshed once per
+  // frame (SetEntries/palette animation can move it); ADNOWHITEMATTE=1 restores the index-0-only rule.
   uint8_t g_white_idx = 0;
-  // *** addm 708c BACKGROUND COLOUR IS FORCE-IMMUNE ***: the addm-549 black-blank blackens CLUT entry 0
-  // so the untouched backdrop (framebuffer index 0) SHOWS black. That edit is meant to be display-only,
-  // and the KEEP0 block is careful to leave the already-resolved C.qd_bg at the pre-force white index —
-  // but every LATER rgb_to_index call the module makes still searches the EDITED table, so a module that
-  // asks for its background at run time (BackColor/RGBBackColor(white), or an offscreen pre-fill before
-  // a cel is drawn into it) no longer gets index 0. It gets the next-nearest white, which is a REAL
-  // light-grey the host then paints: Time Flies' erase became a white rectangle behind the clock, and
-  // Boris' cel matte became an opaque box the transparent blit no longer recognised (plus a smeared row
-  // per save-under step). Foreground resolution must keep walking — Snake draws genuine WHITE INK and
-  // needs a visible near-white index (addm 680) — so scope this to BACKGROUND resolution only, which is
-  // exactly the QuickDraw distinction: bkColor is the backdrop, fgColor is ink. Remember entry 0's
-  // pre-force colour and let a background request match against it. ADNOBGWHITE=1 reverts.
+  // *** BACKGROUND COLOUR IS FORCE-IMMUNE ***: the black-blank blackens CLUT entry 0 so the untouched
+  // backdrop (framebuffer index 0) SHOWS black. That edit is meant to be display-only, and the KEEP0
+  // block is careful to leave the already-resolved C.qd_bg at the pre-force white index — but every
+  // LATER rgb_to_index call the module makes still searches the EDITED table, so a module that asks for
+  // its background at run time (BackColor/RGBBackColor(white), or an offscreen pre-fill before a cel is
+  // drawn into it) no longer gets index 0. It gets the next-nearest white, which is a REAL light-grey
+  // the host then paints: Time Flies' erase becomes a white rectangle behind the clock, and Boris' cel
+  // matte becomes an opaque box the transparent blit no longer recognises. Foreground resolution must
+  // keep walking — Snake draws genuine WHITE INK and needs a visible near-white index — so scope this
+  // to BACKGROUND resolution only, which is exactly the QuickDraw distinction: bkColor is the backdrop,
+  // fgColor is ink. Remember entry 0's pre-force colour and let a background request match against it.
+  // ADNOBGWHITE=1 reverts.
   auto bg_to_index = [&](uint16_t R,uint16_t G,uint16_t B)->uint8_t{
     uint8_t idx = C.rgb_to_index(R,G,B);
     if(!g_clut0_saved || g_nobgwhite) return idx;
@@ -5108,43 +4666,15 @@ int main(int argc, char** argv){
     long dw = d2(mem->read_u16b(e+2)>>8, mem->read_u16b(e+4)>>8, mem->read_u16b(e+6)>>8);
     return (d0<=dw) ? (uint8_t)0 : idx;
   };
-  // Fixed-Math Pascal-FUNCTION-form history (Frost & Fire addm 402, Rose addm 557, GeoBounce addm
-  // 591/603): these originally name-gated (F&F/Rose) or structurally-detected (GeoBounce, addm 603)
-  // which callers use the 2-slot Pascal result-slot convention vs. the register-only form. addm 660
-  // proved EVERY corpus call site uses the Pascal FUNCTION convention (there is no genuine register-
-  // only caller) and made it unconditional for every FixMath trap (see the A868/A84B/A84D/A83F/A840/
-  // A869/A847/A848/A84A handlers below), which retired both the name-gate and the structural
-  // discriminator. (legacy-cleanup addm 679: the ADFRACNAMED/ADFRACLEGACY/ADNOGEOFRAC/ADNOFRACPASCAL
-  // A/B levers that restored the old name-gated/register-form paths — and the g_frac_pascal state
-  // they drove — are retired; dead by default in main.)
-  // Draw Morph (addm 557): it draws its morph into an offscreen paper and CopyBits only the sub-rect
-  // [25,14,265,378] to the screen, while the surrounding full-screen PAPER is filled with PURE WHITE — the
-  // module resolves that fill colour through the host's rgb_to_index(0xFFFF,0xFFFF,0xFFFF) (via its white
-  // RGBForeColor/BackColor), then fills g_fb with the resolved index by module-internal code (NOT an
-  // on-screen EraseRect/FillRect trap — so neither the addm-549 CLUT[0] nor the addm-551 backdrop-black
-  // lever catches it, and palette-blackening the white CLUT entry just makes rgb_to_index walk to the next
-  // white in the grayscale ramp: 13->15->255->grey). Real After Dark blanks the screen BLACK. FIX: make
-  // rgb_to_index resolve PURE white to the black index for this module only (C.dm_white_black), so the
-  // paper fills black. VERIFIED zero content loss: the morph panel is byte-identical to the ADNODMPAPER
-  // baseline (0 panel pixels differ) — the pen's white rigging uses a pre-resolved index, not a fresh
-  // rgb_to_index(white) at draw time, so only the never-overdrawn paper border flips white->black.
-  // *** RETIRED (gate-c lane): the addm-557 name gate is DELETED. Its premise is refuted AND it had become
-  // a CONTENT-DESTROYING gate. ***
-  // PREMISE REFUTED: the parenthetical above — "palette-blackening the white CLUT entry just makes
-  // rgb_to_index walk to the next white in the grayscale ramp: 13->15->255->grey" — described the SYNTHETIC
-  // grayscale ramp that addm 632 replaced with the authentic System palette. Measured on current main for
-  // Draw Morph: rgb_to_index(white) = 245 and rgb_to_index(black) = 0. The walk-to-white failure mode does
-  // not exist any more, and the gate's stated job is already done without it: 60f luminance census @f59,
-  // gate ON black(<16)=189616 white(>=240)=0; gate OFF black=189538 white(>=240)=0. The paper is BLACK on
-  // BOTH sides and no white paper ever appears (PNG pair confirms: a red car on a black field either way).
-  // AND THE GATE NOW DESTROYS CONTENT: C.dm_white_black forces EVERY rgb_to_index(pure white) to the black
-  // index, not just the paper fill, so Draw Morph's deliberately-white pen strokes are painted black —
-  // invisible on the black paper. Worst frame f24: gate ON light(192-239)=931 / black=191552; gate OFF
-  // light=2031 / black=190452 — exactly 1100 px of the module's own strokes blacked out, on 29 of 60 frames.
-  // Retiring restores them at index 245 (grey-238), the documented and accepted addm-564 cost for
-  // dynamically-resolved white. This is a CONTENT-RESTORING retirement, not merely a gate deletion.
-  // ADNODMPAPER is kept as an accepted no-op so existing scripts and evidence files still run.
-  if(getenv("ADNODMPAPER")){ /* accepted no-op (was: Draw Morph white-paper gate) */ }
+  // Fixed-Math traps: every corpus call site uses the Pascal FUNCTION convention (a reserved result
+  // slot), not the register-only form, so it is applied unconditionally in the A868/A84B/A84D/A83F/
+  // A840/A869/A847/A848/A84A handlers below.
+  // ADNODMPAPER is accepted and does nothing. The Draw Morph gate it named forced rgb_to_index(pure
+  // white) to the black index: the module fills the full-screen paper around its morph with white
+  // resolved at runtime, and under the authentic System palette that paper already comes out black
+  // without the gate, while the gate additionally blacked out the module's own deliberately-white pen
+  // strokes.
+  if(getenv("ADNODMPAPER")){ /* accepted no-op */ }
   // Mac 'Ticks' low-memory global @0x16A (1/60 s counter). Many savers (Nonsense, and other
   // time-scheduled modules) read it DIRECTLY (move.l [0x16A],Dn) instead of the TickCount trap
   // to schedule "draw item when Ticks>=deadline". If it never advances between frames, every
@@ -5161,13 +4691,13 @@ int main(int argc, char** argv){
   // requires noErr + a response pointer whose version word at +0x0C >= the requested version
   // (0x0300); without it the module bails to an error path and never constructs its C++ object.
   uint32_t g_dll_ay=0;
-  // dll# per-message instruction watchdog. Now that 4.0 Bucket-A modules resolve module_main and
-  // run their REAL code (instead of the shim's fast bail), a module whose own logic spins on an
-  // unmet condition (Flying Toasters!) would wall-clock-hang. Bound each dll# message to a generous
-  // instruction budget and throw (a clean per-message abort, caught like a fault) if exceeded, so a
-  // runaway module stops in ~1s instead of hanging the whole sweep. Only armed during dll# messages
-  // (g_dll_budget=-1 otherwise), so classic/AD3 paths are untouched; the cap is ~15x Clocks' heaviest
-  // observed message so the one rendering dll# module is never clipped. ADDLLMAXI overrides; 0 disables.
+  // dll# per-message instruction watchdog. Bucket-A 4.0 modules resolve module_main and run their REAL
+  // code, so a module whose own logic spins on an unmet condition (Flying Toasters!) would
+  // wall-clock-hang. Bound each dll# message to a generous instruction budget and throw (a clean
+  // per-message abort, caught like a fault) if exceeded, so a runaway module stops in ~1s instead of
+  // hanging the whole sweep. Only armed during dll# messages (g_dll_budget=-1 otherwise), so
+  // classic/AD3 paths are untouched; the cap is ~15x Clocks' heaviest observed message so the one
+  // rendering dll# module is never clipped. ADDLLMAXI overrides; 0 disables.
   int64_t  g_dll_budget=-1;
   uint64_t g_dll_used=0;
   uint32_t g_dll_adfd=0;       // Gestalt('ADfd') faceplate-descriptor response (zeroed -> empty strings)
@@ -5178,37 +4708,30 @@ int main(int argc, char** argv){
   map<uint16_t,uint64_t> trap_counts;
   g_census_on = (getenv("ADTRAPCENSUS")!=nullptr);
   g_stubcensus_on = (getenv("ADSTUBCENSUS")!=nullptr);
-  // addm 543 opt-out flag cache (per-item A/B levers)
+  // Opt-out flag cache (per-item A/B levers)
   g_nopen        = (getenv("ADNOPEN")!=nullptr);
   g_no_l2g       = (getenv("ADNOL2G")!=nullptr);
   g_noportorg    = (getenv("ADNOPORTORG")!=nullptr);
   g_no_setentries= (getenv("ADNOSETENTRIES")!=nullptr);
-  // addm 627: index-in-red resolution is gated to Tunnel. Mechanistically it should fire for any module
-  // whose ACTIVE AddSearch proc is the index-in-red idiom, but ~39 corpus modules carry an AddSearch/AddComp
-  // and their proc semantics are not all index-in-red (Art Critic/Fish World/Marbles!/Super Guy etc. are
-  // known-good renderers we must not perturb). Rather than risk mis-resolving their colours, name-gate to
-  // Tunnel AND keep the g_search_active window guard (so it only acts between AddSearch and DelSearch). Opt-
-  // out ADNOSEARCHIDX. Generalises to other verified index-in-red CLUT savers by adding them to this gate.
-  // addm 720: the legacy rule below is now REACHED ONLY under ADNOSEARCHPROC (see g_search_procs). The
-  // default path runs the registered proc, which is name-free and producer-agnostic.
+  // Index-in-red colour resolution is a legacy rule, gated to Tunnel and reached ONLY under
+  // ADNOSEARCHPROC (see g_search_procs) — the default path runs the module's own registered search
+  // proc, which is name-free and producer-agnostic. Mechanistically the legacy rule should fire for any
+  // module whose ACTIVE AddSearch proc is the index-in-red idiom, but ~39 corpus modules carry an
+  // AddSearch/AddComp and their proc semantics are not all index-in-red (Art Critic/Fish World/
+  // Marbles!/Super Guy are known-good renderers that must not be perturbed), so it stays name-gated to
+  // Tunnel and keeps the g_search_active window guard (it only acts between AddSearch and DelSearch).
+  // Opt-out ADNOSEARCHIDX.
   g_no_searchproc= (getenv("ADNOSEARCHPROC")!=nullptr);
-  // gate-e-lane hardening: g_no_searchidx's Tunnel-name term only has an observable consumer while the
-  // legacy rule is reached, and addm 720 already made that reachable ONLY under ADNOSEARCHPROC -- so
-  // require the lever here too, making the dormancy structural rather than incidental (the same
-  // treatment applied to #19/TICKTIED above). VERIFIED (not merely argued): live 400f x2 runs of
-  // Tunnel with ADSEARCHIDXLOG=1 and no ADNOSEARCHPROC show 0 "NEAR MISS" (proc bail/decline) events
-  // across 135/135 resolved calls both runs, i.e. on current main color_search_proc() never falls
-  // through to this rule for Tunnel without the lever already being set -- so gating on it here changes
-  // no observed value. Corpus IDENT re-confirmed post-hardening (gate_e evidence).
+  // The Tunnel name term only has an observable consumer while the legacy rule is reached, so require
+  // ADNOSEARCHPROC here too and make that dormancy structural rather than incidental.
   g_no_searchidx = !g_no_searchproc || getenv("ADNOSEARCHIDX")!=nullptr || argc<2 || strstr(argv[1],"Tunnel")==nullptr;
-  // addm 804: ADSWAPCCLOG and the ADCMPAWLOG census went with the shims they instrumented.
-  g_setentries   = !g_no_setentries;                 // SetEntries install is DEFAULT-ON (see addm 543)
+  g_setentries   = !g_no_setentries;                 // SetEntries install is DEFAULT-ON
   g_no_reserr    = (getenv("ADNORESERR")!=nullptr);
-  g_nobool       = (getenv("ADNOBOOLFIX")!=nullptr);   // addm 590 Boolean-result-slot audit A/B lever
+  g_nobool       = (getenv("ADNOBOOLFIX")!=nullptr);   // Boolean-result-slot A/B lever
   g_no_relres    = (getenv("ADNORELRES")!=nullptr);
   if(getenv("ADTICKCYCLES")){ long v=strtol(getenv("ADTICKCYCLES"),0,0); if(v>0) g_tick_cycles=(uint32_t)v; }
-  if(getenv("ADCALLHIST")) atexit(ch_dump);   // addm-747 temporary
-  if(getenv("ADSGP")) atexit(sgp_dump);       // addm-747 temporary
+  if(getenv("ADCALLHIST")) atexit(ch_dump);   // temporary diagnostic
+  if(getenv("ADSGP")) atexit(sgp_dump);       // temporary diagnostic
   g_no_fpenv     = (getenv("ADNOFPENV")!=nullptr);
   g_no_rgncap    = (getenv("ADNORGNCAP")!=nullptr);
   g_no_hidepen   = (getenv("ADNOHIDEPEN")!=nullptr);
@@ -5221,8 +4744,8 @@ int main(int argc, char** argv){
   g_no_gwcliprgn = (getenv("ADNOGWCLIPRGN")!=nullptr);
   g_no_gwvisrgn  = (getenv("ADNOGWVISRGN")!=nullptr);
   g_no_setclipbbox = (getenv("ADNOSETCLIPBBOX")!=nullptr);
-  g_no_cpcliprgn = (getenv("ADNOCPCLIPRGN")!=nullptr);   // addm 799
-  g_no_cpvisrgn  = (getenv("ADNOCPVISRGN")!=nullptr);    // addm 799
+  g_no_cpcliprgn = (getenv("ADNOCPCLIPRGN")!=nullptr);   // see OpenCPort (0xAA00)
+  g_no_cpvisrgn  = (getenv("ADNOCPVISRGN")!=nullptr);    // see OpenCPort (0xAA00)
   g_pm_legacy    = (getenv("ADPMLEGACY")!=nullptr);
   g_qdextsel_log = (getenv("ADQDEXTSELLOG")!=nullptr);
   if(g_stubcensus_on) fprintf(stderr,"[stubcensus] total_tags_instrumented=%d\n", ADSTUB_TAG_COUNT);
@@ -5238,15 +4761,15 @@ int main(int argc, char** argv){
   // Resource Manager: load a resource's bytes into memory as a Handle (cached,
   // Mac semantics — GetResource returns the same handle on repeat).
   auto rez_handles = make_shared<map<pair<uint32_t,int16_t>,uint32_t>>();
-  // addm 543 item 4: real ResError. Every Resource Manager handler sets res_err (0 = noErr on a
-  // non-NULL load, -192 = resNotFound on NULL); ResError() (0xA9AF) returns it. Ported from the PPC
-  // addm-540 pattern. Einstein polls ResError 1553x/run and bails ("can't load art") on a nonzero
-  // value — so res_err must be 0 whenever a load actually succeeded (the common case, since get_res
-  // returns real handles for every resource these modules request).
+  // Real ResError. Every Resource Manager handler sets res_err (0 = noErr on a non-NULL load,
+  // -192 = resNotFound on NULL); ResError() (0xA9AF) returns it. Einstein polls ResError 1553x/run
+  // and bails ("can't load art") on a nonzero value — so res_err must be 0 whenever a load actually
+  // succeeded (the common case, since get_res returns real handles for every resource these modules
+  // request).
   int16_t res_err = 0;
   auto set_res_err = [&](uint32_t h){ res_err = h ? 0 : (int16_t)-192; };  // resNotFound = -192
-  // addm 543 item 8: SANE (FP68K) environment word + halt vector, for GETENV/SETENV/PROCENTRY/PROCEXIT
-  // round-trips. Default 0 == round-to-nearest / extended precision / no exceptions == our host double.
+  // SANE (FP68K) environment word + halt vector, for GETENV/SETENV/PROCENTRY/PROCEXIT round-trips.
+  // Default 0 == round-to-nearest / extended precision / no exceptions == our host double.
   uint32_t sane_hv = 0;   // halt vector (g_sane_env holds the env word, file-scope for fp_write)
   // GetTrapAddress stub cache: trap opcode -> address of [A-trap opcode][RTS], so a module
   // that fetches a trap's address and JSRs to it directly re-enters our trap handler.
@@ -5265,9 +4788,9 @@ int main(int argc, char** argv){
     return h;
   };
 
-  // ---- minimal REAL filesystem (addm 348, gate ADREALFS) --------------------------------------
+  // ---- minimal REAL filesystem (gate ADREALFS) ------------------------------------------------
   // The 4.0 engine's LinkModule locates its library FILE via FindFolder/PBGetCatInfo/OpenResFile and
-  // the Resource Manager chain (addm 347). Serve files that actually exist on disk under the module's
+  // the Resource Manager chain. Serve files that actually exist on disk under the module's
   // Deluxe folder; everything else keeps the honest fnfErr.
   struct RFOpen { int16_t ref; std::string path;
                   std::map<std::pair<uint32_t,int16_t>,std::string> rz;
@@ -5276,7 +4799,7 @@ int main(int argc, char** argv){
   auto rf_open = make_shared<std::vector<RFOpen>>();
   auto rf_cur  = make_shared<int16_t>((int16_t)2);      // refNum 2 = the module's own fork (home file)
   auto rf_next = make_shared<int16_t>((int16_t)3);
-  // addm 350: FSSpec cache — FSMakeFSSpec assigns a synthetic (vRef,parID); remember the disk path so a
+  // FSSpec cache — FSMakeFSSpec assigns a synthetic (vRef,parID); remember the disk path so a
   // later FSpOpenResFile/PBHOpenRF can open it. Keyed by parID (unique per resolved path).
   auto fsspec_path = make_shared<std::map<int32_t,std::string>>();   // parID -> disk path (full)
   auto fsspec_next = make_shared<int32_t>((int32_t)0x100);
@@ -5326,61 +4849,44 @@ int main(int argc, char** argv){
     (*blk_size)[h]=d.size(); (*blk_size)[p2]=d.size(); f->handles[key]=h; return h;
   };
 
-  // Polygon recording state (OpenPoly/MoveTo/LineTo/ClosePoly/PaintPoly/FramePoly). Bounds-only
-  // host had no poly traps, so shape savers (Shapes, Sunburst) leaked the poly args and rendered
-  // blank. We capture the vertex list between OpenPoly and ClosePoly and draw it on Paint/Frame.
+  // Polygon recording state (OpenPoly/MoveTo/LineTo/ClosePoly/PaintPoly/FramePoly). The vertex list
+  // between OpenPoly and ClosePoly is captured and drawn on Paint/Frame; shape savers (Shapes,
+  // Sunburst) render blank without it.
   auto poly_pts = make_shared<map<uint32_t,vector<pair<int,int>>>>();  // handle -> (h,v) verts
   bool poly_rec=false; uint32_t poly_cur=0;
-  // Region bounding-box recording (addm 432). The bounds-only host leaves OpenRgn/CloseRgn-recorded
-  // regions EMPTY, which breaks Meadow: it builds a ground-silhouette region and PLACES grass blades by
-  // testing candidate points against it (PtInRgn) + a full-screen RectInRgn non-emptiness gate.
-  // An empty region -> every test false -> no blade ever draws (solid-colour frame). We capture the
-  // pen-path bounding box between OpenRgn and CloseRgn and store it as the region's rgnBBox so the
-  // hit-tests fire. GATED to Meadow only so no other module's CloseRgn behaviour changes.
+  // Region bounding-box recording. An OpenRgn/CloseRgn-recorded region left EMPTY breaks Meadow: it
+  // builds a ground-silhouette region and PLACES grass blades by testing candidate points against it
+  // (PtInRgn) plus a full-screen RectInRgn non-emptiness gate, so every test fails and no blade ever
+  // draws. Capture the pen-path bounding box between OpenRgn and CloseRgn and store it as the region's
+  // rgnBBox so the hit-tests fire.
   //
-  // S2/S1 RE (addm 638/642/659) CORRECTED at the execution level (addm 668) — the "obj+0x13C reads
-  //   zero / classic-ADgm A4-world init gap" premise is REFUTED. Traced Meadow's OpenRgn..CloseRgn at
-  //   module PC 0x00101EE8-0x00101F58. The outline is MoveTo(0,384); MoveTo(obj+0x11E,obj+0x120);
-  //   21x LineTo(pt[i]) from a local buffer; close to (512,384)(0,384). The points are filled by a
-  //   RECURSIVE fixed-point midpoint-displacement generator fn0x0010035C (Long2Fix/FixMul/FixDiv/Fix2Long
-  //   + Random 0x0010316C), seeded from the object's silhouette-endpoint fields (0x11C/0x11E/0x120/0x122
-  //   and per-vertex 0x13A/0x13C/0x140, the latter partly from the A4-relative table at A4+0x348E).
-  //   LIVE PROBE (ADMEAD): those object fields are ALWAYS nonzero (endpoints 0/0/384/512; obj+0x13C amp
-  //   e.g. 195/255/113/149; A4+0x348E table 200/300/400) — there is NO A4-init gap and NO uninitialised
-  //   field. The zero the earlier agents saw was the GENERATOR OUTPUT: under the PRE-addm-664 FixMath
-  //   convention the fixed-point traps returned wrong values, so fn0x0010035C emitted (0,0) for every
-  //   LineTo and the region degenerated to a full-screen triangle. Proven: ADNOSCALARPASCAL+ADFRACLEGACY
-  //   (revert FixMath to legacy) reproduces the (0,0) collapse; the DEFAULT (authentic FixMath, merged
-  //   addm 664) yields a REAL closed terrain polygon (24 verts, e.g. (0,384)(0,289)(26,284)...(512,195)
-  //   (512,384)). So the silhouette is real on current main, and scan-conversion is now the AUTHENTIC
-  //   render (blade/flower roots clipped to the ground shape) — activated by the structural terrain-polygon
-  //   discriminator at the CloseRgn site below. The old Meadow bbox name-gate is DELETED (it was also
-  //   vestigial: addm-543 already generalised region recording to the whole corpus, so `meadow_rgn ||`
-  //   was a no-op for Meadow — which matches the general !g_no_rgncap && !no_rgncap_mod predicate).
-  // addm 722: is_mandelbrot survives ONLY as the ADMBGATE543 A/B revert lever (the addm-543 name gate that
-  // blocked Mandelbrot's SetEntries install is RETIRED — it forced all 5 "Colors" options to show the same
-  // generic Mac System 7 palette instead of the module's real per-option palettes; see the AA3F handler).
+  // Meadow's silhouette (module PC 0x00101EE8-0x00101F58): MoveTo(0,384); MoveTo(obj+0x11E,obj+0x120);
+  // 21x LineTo(pt[i]) from a local buffer; close to (512,384)(0,384). The points are filled by a
+  // RECURSIVE fixed-point midpoint-displacement generator fn0x0010035C (Long2Fix/FixMul/FixDiv/Fix2Long
+  // + Random 0x0010316C), seeded from the object's silhouette-endpoint fields (0x11C/0x11E/0x120/0x122
+  // and per-vertex 0x13A/0x13C/0x140, the latter partly from the A4-relative table at A4+0x348E) — all
+  // always nonzero, so there is no uninitialised field here. The generator emits (0,0) only under the
+  // legacy FixMath convention (ADNOSCALARPASCAL+ADFRACLEGACY reproduce that collapse); with the
+  // authentic FixMath traps it yields a real closed terrain polygon (24 verts, e.g. (0,384)(0,289)
+  // (26,284)...(512,195)(512,384)), which the structural terrain-polygon discriminator at the CloseRgn
+  // site below scan-converts so blade/flower roots are clipped to the ground shape.
+  // is_mandelbrot survives ONLY as the ADMBGATE543 A/B revert lever: the name gate it drove blocked
+  // Mandelbrot's SetEntries install, which forced all 5 "Colors" options to show the same generic Mac
+  // System 7 palette instead of the module's real per-option palettes (see the AA3F handler).
   bool is_mandelbrot = (argc>1 && strstr(argv[1],"Mandelbrot"));
-  // addm 543 item 7 PER-MODULE GATE (documented cause): Pearls records LARGE overlapping ovals in a
-  // tiled lattice (measured bboxes 256-430px, many partly offscreen: [t-425 l-151 b-169 r105],
-  // [t87 l361 b343 r617], ...) and paints each via PaintRgn. Real QD composes these through region
-  // shape data the bbox model cannot represent; bbox-filling them washes the whole screen in fg
-  // (measured: 186k px of gray background overpainted to pearl colours — with EITHER A8D3 mapping).
-  // Pearls renders CORRECTLY under the paint-during-recording + empty-CloseRgn model, so it keeps it.
+  // PER-MODULE GATE: Pearls records LARGE overlapping ovals in a tiled lattice (bboxes 256-430px, many
+  // partly offscreen: [t-425 l-151 b-169 r105], [t87 l361 b343 r617], ...) and paints each via PaintRgn.
+  // Real QD composes these through region shape data the bbox model cannot represent; bbox-filling them
+  // washes the whole screen in fg (186k px of gray background overpainted to pearl colours). Pearls
+  // renders CORRECTLY under the paint-during-recording + empty-CloseRgn model, so it keeps it.
   bool no_rgncap_mod = (argc>1 && strstr(argv[1],"Pearls"));
-  // addm 639 (S3): the rps_microsec / baddog_microsec / sb_microsec name-gates that forced CORRECT no-pop
-  // Microseconds semantics inside the twoA5 legacy-pop lane are RETIRED — the legacy pop itself is retired.
-  // Those 3 gates existed only because the twoA5 default was the (wrong) legacy host-pop, kept since addm 400
-  // on the belief that Rodger Dodger's render depended on the resulting stack drift. RE at the execution
-  // level (this addendum) disproves that dependency: under RD's real l40 census drive the legacy pop feeds a
-  // constant-0 time (saved-D3=0 -> the glue's `movea.l (A7)+,A1` loads a NULL ptr -> reads 0) yet RD's render
-  // is BYTE-IDENTICAL to correct no-pop over a deterministic fbhash A/B, and the census signature is unchanged
-  // (d95/l42 both). RD's motion is the LIB510 sprite engine + Play/Die timer (addm 605), not this trap; the
-  // old "distinct=8 needs the drift" was a Recipe-A (ADMULONLY headless 8-frame, D3!=0) artifact. The A193
-  // handler now uses caller-pop VAR semantics GLOBALLY (RPS/Bad Dog!/Slow Burn become the default path);
-  // ADLEGACYPOP restores the twoA5 drift for A/B.
+  // Microseconds (A193) uses caller-pop VAR semantics globally; ADLEGACYPOP restores the twoA5 host-pop
+  // drift for A/B. No module's render depends on that drift — under the legacy pop the glue's
+  // `movea.l (A7)+,A1` loads a NULL pointer and reads a constant-0 time, and Rodger Dodger (whose
+  // motion comes from the LIB510 sprite engine and its Play/Die timer, not this trap) is byte-identical
+  // either way.
   bool rgn_rec=false; bool rgn_any=false; int rgn_minh=0,rgn_minv=0,rgn_maxh=0,rgn_maxv=0;
-  // addm 543 item 7: single-oval region model. If a recording session consists of EXACTLY one oval
+  // Single-oval region model. If a recording session consists of EXACTLY one oval
   // (Frame/PaintOval) and nothing else, CloseRgn remembers "this region is an oval of its bbox" so
   // Paint/Erase/FillRgn can fill the true ellipse instead of the bbox square (Pearls' round pearls).
   // The registry is keyed by region data ptr and VALIDATED against the region's live bbox at fill
@@ -5391,31 +4897,31 @@ int main(int argc, char** argv){
   auto rgn_ext=[&](int h,int v){ if(!rgn_rec) return;
     if(!rgn_any){ rgn_minh=rgn_maxh=h; rgn_minv=rgn_maxv=v; rgn_any=true; }
     else { if(h<rgn_minh)rgn_minh=h; if(h>rgn_maxh)rgn_maxh=h; if(v<rgn_minv)rgn_minv=v; if(v>rgn_maxv)rgn_maxv=v; } };
-  // S2 (addm 638): recorded region OUTLINE as a list of sub-paths (h,v vertices). A sub-path is the
+  // Recorded region OUTLINE as a list of sub-paths (h,v vertices). A sub-path is the
   // pen path from a MoveTo up to (but not resuming after) the next MoveTo; framed shapes push their
   // own closed sub-path. This captures the true recorded shape for scan-conversion (see rgn_mask).
   auto rgn_subs = make_shared<vector<vector<pair<int,int>>>>();
   auto rgn_edges = make_shared<vector<array<int,4>>>();   // real emitted edges (h0,v0,h1,v1) from Line/LineTo/Frame
   auto rgn_pen_moved = make_shared<bool>(false);          // saw a MoveTo since last edge (sub-path break)
 
-  // *** addm 741: A REGION'S MASK IS A RASTERIZATION OF ITS SHAPE AT ITS CURRENT POSITION ***
+  // *** A REGION'S MASK IS A RASTERIZATION OF ITS SHAPE AT ITS CURRENT POSITION ***
   // rgn_masks (ad_toolbox.hh) are framebuffer-sized rasters in SCREEN coordinates, so whatever part of a
   // region lies off-screen when it is scan-converted is not representable and is dropped. That costs
-  // nothing while the region stays put — no off-screen pixel can ever be painted — but OffsetRgn moved
-  // the RASTER (rgn_mask_offset shifts pixels and zero-fills what shifts in), which made the truncation
-  // PERMANENT and CUMULATIVE: a region that spent one frame partly off-screen came back amputated, and
-  // stayed that way for the rest of the run. Globe is the field case: its 190x190 CopyBits maskRgn oval
-  // is recorded at bbox (-7,-7)-(183,183), losing 7 rows/columns to the negative-coordinate clamp before
-  // it is ever used, then loses 14 more rows the first time it is offset over the screen bottom. The
-  // surviving 183x169 mask hugs the 160px globe so tightly that a 2-row step leaves the previous bottom
-  // row outside the mask, unrepainted — the combed comet-tail.
-  // FIX: remember each region's SHAPE (the oval rect it was recorded from, or its recorded polygon
+  // nothing while the region stays put — no off-screen pixel can ever be painted — but translating the
+  // RASTER on OffsetRgn (shifting pixels and zero-filling what shifts in) makes the truncation
+  // PERMANENT and CUMULATIVE: a region that spends one frame partly off-screen comes back amputated and
+  // stays that way. Globe is the field case: its 190x190 CopyBits maskRgn oval is recorded at bbox
+  // (-7,-7)-(183,183), losing 7 rows/columns to the negative-coordinate clamp before it is ever used,
+  // then 14 more rows the first time it is offset over the screen bottom, and the surviving 183x169
+  // mask hugs the 160px globe so tightly that a 2-row step leaves the previous bottom row unrepainted
+  // — the combed comet-tail.
+  // So remember each region's SHAPE (the oval rect it was recorded from, or its recorded polygon
   // vertices), translate the SHAPE, and re-scan-convert at the new position. QuickDraw regions are
   // geometric objects, not rasters; re-deriving the raster is what "offset a region" means, and it is
   // exact at every position because only the on-screen part is ever consulted.
-  // The stored shape is VALIDATED against the region's live bbox exactly as the addm-543 oval registry
-  // is, so any other mutation (RectRgn/SectRgn/UnionRgn/…) changes the bbox and silently invalidates it;
-  // no mutation site needs to know this exists. ADNORGNRERAST reverts to the legacy pixel translate.
+  // The stored shape is VALIDATED against the region's live bbox exactly as the oval registry is, so
+  // any other mutation (RectRgn/SectRgn/UnionRgn/…) changes the bbox and silently invalidates it; no
+  // mutation site needs to know this exists. ADNORGNRERAST reverts to the legacy pixel translate.
   auto rgn_poly = make_shared<map<uint32_t,pair<array<int16_t,4>,vector<vector<pair<int,int>>>>>>();
   // Scan-convert one oval into region rg's mask. Shared by CloseRgn and the OffsetRgn re-rasterize.
   auto rgn_rast_oval=[&](uint32_t rg,int t,int l,int b,int rr){
@@ -5445,15 +4951,15 @@ int main(int argc, char** argv){
     return 2; };
   const bool g_no_rgn_rerast = getenv("ADNORGNRERAST")!=nullptr;
 
-  // ==== addm 720: run the module's own Color Manager SEARCH PROC (see g_search_procs above) ====
+  // ==== run the module's own Color Manager SEARCH PROC (see g_search_procs above) ====
   // The proc is `pascal Boolean IndexedColorSearch(RGBColor* rgb, long* position)`: Pascal reserves the
   // 2-byte result FIRST, then pushes rgb, then position, then JSRs; the callee pops its 8 argument bytes
-  // and leaves the result word (truth in the HIGH byte — the addm-590 convention, and exactly what the AD
-  // 3.0 proc writes with `move.b [A6+0x10],D0`). It runs in a NESTED M68KEmulator over the SAME memory —
-  // the outer emulator is mid-instruction inside its trap handler and must not be re-entered — with the
-  // outer register file copied in (A5/A4 must be the caller's world) and its own scratch stack, so the
-  // guest stack is untouched. A proc that traps or runs away is not serviceable from here: we abandon it,
-  // fall back to nearest-match, and LOG it rather than inventing an answer (the addm-719s near-miss rule).
+  // and leaves the result word with truth in the HIGH byte — exactly what the AD 3.0 proc writes with
+  // `move.b [A6+0x10],D0`. It runs in a NESTED M68KEmulator over the SAME memory — the outer emulator
+  // is mid-instruction inside its trap handler and must not be re-entered — with the outer register file
+  // copied in (A5/A4 must be the caller's world) and its own scratch stack, so the guest stack is
+  // untouched. A proc that traps or runs away is not serviceable from here: we abandon it, fall back to
+  // nearest-match, and LOG it rather than inventing an answer.
   uint32_t csp_stk=0, csp_rgb=0, csp_pos=0, csp_sent=0;
   auto color_search_proc = [&](uint16_t R, uint16_t G, uint16_t B, uint32_t& outPos)->bool{
     if(g_no_searchproc || g_search_procs.empty()) return false;
@@ -5498,35 +5004,34 @@ int main(int argc, char** argv){
   auto fg_resolve = [&](uint16_t R, uint16_t G, uint16_t B)->uint8_t{
     uint32_t pos=0;
     if(color_search_proc(R,G,B,pos)) return (uint8_t)(pos>255?255:pos);
-    if(g_search_active && !g_no_searchidx) return (uint8_t)(R>0xFF ? (R>>8) : R);   // legacy addm-627 rule
+    if(g_search_active && !g_no_searchidx) return (uint8_t)(R>0xFF ? (R>>8) : R);   // legacy index-in-red rule
     return C.rgb_to_index(R,G,B); };
 
-  // ---- 1-bit DESTINATION raster (addm 725) — the completing twin of the addm-707 1-bit SOURCE path. ----
+  // ---- 1-bit DESTINATION raster — the completing twin of the 1-bit SOURCE path. ----------------------
   // The host's raster primitives (qd_px/qd_fillrect/qd_penline in ad_toolbox) write ONE BYTE per pixel,
   // silently assuming an 8bpp destination. Classic QuickDraw's other destination kind is the old-style
   // 1-bit BitMap: Punch Out builds its punch MASK in a 96x80 rowBytes=12 offscreen (12*8=96 => 1bpp) via
-  // EraseRect + PaintRgn, then blits it back with CopyBits (which already reads a 1-bit SOURCE, addm 707).
+  // EraseRect + PaintRgn, then blits it back with CopyBits (which already reads a 1-bit SOURCE).
   // Drawing that mask byte-per-pixel both SCRAMBLES it (bytes written, bits read) and, once a shape's pixel
   // index exceeds rowBytes (Punch Out's LARGE 80-wide diamond), runs the byte address past the 960-byte
-  // buffer into the adjacent region handle -> "not within any arena" fault at CloseRgn (the pc=0003DC28
-  // storm). When the current destination pixmap is 1-bit, rasterize into it as BITS. Structural + name-free
-  // (rb<width && rb*8>=width && not the screen) => the branch is dead for every 8bpp destination in the
-  // corpus, so those modules are byte-identical by construction. ADNO1BITDST reverts to the legacy path.
+  // buffer into the adjacent region handle -> "not within any arena" fault at CloseRgn. When the current
+  // destination pixmap is 1-bit, rasterize into it as BITS. Structural and name-free (rb<width &&
+  // rb*8>=width && not the screen), so every 8bpp destination is unchanged. ADNO1BITDST reverts.
   auto ad_dst1bit = [&](uint32_t& base,int& rb,int& bt,int& bl,int& bb,int& br)->bool{
     if(getenv("ADNO1BITDST")) return false;
     if(!C.cur_pm(base,rb,bt,bl,bb,br)) return false;
     int w=br-bl;
     if(!(base!=C.g_fb && w>0 && rb>0 && rb<w && rb*8>=w)) return false;
-    // addm 516 class: a pixmap whose baseAddr is uninitialized/garbage (e.g. 0xFFFFFFFF) is a NIL bitmap —
-    // real QuickDraw draws nothing to it. CopyBits already probes this; the fill path must too, or the
+    // A pixmap whose baseAddr is uninitialized/garbage (e.g. 0xFFFFFFFF) is a NIL bitmap — real
+    // QuickDraw draws nothing to it. CopyBits already probes this; the fill path must too, or the
     // 1-bit writes fault the same "not within any arena" way. base=0 sentinel => the raster helpers skip.
     try{ mem->read_u8(base); }catch(...){ base=0; }
     return true;
   };
   // Write one bit at LOCAL coord (x,y) (same origin+clip+bounds transform as qd_px). on: 1=set, 0=clear,
-  // -1=toggle. bit(px) lives in byte (px>>3), MSB first — the exact layout the addm-707 SOURCE read decodes.
+  // -1=toggle. bit(px) lives in byte (px>>3), MSB first — the exact layout the 1-bit SOURCE read decodes.
   auto ad_put1 = [&](uint32_t base,int rb,int bt,int bl,int bb,int br,int x,int y,int on){
-    if(!base) return;   // addm 516: NIL/unbacked bitmap -> draw nothing
+    if(!base) return;   // NIL/unbacked bitmap -> draw nothing
     if(x<C.qd_clip_l||x>=C.qd_clip_r||y<C.qd_clip_t||y>=C.qd_clip_b) return;
     int px=(x-C.qd_org_h)-bl, py=(y-C.qd_org_v)-bt;
     if(px<0||py<0||px>=(br-bl)||py>=(bb-bt)) return;
@@ -5546,11 +5051,11 @@ int main(int argc, char** argv){
   };
 
   emu.set_syscall_handler([&](M68KEmulator& e, uint16_t opcode){
-    // [pf] RET_SENT as a HOST-OWNED A-line trap. The sentinel address (0x00000FF0) is allocated and written
+    // RET_SENT as a HOST-OWNED A-line trap. The sentinel address (0x00000FF0) is allocated and written
     // by this host, not by any module or library — no guest bytes are patched (project principle) and
     // nothing legitimate executes or reads there; the module only ever RTSes TO it. Servicing it through the
-    // existing trap path means the lean hook no longer needs a pc==RET_SENT compare on every instruction,
-    // which is what lets 42 of 61 modules run with NO debug hook at all.
+    // existing trap path means the lean hook needs no pc==RET_SENT compare on every instruction, which
+    // is what lets 42 of 61 modules run with NO debug hook at all.
     if(opcode==PF_SENT_TRAP){ g_pf_cycle_debt++; throw runtime_error("module returned to sentinel (message handled)"); }
     if(opcode==PF_NULLRTS_TRAP){ auto& r0=e.registers();
       try{ uint32_t ret=mem->read_u32b(r0.a[7]); r0.a[7]+=4; r0.pc=ret; }catch(...){}
@@ -5586,7 +5091,7 @@ int main(int argc, char** argv){
       uint32_t sz=r.d[0].u; uint32_t p=mem->allocate(sz?sz:1); if(sz)mem->memset(p,0,sz);
       uint32_t h=mem->allocate(4); mem->write_u32b(h,p); (*blk_size)[h]=sz; (*blk_size)[p]=sz;
       r.a[0]=h; r.d[0].u=0;
-      g_ddLastWasSectionNode=false;                       // addm 478: a handle alloc breaks the node/region run
+      g_ddLastWasSectionNode=false;                       // a handle alloc breaks the node/region run
       if(getenv("ADDDCOLLIDE") && ((p>=0x003FA000&&p<0x003FC000)||(h>=0x003FA000&&h<0x003FC000)))
         fprintf(stderr,"[ddcollide] NewHandle sz=%u -> h=%08X p=%08X (band) caller-pc=%08X\n",sz,h,p,r.pc);
       if(getenv("ADTRAPLOG")) fprintf(stderr,"      NewHandle sz=%u -> h=%08X *h=p=%08X\n",sz,h,p);
@@ -5594,25 +5099,25 @@ int main(int argc, char** argv){
       uint32_t sz=r.d[0].u; uint32_t p;
       p=mem->allocate(sz?sz:1); if(sz)mem->memset(p,0,sz);
       (*blk_size)[p]=sz; r.a[0]=p; r.d[0].u=0;
-      // addm 478: flag an in-band LIB510 section-list node (builder caller-pc 0x0100442A, DD low-heap band) so
+      // Flag an in-band LIB510 section-list node (builder caller-pc 0x0100442A, DD low-heap band) so
       // the very next NewRgn (which would pack right after it) can be steered off-heap under ADDDRGNSTEER.
       g_ddLastWasSectionNode = g_ddRgnSteer && r.pc==0x0100442A && p>=0x003F0000 && p<0x00400000;
       if(getenv("ADDDCOLLIDE") && p>=0x003FA000 && p<0x003FC000)
         fprintf(stderr,"[ddcollide] NewPtr sz=%u -> p=%08X (band) caller-pc=%08X\n",sz,p,r.pc);
       if(getenv("ADNPLOG")) fprintf(stderr,"      NewPtr sz=%u -> p=%08X (A7=%08X)\n",sz,p,r.a[7]);
     } else if(base==0x025||base==0x021){ // GetHandleSize (0xA025) / GetPtrSize (0xA021)
-      // Both return the tracked block size (in A0) via D0. GetPtrSize was previously unhandled,
-      // so callers that size a string buffer this way (Nonsense: length for TETextBox) got 0
-      // and drew nothing. Same blk_size lookup serves both.
+      // Both return the tracked block size (in A0) via D0; the same blk_size lookup serves both.
+      // Callers that size a string buffer this way (Nonsense: length for TETextBox) get 0 and draw
+      // nothing without it.
       auto it=blk_size->find(r.a[0]); r.d[0].u = it!=blk_size->end()? it->second : 0;
       if(getenv("ADXHP")){ static int gn=0; if(gn++<400) fprintf(stderr,"      [xhp GetHandleSize A0=%08X -> %u (found=%d)]\n",r.a[0],r.d[0].u,(int)(it!=blk_size->end())); }
-    } else if(base==0x01C && !getenv("ADNOFREEMEM")){ // addm 724: FreeMem():LongInt (0xA01C) — OS trap, result in D0.
-      // Register-based Memory Manager trap: no stack args, LongInt free-byte count returned in D0. Unhandled it
-      // fell to the generic path (handled=false -> D0=0), reporting "no memory free"; Dominoes is the only corpus
-      // module that executes it. The host's app heap "grows on demand" (allocate() spins up fresh arenas), so the
-      // truthful invariant is "plenty free". Report the size of the preallocated low heap span (0x4000..0xFE000),
-      // which is the actual pool NewPtr/NewHandle draw from before the arena grows -> self-consistent with what the
-      // host will really hand out, not a random constant. ADFREEMEMVAL overrides (hex/dec) for A/B sizing.
+    } else if(base==0x01C && !getenv("ADNOFREEMEM")){ // FreeMem():LongInt (0xA01C) — OS trap, result in D0.
+      // Register-based Memory Manager trap: no stack args, LongInt free-byte count returned in D0.
+      // Dominoes is the only corpus module that executes it; unhandled it would report "no memory free".
+      // The host's app heap grows on demand (allocate() spins up fresh arenas), so the truthful invariant
+      // is "plenty free". Report the size of the preallocated low heap span (0x4000..0xFE000), which is
+      // the actual pool NewPtr/NewHandle draw from before the arena grows -> self-consistent with what
+      // the host will really hand out, not a random constant. ADFREEMEMVAL overrides (hex/dec) for A/B.
       uint32_t fm = 0x000FA000;                       // low-heap span (0x4000..0xFE000) = 1000 KB
       if(const char* v=getenv("ADFREEMEMVAL")) fm=(uint32_t)strtoul(v,nullptr,0);
       r.d[0].u = fm;
@@ -5624,10 +5129,10 @@ int main(int argc, char** argv){
       mem->write_u32b(r.a[7], C.g_gdh);        // result slot now on top -> GDHandle
       if(getenv("ADGDLOG")) fprintf(stderr,"      [GDLOG %04X] caller-pc=%08X g_gdh=%08X gdev=%08X\n",opcode,r.pc,C.g_gdh,C.g_gdev);
     } else if(opcode==0xAA2F){ // NewGDevice(refNum:Integer; mode:LongInt):GDHandle — allocate a screen-like GDevice.
-      // Pascal FUNCTION: reserved result(4) then refNum(2)+mode(4) pushed. Was UNHANDLED -> the rts-stub left a
-      // garbage handle whose master ptr = 0xFFFFFFFF AND leaked the 6-byte args. Frost & Fire stores the result
-      // in a module global then deref's *handle -> fault @0x1003C6. Allocate a real GDevice block (copy the
-      // screen g_gdev) + a Handle to it; pop refNum(2)+mode(4); return the handle in the reserved result slot.
+      // Pascal FUNCTION: reserved result(4) then refNum(2)+mode(4) pushed. Allocate a real GDevice block
+      // (a copy of the screen g_gdev) + a Handle to it; pop refNum(2)+mode(4); return the handle in the
+      // reserved result slot. Frost & Fire stores the result in a module global and then derefs *handle,
+      // so a garbage handle whose master ptr is 0xFFFFFFFF faults.
       r.a[7]+=6;                                            // pop refNum(2)+mode(4); [A7] now = result slot
       uint32_t gd=mem->allocate(0x50); mem->memset(gd,0,0x50);
       if(C.g_gdev) for(uint32_t k=0;k<0x50;k+=2) mem->write_u16b(gd+k, mem->read_u16b(C.g_gdev+k));
@@ -5635,7 +5140,7 @@ int main(int argc, char** argv){
       mem->write_u32b(r.a[7], h); r.a[0]=h; r.d[0].u=0;     // GDHandle result (master ptr = valid GDevice block)
     } else if(opcode==0xAA2B){ ADSTUB("AA2B_GetNextDevice_ret0"); // GetNextDevice(curDevice: GDHandle): GDHandle — walk the device
       // list. We expose a single screen GDevice, so the "next" after any device is NULL. Returning
-      // our handle again would make the module's list-walk loop forever (Boris hung -> trap budget).
+      // our handle again would make a module's list-walk (Boris') loop forever.
       // Pascal fn: [A7]=curDevice(4), [A7+4]=result(4). Pop the arg, return 0 (end of list).
       r.a[7]+=4; mem->write_u32b(r.a[7], 0);
     } else if(opcode==0xA8E8){ // PtInRgn(pt:Point; rgn:RgnHandle):Boolean — bounds-only hit-test.
@@ -5654,14 +5159,13 @@ int main(int argc, char** argv){
           b=rgn?(int16_t)mem->read_u16b(rgn+6):0,rr2=rgn?(int16_t)mem->read_u16b(rgn+8):0;
         fprintf(stderr,"    PtInRgn pt(%d,%d) rgnH=%08X rgn=%08X bbox[%d,%d,%d,%d] -> %d\n",ph,pv,rgnH,rgn,t,l,b,rr2,inside); }
       r.a[7]+=8;                                 // pop pt + rgn
-      // addm 590 (Boolean-slot audit): truth in HIGH byte AND clear low byte, so move.b(hi) and
-      // move.w;tst.w readers agree (old write_u8 left the low byte stale). ADNOBOOLFIX reverts.
+      // Pascal Boolean: truth in the HIGH byte AND a cleared low byte, so move.b(hi) and move.w;tst.w
+      // readers agree. ADNOBOOLFIX reverts to the byte-only write.
       if(g_nobool) mem->write_u8(r.a[7], inside);
       else         mem->write_u16b(r.a[7], inside?0x0100:0);
     } else if(opcode==0xA974){ ADSTUB("A974_Button_false"); // Button:Boolean — no args, result word already on stack. Screensaver: up (false).
       if(getenv("ADINPUTLOG")){ static long n=0; if(++n<=60) fprintf(stderr,"    [input] Button pc=%08X\n", r.pc); }
-      // addm 590 (Boolean-slot audit): full-word high-byte Boolean (up=0 default -> 0x0000, byte-identical
-      // to the old write_u8 for the no-input case). ADNOBOOLFIX reverts.
+      // Full-word high-byte Boolean (up=0 default -> 0x0000). ADNOBOOLFIX reverts to the byte-only write.
       if(g_nobool) mem->write_u8(r.a[7], g_msbtn?1:0);
       else         mem->write_u16b(r.a[7], g_msbtn?0x0100:0);   // live mouse button in the HIGH byte
     } else if(opcode==0xA898){ // GetPenState(VAR pnState) — write the real 18-byte PenState, pop ptr(4).
@@ -5718,11 +5222,10 @@ int main(int argc, char** argv){
              if(C.rgn_mask(rg,false)){ e = C.rgn_mask_any(rg)?0:1; }   // shape known: test the mask
              else { int t=(int16_t)mem->read_u16b(rg+2),l=(int16_t)mem->read_u16b(rg+4),
                     b=(int16_t)mem->read_u16b(rg+6),rr=(int16_t)mem->read_u16b(rg+8); if(b>t&&rr>l) e=0; } } }
-      // ENGINE-CONTRACT FIX (addm 582): write the FULL Pascal Boolean word — truth in the high byte,
-      // low byte CLEARED. The old write_u8 set only the high byte and left the low byte as stale stack
-      // garbage, so a `move.w (A7)+ ; tst.w` reader (Tunnel's InsetRgn->EmptyRgn shrink-to-empty loop,
-      // same self-loop shape as Vertigo) could read the stale low byte as nonzero and misjudge the
-      // terminal test. Clean word matches the real Toolbox. ADNOENGBOOL reverts to the byte-only write.
+      // Write the FULL Pascal Boolean word — truth in the high byte, low byte CLEARED, as the real
+      // Toolbox does. A high-byte-only write leaves the low byte as stale stack garbage, so a
+      // `move.w (A7)+ ; tst.w` reader (Tunnel's InsetRgn->EmptyRgn shrink-to-empty loop) reads it as
+      // nonzero and misjudges the terminal test. ADNOENGBOOL reverts to the byte-only write.
       if(getenv("ADNOENGBOOL")) mem->write_u8(r.a[7], e);
       else                      mem->write_u16b(r.a[7], e?0x0100:0);
     } else if(opcode==0xA8DC){ // CopyRgn(src,dst) — [A7]=dst,[A7+4]=src; pop 8; copy bbox
@@ -5748,7 +5251,7 @@ int main(int argc, char** argv){
       if(rg){ int t=(int16_t)mem->read_u16b(rg+2),l=(int16_t)mem->read_u16b(rg+4),
                   b=(int16_t)mem->read_u16b(rg+6),rr=(int16_t)mem->read_u16b(rg+8);
         if(getenv("ADQDAUDIT")) fprintf(stderr,"[QDAUDIT] mod=%s op=FrameRgn bbox=%d,%d,%d,%d maskknown=%d\n",
-          g_audit_mod,t,l,b,rr,C.rgn_mask(rg,false)?1:0);  // addm 564: bbox-outline approximation census
+          g_audit_mod,t,l,b,rr,C.rgn_mask(rg,false)?1:0);  // bbox-outline approximation census
         // region-exact: a non-rect region traces its TRUE boundary; a mask-less region
         // is exactly its bbox rect, so keep the (authentic) 4-line rectangle outline.
         if(C.rgn_mask(rg,false)){ g_rgnc_framemask++; C.rgn_mask_frame(rg,C.qd_fg); }
@@ -5757,26 +5260,21 @@ int main(int argc, char** argv){
           C.qd_line(l,t,l,b-1,C.qd_fg);C.qd_line(rr-1,t,rr-1,b-1,C.qd_fg); } }
     } else if(opcode==0xA8E5||opcode==0xA8E6){ // UnionRgn/DiffRgn(a,b,dst) — [A7]=dst,[A7+4]=b,[A7+8]=a; pop 12
       uint32_t dstH=mem->read_u32b(r.a[7]), sbH=mem->read_u32b(r.a[7]+4), saH=mem->read_u32b(r.a[7]+8); r.a[7]+=12;
-      if(getenv("ADQDAUDIT")) fprintf(stderr,"[QDAUDIT] mod=%s op=%s\n",g_audit_mod,opcode==0xA8E6?"DiffRgn":"UnionRgn"); // addm 564
+      if(getenv("ADQDAUDIT")) fprintf(stderr,"[QDAUDIT] mod=%s op=%s\n",g_audit_mod,opcode==0xA8E6?"DiffRgn":"UnionRgn"); // audit census
       auto rb=[&](uint32_t h,int o)->int{ uint32_t rg=h?mem->read_u32b(h):0; return rg?(int16_t)mem->read_u16b(rg+o):0; };
       uint32_t d=dstH?mem->read_u32b(dstH):0;
       if(d){ if(opcode==0xA8E6){ // DiffRgn: result ⊆ srcA. If srcB's bbox fully contains srcA's,
-          // the difference is EXACTLY empty (fullscreen−fullscreen etc); the old "≈srcA bbox"
-          // approximation wrongly kept it non-empty, so EmptyRgn-driven draw gates (Einstein's
-          // pen-plot bootstrap) never fired. Unconditional (g_exact_rgn default true): a true Toolbox
-          // correctness fix. No corpus module regresses (verified byte-identical); ADNOEINRGN reverts.
+          // the difference is EXACTLY empty (fullscreen−fullscreen etc). A "≈srcA bbox" approximation
+          // keeps it non-empty, so EmptyRgn-driven draw gates (Einstein's pen-plot bootstrap) never
+          // fire. Unconditional (g_exact_rgn default true); ADNOEINRGN reverts.
           int at=rb(saH,2),al=rb(saH,4),ab=rb(saH,6),ar=rb(saH,8);
           int bt=rb(sbH,2),bl=rb(sbH,4),bb=rb(sbH,6),br2=rb(sbH,8);
           bool aNonEmpty=(ab>at&&ar>al), bContainsA=(bt<=at&&bl<=al&&bb>=ab&&br2>=ar);
           if(g_exact_rgn && aNonEmpty && bContainsA){ mem->write_u16b(d,10); for(int o=2;o<10;o+=2) mem->write_u16b(d+o,0); }
           else { for(int o=0;o<10;o+=2) mem->write_u16b(d+o, saH?mem->read_u16b(mem->read_u32b(saH)+o):0); } } // DiffRgn≈srcA bbox
-        else if(g_exact_rgn){ // UnionRgn: an EMPTY region is the identity for union. Its
-          // (0,0,0,0) bbox must NOT drag the union to the origin — the old unconditional min/max did
-          // exactly that, so a module that seeds a region empty then UnionRgn's real rects (Einstein's
-          // per-glyph stroke accumulator; Nocturnes' streak-rect accumulator @0x303FC0) got a bbox with
-          // top/left pinned to 0. That zeroed strokes.top and defeated Einstein's pen-plot draw gate,
-          // and under-populated Nocturnes' streak field (d30→36 matches real QuickDraw). Treat a
-          // degenerate operand (b<=t || r<=l) as identity. Geometrically exact at the bbox level.
+        else if(g_exact_rgn){ // UnionRgn: an EMPTY region is the identity for union — its (0,0,0,0)
+          // bbox must NOT drag the union to the origin, so treat a degenerate operand (b<=t || r<=l)
+          // as the identity. Geometrically exact at the bbox level.
           int at=rb(saH,2),al=rb(saH,4),ab=rb(saH,6),ar=rb(saH,8);
           int bt=rb(sbH,2),bl=rb(sbH,4),bb=rb(sbH,6),br2=rb(sbH,8);
           bool aE=(ab<=at||ar<=al), bE=(bb<=bt||br2<=bl);
@@ -5795,16 +5293,12 @@ int main(int argc, char** argv){
         if(getenv("ADRGNLOG")) fprintf(stderr,"      %s dstH=%08X d=%08X <- a=%08X b=%08X maskout=%d\n",
           opcode==0xA8E6?"DiffRgn":"UnionRgn",dstH,d,saH?mem->read_u32b(saH):0,sbH?mem->read_u32b(sbH):0,C.rgn_mask(d,false)?1:0); }
     } else if(opcode==0xA8E7){ // XorRgn(srcA,srcB,dst:RgnHandle) — [A7]=dst,[A7+4]=srcB,[A7+8]=srcA; pop 12.
-      // Was UNHANDLED -> fell through to the rts-stub which popped NOTHING: 3 RgnHandle args (12 bytes) leaked
-      // per call. In Rock Paper Scissors / Bad Dog!'s PortableModule DoBlankScreen device loop, this 12-byte
-      // A7 drift shifted the CALLER's epilogue `movem.l ...,(A7)+` onto the wrong slots, restoring the pixel
-      // DEPTH register (D3=8) as a stray heap pointer 0x0039xxxx. The garbage depth then multiplied the
-      // 640x480 offscreen buffer to ~1.6GB -> XHeap TempMaxMem check failed -> CW throw 0x101 -> blank
-      // (addm 398). Bounds-only host: approximate the symmetric difference by the union bbox (the true xor's
-      // bbox never exceeds the union), mirroring the UnionRgn (0xA8E5) branch. The load-bearing part is the
-      // 12-byte pop; the bbox/mask is a best-effort approximation consistent with the other region ops.
+      // The bbox is approximated by the union bbox (the true xor's bbox never exceeds it), mirroring
+      // the UnionRgn branch; the region mask below is the exact symmetric difference. The 12-byte pop
+      // is load-bearing: leaking 3 RgnHandle args per call drifts A7 and shifts the caller's
+      // `movem.l ...,(A7)+` epilogue onto the wrong slots.
       uint32_t dstH=mem->read_u32b(r.a[7]), sbH=mem->read_u32b(r.a[7]+4), saH=mem->read_u32b(r.a[7]+8); r.a[7]+=12;
-      if(getenv("ADQDAUDIT")) fprintf(stderr,"[QDAUDIT] mod=%s op=XorRgn\n",g_audit_mod); // addm 564
+      if(getenv("ADQDAUDIT")) fprintf(stderr,"[QDAUDIT] mod=%s op=XorRgn\n",g_audit_mod); // QuickDraw op census
       auto rb=[&](uint32_t h,int o)->int{ uint32_t rg=h?mem->read_u32b(h):0; return rg?(int16_t)mem->read_u16b(rg+o):0; };
       uint32_t d=dstH?mem->read_u32b(dstH):0;
       if(d){ int t=std::min(rb(saH,2),rb(sbH,2)),l=std::min(rb(saH,4),rb(sbH,4)),
@@ -5812,7 +5306,7 @@ int main(int argc, char** argv){
         mem->write_u16b(d,10);mem->write_u16b(d+2,(uint16_t)t);mem->write_u16b(d+4,(uint16_t)l);
         mem->write_u16b(d+6,(uint16_t)b);mem->write_u16b(d+8,(uint16_t)rr2);
         g_rgnc_xor++;
-        dm_rgn_combine(C, d, saH?mem->read_u32b(saH):0, sbH?mem->read_u32b(sbH):0, 3);  // region-exact: real symmetric difference (was union-bbox approximation)
+        dm_rgn_combine(C, d, saH?mem->read_u32b(saH):0, sbH?mem->read_u32b(sbH):0, 3);  // region-exact symmetric difference
         if(getenv("ADRGNLOG")) fprintf(stderr,"      XorRgn dstH=%08X d=%08X <- a=%08X b=%08X\n",
           dstH,d,saH?mem->read_u32b(saH):0,sbH?mem->read_u32b(sbH):0); }
     } else if(opcode==0xA8AA){ // SectRect(srcA,srcB,dstRect):Boolean — [A7]=dst,[A7+4]=b,[A7+8]=a,[A7+12]=result; pop12
@@ -5821,14 +5315,14 @@ int main(int argc, char** argv){
       int t=std::max(g(ap,0),g(bp,0)),l=std::max(g(ap,2),g(bp,2)),b=std::min(g(ap,4),g(bp,4)),rr=std::min(g(ap,6),g(bp,6));
       uint8_t ne=(b>t&&rr>l)?1:0; if(dp){ if(!ne){t=l=b=rr=0;} mem->write_u16b(dp,(uint16_t)t);mem->write_u16b(dp+2,(uint16_t)l);
         mem->write_u16b(dp+4,(uint16_t)b);mem->write_u16b(dp+6,(uint16_t)rr); }
-      // addm 590 (Boolean-slot audit): full-word high-byte Boolean + cleared low (was write_u8 hi-only).
+      // Pascal Boolean result occupies the full word: TRUE in the high byte, low byte cleared.
       if(g_nobool) mem->write_u8(r.a[7], ne);
       else         mem->write_u16b(r.a[7], ne?0x0100:0);
     } else if(opcode==0xA873){ // SetPort(port) — pop 4; retarget drawing
       uint32_t p=mem->read_u32b(r.a[7]); r.a[7]+=4;
-      adpq_save(C); C.cur_port = p?p:C.g_port;               // addm 742: the OLD port keeps its colours
-      adpc_load(C);   // addm 717b: the new current port brings its OWN clipRgn with it
-      adpq_load(C);   // addm 742: ...and the new port brings its OWN fgColor/bkColor
+      adpq_save(C); C.cur_port = p?p:C.g_port;               // the outgoing port keeps its colours
+      adpc_load(C);   // the new current port brings its OWN clipRgn with it
+      adpq_load(C);   // ...and the new port brings its OWN fgColor/bkColor
       if(getenv("ADBADPORT") && (p&0xFFFF0000)==0x4EFA0000){
         fprintf(stderr,"[BADPORT] SetPort with garbage port=%08X pc=%08X a6=%08X\n",p,r.pc,r.a[6]);
         uint32_t a6=r.a[6];
@@ -5839,88 +5333,64 @@ int main(int argc, char** argv){
         fprintf(stderr,"      SetPort port=%08X pmh=%08X pm=%08X baseAddr=%08X (g_fb=%08X %s)\n",
           p,pmh,pm,base,C.g_fb, base==C.g_fb?"SCREEN":"OFFSCREEN"); }
     } else if(opcode==0xA87C){ ADSTUB("A87C_BackPat_noop"); // BackPat(pat: Pattern*) — set the current port's background pattern.
-      // *** addm 532 HOST-BUG FIX ***: trap 0xA87C is BackPat (Inside Macintosh QuickDraw trap table:
-      // A87B ClipRect, A87C BackPat, A87D ClosePort), NOT OpenPort/InitPort. It was previously mis-grouped
-      // with OpenPort (0xA86F), which (a) took the register-glue no-pop path for a Pascal BackPat caller ->
-      // leaked the 4-byte Pattern arg -> A7 drift, AND (b) memset 0x6C bytes at the pushed Pattern pointer
-      // while hijacking cur_port. That A7 drift is exactly what derailed Nonsense: its per-message dispatch
-      // returns through a shared RTS trampoline at low-mem 0xFF0, and a 4-byte-low stack made that RTS
-      // return into the module's own accessor-stub region (fall-through, stale A6=0x20000000) -> fault
-      // (addm 516/519 "main-loop runaway"). BackPat is callee-clean with one 4-byte Pattern* arg; the host
-      // models the background as a solid colour (qd_bg) and does not render QuickDraw patterns, so — exactly
-      // like the colour analog BackPixPat (0xAA0B) above — the correct, zero-regression handler simply pops
-      // the 4-byte argument (no memset, no cur_port change). addm 543: we now RECORD the background pattern
-      // into bk_pat (state tracking) but STILL model the background as solid qd_bg in the rasterizers — the
-      // erase path is deliberately NOT pattern-driven so the addm-532 Nonsense fix (BackPat == solid bg)
-      // holds. bk_pat is available for future pattern-erase fidelity but wired to nothing today.
+      // Trap 0xA87C is BackPat (QuickDraw trap table: A87B ClipRect, A87C BackPat, A87D ClosePort),
+      // NOT OpenPort/InitPort. It is callee-clean with a single 4-byte Pattern* arg, so the handler
+      // just pops that argument — mis-grouping it with OpenPort (0xA86F) takes the register-glue
+      // no-pop path and drifts A7. The host models the background as a solid colour (qd_bg) and does
+      // not render QuickDraw patterns; the pattern is recorded into bk_pat for state tracking, but the
+      // erase path is deliberately NOT pattern-driven, so the background stays solid qd_bg.
       { uint32_t pp=mem->read_u32b(r.a[7]); if(pp && !g_nopen){ for(int k=0;k<8;k++) C.bk_pat[k]=mem->read_u8(pp+k); } else ADSTUB("A87C_BackPat_noop"); }
       r.a[7]+=4;
     } else if(opcode==0xA86F){ // OpenPort/InitPort(port:GrafPtr) — Pascal: port on stack
       // Classic B&W port setup. Init the given port as a B&W GrafPort drawing to the screen by
       // default (baseAddr=g_fb, rowBytes=fb_w, full-screen bounds), portVersion left 0 so cur_pm
       // reads the inline BitMap. A subsequent SetPortBits can redirect it to an offscreen buffer.
-      // CONVENTION-AWARE (2026-07-16): TWO calling conventions coexist in the ADgm modules.
+      // TWO calling conventions coexist in the ADgm modules.
       //  - REGISTER glue (Gravity): the Pascal glue popped the port into A0 before trapping, so at trap
       //    entry A0=port and the stack top is a RETURN ADDRESS (module code, 0x100000..0x1FFFFF). Use A0,
       //    do NOT pop.
       //  - STACK glue (Dominoes): the port (an embedded GrafPort at container+4, a HEAP GrafPtr) is left
       //    PUSHED on the stack and A0 is the container. Use the stack arg and POP 4.
-      // Discriminate by the stack top: a code-range value = return address = register glue; otherwise it
-      // is a pushed heap GrafPtr = stack glue. The OLD unconditional A0 read memset'd Dominoes' container
-      // [0x3037D0..+0x100], zeroing its hash-index field at +0x10 (0x3037E0) -> D0=0 -> infinite
-      // hash-probe hang; the correct stack port (0x3037E4) memsets clear of that field.
       // Discriminate by the stack top: STACK_TOP is 0x300000, so a value >= 0x300000 is a HEAP GrafPtr
       // that a stack-glue caller (Dominoes) pushed -> use it and pop 4. Anything below (a return address
       // in code range, or a register-glue caller's own stack-allocated port left in A0, e.g. Gravity's
-      // A0=0x2FFDEE with sp_top=0x2FFD74) -> register glue -> use A0, do NOT pop. Verified: Gravity
-      // sp_top=0x2FFD74 (<0x300000 -> A0, unchanged); Dominoes sp_top=0x3037E4 (>=0x300000 -> use+pop,
-      // which stops it memset'ing its container's hash-index field at 0x3037E0 -> no more hang).
+      // A0=0x2FFDEE with sp_top=0x2FFD74) -> register glue -> use A0, do NOT pop. Reading A0
+      // unconditionally memsets a stack-glue caller's container and zeroes the hash-index field it
+      // keeps there, which hangs the module in an infinite hash probe.
       uint32_t sp_top=mem->read_u32b(r.a[7]);
       if(getenv("ADOPENPORTLOG")) fprintf(stderr,"[OpenPort] A0=%08X sp_top=%08X pc=%08X\n",r.a[0],sp_top,r.pc);
       uint32_t port;
-      // addm 332 — *** THE dll# A2-CORRUPTION ROOT CAUSE ***. IMacMonoPixels (AD3 library) calls OpenPort
-      // with PASCAL glue: `move.l (A2+8),-(A7)` pushes a HEAP GrafPtr (0x0201xxxx in the dll# world) and
-      // expects the trap to pop it. The old range test only accepted [0x300000,0x400000) as "pushed", so
-      // the dll# port failed it, the host took the no-pop path, and A7 stayed 4 LOW for the rest of the
-      // function. Its `movem.l (A7)+,D3,D4,D5,D6,D7,A2,A3,A4` epilogue then read every register one slot
-      // off — A2 <- saved D7 = 100 (a clock-face dimension) — and `unlk` RESYNCED A7, so the function
-      // returned cleanly with corrupted callee-saved registers. Downstream: CalcMemoryNeeded's virtual
-      // call through this=100 -> null dispatch -> the module instance never publishes -> 0 pixels
-      // (the entire addm 324-328 hunt). Discriminator for the dll# world: a register-glue caller has its
-      // RETURN ADDRESS (a code-arena pointer) on top; a Pascal caller has a DATA pointer. Gated on the
-      // dll# world (g_dll_ay) so Gravity/Dominoes keep the exact old behaviour.
+      // In the dll# world IMacMonoPixels (AD3 library) calls OpenPort with PASCAL glue: it pushes a
+      // HEAP GrafPtr (0x0201xxxx) and expects the trap to pop it. Not popping leaves A7 4 bytes LOW for
+      // the rest of the function; its `movem.l (A7)+,D3,D4,D5,D6,D7,A2,A3,A4` epilogue then restores
+      // every register one slot off while `unlk` RESYNCS A7, so the function returns cleanly with
+      // corrupted callee-saved registers. Discriminator for the dll# world: a register-glue caller has
+      // its RETURN ADDRESS (a code-arena pointer) on top, a Pascal caller a DATA pointer. Gated on the
+      // dll# world (g_dll_ay) so Gravity/Dominoes keep the classic behaviour.
       bool spIsCode = (sp_top>=0x00100000&&sp_top<0x00200000) || (sp_top>=0x01000000&&sp_top<0x01100000);
-      // addm 437 — STRUCTURAL embedded-port discriminator (fixes the Dominoes hang the addm-42 0x300000
-      // address-threshold missed). Dominoes' OpenPort glue @0x0005D452 is `A0=*(A3); push *(A0+2); A86F`
-      // for EVERY call — A0=the object/container, and the pushed port is an embedded GrafPort at A0+0x14
-      // (verified: sp_top-A0==0x14 for all 7 calls). The object also stores its OWN handle master pointer
-      // at A0+0x10 (a self-handle: NewHandleClear'd @0x100EE6, *(A0+0x10)=A0). The addm-42 fix keyed
-      // "pushed port" off sp_top>=0x300000, which held for the 6 high-heap objects but FAILED for the 7th
-      // (a LOW-heap object at A0=0x000D994C, sp_top=0x000D9960<0x300000): it fell to the register-glue
-      // path, memset(A0,0,0x6C) zeroed the self-handle at A0+0x10 -> the shared method-resolver @0x100F48
-      // dereferences *(handle)=NULL -> bucket-base D0=0 -> infinite hash-probe hang (addm 41/373). The
-      // convention is STRUCTURAL, not address-ranged: if the pushed value points INTO the container A0
-      // (A0 < sp_top < A0+0x6C) it is the embedded port -> use it (+pop), leaving the handle at A0+0x10
-      // intact. Gravity's register glue (A0=0x2FFDEE, sp_top=0x2FFD74 < A0) does NOT satisfy this -> stays
-      // register glue (no regression). Placed first so all 7 Dominoes calls resolve uniformly.
+      // STRUCTURAL embedded-port discriminator. Dominoes' OpenPort glue @0x0005D452 is
+      // `A0=*(A3); push *(A0+2); A86F` for EVERY call — A0 is the object/container and the pushed port
+      // is an embedded GrafPort at A0+0x14 (sp_top-A0==0x14 for all 7 calls). The object also stores
+      // its OWN handle master pointer at A0+0x10 (a self-handle, NewHandleClear'd @0x100EE6), and
+      // memsetting the container over it makes the shared method-resolver @0x100F48 deref NULL ->
+      // bucket-base D0=0 -> infinite hash-probe hang. An address threshold is the wrong test (one such
+      // object lives in the LOW heap at A0=0x000D994C); the convention is STRUCTURAL: if the pushed
+      // value points INTO the container A0 (A0 < sp_top < A0+0x6C) it is the embedded port -> use it
+      // (+pop), leaving the handle at A0+0x10 intact. Gravity's register glue (A0=0x2FFDEE,
+      // sp_top=0x2FFD74 < A0) does NOT satisfy this and stays on the register-glue path. Tested first
+      // so every embedded-port call resolves uniformly.
       if(!getenv("ADNODOPORTFIX") && r.a[0] && sp_top > r.a[0] && sp_top < r.a[0]+0x6C){ port=sp_top; r.a[7]+=4; }
       else if(sp_top>=0x00300000 && sp_top<0x00400000){ port=sp_top; r.a[7]+=4; }  // stack glue: pushed heap port + pop
       else if(g_dll_ay && !spIsCode && sp_top>=0x4000 && sp_top<0x03000000){ port=sp_top; r.a[7]+=4; }  // dll# Pascal glue
-      // addm 468 — Punch Out arena-straddle fix. Punch Out's OpenPort glue is the SAME structural form as
-      // Dominoes' (`A0=*(A3); push *(A0+2); A86F`) — A0 is a small (0x10-byte) object and the pushed value
-      // *(A0+2) is the real 0x6C GrafPort. For 2 of its 3 ports the GrafPort was allocated ABOVE the object
-      // (sp_top within A0..A0+0x6C) so the addm-437 structural test above catches them. But the 3rd GrafPort
-      // landed in the LOW heap (sp_top=0x0008C3CC while A0=0x00303FE0), BELOW the object, so the structural
-      // test missed it and the register-glue fallback used port=A0 (the 0x10-byte object). The mem->memset
-      // (port,0,0x6C) then ran off the end of A0's block, which sits only 0x20 bytes below its host arena's
-      // page-rounded end at 0x00304000 (the classic 0x00280000+0x82000 arena rounds up to a 0x4000 page
-      // boundary), straddling into the unallocated 0x304000 gap -> "data not entirely contained within one
-      // arena" @pc=0x00050B6A (post-fetch pc of the A86F trap). This is the addm-455/456 Punch Out signature.
-      // FIX (structural, convention-correct): if the register-glue fallback is about to fire but A0 is too
-      // small to be a GrafPort while the pushed sp_top IS a real allocated block big enough for one, this is
-      // Pascal glue whose GrafPtr lives outside the A0 container -> use sp_top + pop 4. Gravity's true
-      // register glue (sp_top = a stack local, NOT an allocate() block) fails the sp_top block-size test and
-      // keeps port=A0 -> no regression. Opt out with ADNODOPORTFIX (shared with the addm-437 lever).
+      // A Pascal-glue caller of the same structural form (`A0=*(A3); push *(A0+2); A86F`) can have its
+      // 0x6C GrafPort allocated BELOW the small object instead of inside it, so the structural test
+      // above misses it and the register-glue fallback would use port=A0. The mem->memset(port,0,0x6C)
+      // then runs off the end of A0's block and can straddle the page-rounded arena end -> "data not
+      // entirely contained within one arena". So if the register-glue fallback is about to fire but A0
+      // is too small to be a GrafPort while the pushed sp_top IS a real allocated block big enough for
+      // one, this is Pascal glue whose GrafPtr lives outside the A0 container -> use sp_top + pop 4.
+      // True register glue pushes a stack local, not an allocate() block, so it fails the sp_top
+      // block-size test and keeps port=A0. Opt out with ADNODOPORTFIX (shared with the lever above).
       else if(!getenv("ADNODOPORTFIX")){
         uint32_t spb=0,a0b=0; try{ spb=(uint32_t)mem->get_block_size(sp_top); }catch(...){}
         try{ a0b=(uint32_t)mem->get_block_size(r.a[0]); }catch(...){}
@@ -5928,9 +5398,9 @@ int main(int argc, char** argv){
         else port=r.a[0];                                                     // register glue: A0, no pop
       }
       else { port=r.a[0]; }                                                   // register glue: A0, no pop
-      // addm 331: same overrun as OpenCPort below — GrafPort is 0x6C bytes; zeroing 0x100 tramples 148
-      // bytes past a tight or STACK-allocated port (the stack-glue path above makes that a live hazard:
-      // it obliterates the caller's saved registers and frame above the local).
+      // GrafPort is 0x6C bytes; zeroing more tramples past a tight or STACK-allocated port (the
+      // stack-glue path above makes that a live hazard: it would obliterate the caller's saved
+      // registers and frame above the local).
       if(getenv("ADPOPROBE")){ // Punch Out arena-straddle diagnostic (default-off)
         uint32_t blksz=0; try{ blksz=(uint32_t)mem->get_block_size(port); }catch(...){}
         // scan upward from port to find first inaccessible byte (arena end)
@@ -5947,7 +5417,7 @@ int main(int argc, char** argv){
         mem->write_u16b(port+0x0C,(uint16_t)C.fb_h); mem->write_u16b(port+0x0E,(uint16_t)C.fb_w); // portBits.bounds
         mem->write_u16b(port+0x10,0); mem->write_u16b(port+0x12,0);
         mem->write_u16b(port+0x14,(uint16_t)C.fb_h); mem->write_u16b(port+0x16,(uint16_t)C.fb_w); // portRect
-        adpq_save(C); C.cur_port = port; adpc_load(C); adpq_load(C); }   // addm 717b/742: fresh port = own clip + colours
+        adpq_save(C); C.cur_port = port; adpc_load(C); adpq_load(C); }   // fresh port = own clip + colours
       r.d[0].u=0;
     } else if(opcode==0xA875){ // SetPortBits(bm:BitMap*) — actually install the BitMap into the
       // current port so drawing follows it (the classic "SetPortBits to an offscreen, draw, restore,
@@ -5961,23 +5431,18 @@ int main(int argc, char** argv){
       // (preserves the modules that already render, and keeps the hot path mask-free for them).
       uint32_t h=mem->read_u32b(r.a[7]); r.a[7]+=4; uint32_t rg=h?mem->read_u32b(h):0;
       C.clip_rgn = (rg && C.rgn_mask(rg,false) && !C.rgn_mask_full(rg)) ? rg : 0;
-      // addm 800 (clipwire item 2 piece i): authentic SetClip REPLACES the port's clip, bounding
-      // box included. The host installed only the shape mask and KEPT THE STALE RECT, so a SetClip
-      // after a ClipRect INTERSECTED instead of replacing — Modern Art hands SetClip a region
-      // reaching x=20 while the port still carries left=114, cropping the Mondrian's left edge and
-      // lower band (frames 36-41; converges after, which is why end-state hashes never saw it).
-      // Standalone: reads only the caller's region, no dependency on the port record.
+      // Authentic SetClip REPLACES the port's clip, bounding box included. Installing only the shape
+      // mask and keeping the stale rect makes a SetClip after a ClipRect INTERSECT instead of replace,
+      // cropping drawing to the older, tighter box. Reads only the caller's region, not the port record.
       if(!g_no_setclipbbox && rg){
         int16_t nt=(int16_t)mem->read_u16b(rg+2), nl=(int16_t)mem->read_u16b(rg+4);
         int16_t nb=(int16_t)mem->read_u16b(rg+6), nr2=(int16_t)mem->read_u16b(rg+8);
         if(nb>nt && nr2>nl){ C.qd_clip_t=nt; C.qd_clip_l=nl; C.qd_clip_b=nb; C.qd_clip_r=nr2; }
       }
-      adpc_save(C);   // addm 717b: SetClip is per-port too
+      adpc_save(C);   // SetClip is per-port too
     } else if(opcode==0xA87D){ ADSTUB("A87D_ClosePort_noop"); // ClosePort(port) — pop 4 (no-op)
       r.a[7]+=4;
-    } else if(opcode==0xA855){ ADSTUB("A855_ShieldCursor_noop"); // ShieldCursor(shieldRect, offsetPt) — pop 8. (Tried 12 = Rect-by-
-      // value+Point; it made the derail cluster WORSE, confirming the derail is stack-UNDERFLOW
-      // (a7 climbing too high), not this trap under-popping. Left at 8.)
+    } else if(opcode==0xA855){ ADSTUB("A855_ShieldCursor_noop"); // ShieldCursor(shieldRect, offsetPt) — pop 8.
       r.a[7]+=8;
     } else if(opcode==0xA89E){ // PenNormal — reset pnSize=(1,1), pnMode=patCopy, pnPat=black. No args.
       if(!g_nopen){ C.pen_sw=1; C.pen_sh=1; C.pen_mode=8;
@@ -5987,18 +5452,18 @@ int main(int argc, char** argv){
     } else if(opcode==0xA055){ ADSTUB("A055_StripAddress_noop"); // StripAddress: A0 = 24-bit-clean addr = A0 (we're 32-bit clean) — no-op
     } else if(opcode==0xAA2C){ ADSTUB("AA2C_TestDeviceAttribute_true"); // TestDeviceAttribute(gdh,attribute):Boolean — our one screen device: true
       r.a[7]+=6;                                // pop attribute(2) + gdh(4)
-      // addm 590 (Boolean-slot audit): TRUE in high byte + cleared low (was write_u8 hi-only).
+      // Pascal Boolean result: TRUE in the high byte, low byte cleared.
       if(g_nobool) mem->write_u8(r.a[7], 1);
       else         mem->write_u16b(r.a[7], 0x0100);   // -> true
     } else if(opcode==0xA870||opcode==0xA871){ // LocalToGlobal/GlobalToLocal(Point*) — apply the port origin.
       // Our qd_px maps physical = local - origin, so the screen/"global" frame == local - origin. Thus
-      // LocalToGlobal: p -= origin ; GlobalToLocal: p += origin. Identity when origin==0 (the common case,
-      // so Snake/Bogglins and every zero-origin module stay byte-identical). Mandelbrot SetOrigin's a
-      // non-zero origin; identity there mislocated its coordinates. Point = {v(2),h(2)}.
+      // LocalToGlobal: p -= origin ; GlobalToLocal: p += origin. Identity when origin==0 (the common
+      // case); a module that SetOrigin's a non-zero origin (Mandelbrot) needs the adjustment.
+      // Point = {v(2),h(2)}.
       uint32_t pp=mem->read_u32b(r.a[7]); r.a[7]+=4;
       if(g_orglegacy){ g_org_h=C.qd_org_h; g_org_v=C.qd_org_v; }
       int ov=g_org_v, oh=g_org_h;
-      if(!g_orglegacy && !g_noportorg) port_origin(ov,oh);   // addm 749: the CURRENT port's own origin
+      if(!g_orglegacy && !g_noportorg) port_origin(ov,oh);   // the CURRENT port's own origin
       if(g_orglog) fprintf(stderr,"    [ORG] %s pt=(%d,%d) port=%08X origin=(%d,%d) sticky=(%d,%d)\n",
         opcode==0xA870?"LocalToGlobal":"GlobalToLocal", pp?(int16_t)mem->read_u16b(pp):0,
         pp?(int16_t)mem->read_u16b(pp+2):0, C.cur_port, ov,oh, g_org_v,g_org_h);
@@ -6013,22 +5478,12 @@ int main(int argc, char** argv){
       // returns the two differences as a long integer: the high-order word is the vertical difference,
       // the low-order word the horizontal". Pascal ABI: the caller reserved the 4-byte result long, then
       // pushed ptA, then ptB, so on entry [A7]=ptB, [A7+4]=ptA, [A7+8]=the result slot.
-      // UNHANDLED, it popped nothing: 8 argument bytes leaked per call (the caller's own
-      // `move.l (A7)+,D0` recovered 4), so the frame's later `movea.l (A7)+,A3` restored the WRONG
-      // slot — the addm-724/720 stack-drift class (TextWidth, Color2Index). Corpus consumer census
-      // (62 roster entries, 200f): DOMINOES ONLY (33 calls/200f, every other module 0). Its
-      // CalcNextPosition uses it to step the domino it is placing from its current point to the next
-      // one on the path (`OffsetRect(rect, delta.h, delta.v)` right after), so the drift began on the
-      // SECOND domino and came back as `this` = one of the leaked Points (007D0000 = the Point
-      // (125,0)) -> deref -> the whole draw aborted. That is what left the board at one tile.
       { uint32_t b=mem->read_u32b(r.a[7]), a=mem->read_u32b(r.a[7]+4); r.a[7]+=8;
         int16_t dv=(int16_t)(a>>16) - (int16_t)(b>>16);
         int16_t dh=(int16_t)(a&0xFFFF) - (int16_t)(b&0xFFFF);
         mem->write_u32b(r.a[7], ((uint32_t)(uint16_t)dv<<16) | (uint16_t)dh); }
     } else if(opcode==0xA87E||opcode==0xA87F){ // AddPt/SubPt(src: Point; VAR dst: Point) — proc, pop 8.
       // Stack: [A7]=dst ptr(4), [A7+4]=src Point-by-value(4: v.w,h.w). AddPt: dst+=src; SubPt: dst-=src.
-      // Draw Morph needs SubPt (delta between two points); leaving it unhandled left dst unchanged,
-      // producing a bogus geometry that derailed its init (name-string-as-pointer fault).
       uint32_t dstp=mem->read_u32b(r.a[7]); uint32_t srcv=mem->read_u32b(r.a[7]+4); r.a[7]+=8;
       if(dstp){ int16_t sv=(int16_t)(srcv>>16), sh=(int16_t)(srcv&0xFFFF);
         int16_t dv=(int16_t)mem->read_u16b(dstp), dh=(int16_t)mem->read_u16b(dstp+2);
@@ -6043,12 +5498,9 @@ int main(int argc, char** argv){
     } else if(opcode==0xAA33){ // Color2Index(VAR myColor:RGBColor):LONGINT — nearest-CLUT-index lookup.
       // Pascal FUNCTION ABI: caller reserved a 4-byte result long then pushed the VAR ptr, so on entry
       // [A7]=ptr, [A7+4]=result slot. We must pop ONLY the ptr (4) and write the result into the slot.
-      // Was UNHANDLED -> fell through to the rts-stub which popped nothing: -4 A7 drift per call. That
-      // drift shifted the CALLER's epilogue `movem.l ...,(A7)+` onto the wrong slots, restoring a null
-      // A3 `this` (Globe's geometry object) -> null deref -> infinite hash-probe hang. Correct discipline
-      // below balances the stack. (RGBColor = {red.w,green.w,blue.w}; CLUT entry = {value.w,r.w,g.w,b.w}.)
+      // (RGBColor = {red.w,green.w,blue.w}; CLUT entry = {value.w,r.w,g.w,b.w}.)
       { uint32_t cp=mem->read_u32b(r.a[7]); r.a[7]+=4; uint32_t idx=0; bool claimed=false;
-        if(cp) claimed=color_search_proc(mem->read_u16b(cp),mem->read_u16b(cp+2),mem->read_u16b(cp+4),idx); // addm 720
+        if(cp) claimed=color_search_proc(mem->read_u16b(cp),mem->read_u16b(cp+2),mem->read_u16b(cp+4),idx); // a module-installed search proc claims it first
         if(cp && !claimed){ int32_t rr=(int32_t)mem->read_u16b(cp), gg=(int32_t)mem->read_u16b(cp+2), bb=(int32_t)mem->read_u16b(cp+4);
           uint64_t best=~0ull;
           for(uint32_t i=0;i<256;i++){ uint32_t e=C.g_clut+8+i*8;
@@ -6058,12 +5510,11 @@ int main(int argc, char** argv){
         mem->write_u32b(r.a[7], idx); r.d[0].u=idx; }
     } else if(opcode==0xAA00){ // OpenCPort(port:CGrafPtr) — init a colour port drawing to g_fb, pop 4
       uint32_t port=mem->read_u32b(r.a[7]); r.a[7]+=4;
-      // addm 331: zero EXACTLY sizeof(CGrafPort)=0x6C, not 0x100. Callers allocate a tight 108-byte block
-      // (Clocks' IMacColorPixels: NewPtr(0x6C) right before OpenCPort) — or a STACK local — and the old
-      // 256-byte memset trampled the 148 bytes after it: past an arena edge it faulted INSIDE this trap
-      // ("data not entirely contained within one arena", post-fetch pc = the next instruction, which
-      // masqueraded as a module bug at 0x01005084 for weeks); mid-heap/stack it silently corrupted
-      // whatever followed. This is the deterministic ENGINE-path IMacColorPixels fault.
+      // Zero EXACTLY sizeof(CGrafPort)=0x6C. Callers allocate a tight 108-byte block (Clocks'
+      // IMacColorPixels: NewPtr(0x6C) right before OpenCPort) — or a STACK local — so a larger memset
+      // tramples what follows: past an arena edge it faults INSIDE this trap ("data not entirely
+      // contained within one arena", post-fetch pc = the next instruction); mid-heap or on the stack it
+      // silently corrupts whatever follows.
       if(port){ mem->memset(port,0,0x6C);
         // Give the port its OWN PixMap+handle — NOT the shared screen g_pmh. Modules (Bogglins,
         // GDevice-offscreen savers) open a colour port then reconfigure its pixmap into a small
@@ -6078,32 +5529,21 @@ int main(int argc, char** argv){
         mem->write_u16b(port+0x06, 0xC000);                  // portVersion: colour port
         mem->write_u16b(port+0x10,0);mem->write_u16b(port+0x12,0);
         mem->write_u16b(port+0x14,(uint16_t)C.fb_h);mem->write_u16b(port+0x16,(uint16_t)C.fb_w);
-        // *** addm 799 ***: this port's TWO REGIONS — the OpenCPort twin of addm 790.
-        // OpenCPort left clipRgn(+0x1C) NULL and pointed visRgn(+0x18) at C.g_visrgn, the ONE screen
-        // region record the toolbox header builds. addm 790 gave every GWorld its own pair and
-        // measured that the LOUD half of the same defect was on this arm: of the 1,354 guest reads of
-        // a port's clipRgn in the corpus, 1,080 land on OpenCPort/screen ports — and ALL 937 of the
-        // reads that carry a NONZERO offset (Rebound up to d(-525,14), Bugs d(632,78), Daredevil Dan
-        // d(642,220)) are here, where MacCanvas::SetPenOrigin's OffsetRgn was handed a NULL.
-        // The alias is the sharper half. 13 modules touch the shared record 134 times: twelve RectRgn
-        // it (Boris 27, Daredevil Dan 21, Rebound 19, Clocks 13, Punch Out 12, Bogglins 10, Bugs 10,
-        // Dominoes 9, OM Appliances 7, Globe 2, Draw Morph 1, Frost & Fire 1) and Stained Glass uses
-        // it as a SectRgn DESTINATION. Every one of those writes is a module configuring ITS OWN
-        // hand-built offscreen port — Bogglins does it once per cel sheet, ten distinct ports, ten
-        // writes — and under the alias every one REWRITES THE SCREEN PORT'S visRgn. The library reads
-        // that record back (MacCanvas::GetClipRegion @0x0100E2DA SectRgns [port+0x18] into the canvas'
-        // clip), so a module that shrinks the shared record while building an offscreen is handing
-        // the next GetClipRegion on the screen port a clip the size of a sprite sheet.
-        // QuickDraw's own invariant covers both: a port owns its clipRgn from birth (SetClip/ClipRect
-        // copy a shape INTO it rather than adopting the caller's handle), and RectRgn on a port's
-        // visRgn must affect that port only. The PPC host builds a port's regions this way
-        // (adhost.cc:2649-2660, two independent mkrgn() records).
+        // This port's TWO REGIONS. QuickDraw's invariant: a port owns its clipRgn from birth
+        // (SetClip/ClipRect copy a shape INTO it rather than adopting the caller's handle), and RectRgn
+        // on a port's visRgn must affect that port only. Pointing visRgn at the one shared screen region
+        // record lets a module configuring its OWN hand-built offscreen port rewrite the SCREEN port's
+        // visRgn; the library reads that record back (MacCanvas::GetClipRegion @0x0100E2DA SectRgns
+        // [port+0x18] into the canvas' clip), so the next GetClipRegion on the screen port would get a
+        // clip the size of a sprite sheet. A NULL clipRgn is the other half of the same defect:
+        // MacCanvas::SetPenOrigin's OffsetRgn is handed one. The PPC host builds a port's regions this
+        // way too (adhost.cc:2649-2660, two independent mkrgn() records).
         // Nothing HOST-side reads either field — the host's clip is ToolboxCanvas' qd_clip_* rect plus
-        // the addm-717b per-port store, and g_visrgn is written into ports and never read back — so
-        // this is a structural repair of the port record, not a change to what is drawn.
+        // the per-port store, and g_visrgn is written into ports and never read back — so this is a
+        // structural repair of the port record, not a change to what is drawn.
         // ADNOCPVISRGN=1 restores the shared alias; ADNOCPCLIPRGN=1 restores the NULL clipRgn.
         // Both records get the port's own portRect (full screen at OpenCPort time; a later PortSize
-        // resizes the port, exactly as it does for the shared record today).
+        // resizes the port, exactly as it does for the shared record).
         if(g_no_cpvisrgn) mem->write_u32b(port+0x18, C.g_visrgn);
         else {
           uint32_t vrg=mem->allocate(10); (*blk_size)[vrg]=10;
@@ -6123,30 +5563,19 @@ int main(int argc, char** argv){
         }
         bool known=false; for(uint32_t gw:C.gworlds) if(gw==port){ known=true; break; }
         if(!known) C.gworlds.push_back(port);                 // known port for CopyBits resolveBits (dedup: a module may re-open the same port each frame)
-        // *** addm 717: OpenCPort MAKES THE NEW PORT THE CURRENT PORT ***
-        // Inside Macintosh (Imaging With QuickDraw, "OpenCPort"): the procedure initialises the
-        // CGrafPort's fields and then, exactly like its classic twin OpenPort, calls SetPort on it —
-        // "the new port becomes the current port". The classic arm (0xA86F above) already does this
-        // (`C.cur_port = port`); the colour arm did not, and that single missing assignment was the
-        // last un-modelled piece of the hand-built-offscreen idiom every AD sprite engine uses:
+        // OpenCPort MAKES THE NEW PORT THE CURRENT PORT. Inside Macintosh (Imaging With QuickDraw,
+        // "OpenCPort"): the procedure initialises the CGrafPort's fields and then, exactly like its
+        // classic twin OpenPort, calls SetPort on it — "the new port becomes the current port". That is
+        // what makes the hand-built-offscreen idiom every AD sprite engine uses work without a port arg:
         //     NewPtr(0x6C) ; OpenCPort(port) ; PortSize(w,h) ; NewHandle(w*h) ; <fill the pixmap
         //     fields> ; SetOrigin(-hotH,-hotV) ; RectRgn+ClipRect ; SetPort(saved)
-        // Everything between OpenCPort and the closing SetPort is addressed to the NEW port and needs
-        // no port argument, because OpenCPort already made it current. With cur_port left pointing at
-        // the screen, all of that landed on the SCREEN port instead: Bogglins' ten 196x196 cel sheets
-        // never received their SetOrigin(-20,-20), so each sheet kept bounds (0,0,196,196) while the
-        // module went on addressing it with hotspot-relative rects s[-20,-20,176,173]. The addm-559
-        // source clip (correctly) refuses to read the 20 px above/left of the stored bounds, so the
-        // top/left 20 px strip of every destination rect stayed UNWRITTEN — and since the cel steps
-        // 20 px per frame that strip is precisely the band that should erase the previous cel. The
-        // result is the un-erased tile-shaped remnants the field report calls explosion "smoke".
-        // With the port made current the sheet acquires bounds (-20,-20,176,176), the srcRect is
-        // fully in bounds, the clip never fires, and the full 196x196 cel (background included) is
-        // written every step — self-erasing, as the module intends. This ALSO fixes the mirror-image
-        // half of the bug: those ten SetOrigins were landing on the SCREEN port, shifting the whole
-        // canvas' coordinate system by (-20,-20) for the rest of the run.
-        // Name-free and general: it restores a documented QuickDraw postcondition for every caller.
-        // ADNOCPORTCUR=1 reverts to the old leave-cur_port-alone behaviour for A/B.
+        // Everything between OpenCPort and the closing SetPort is addressed to the NEW port. With
+        // cur_port left pointing at the screen it all lands on the SCREEN port instead: the cel sheet
+        // never receives its SetOrigin, so it keeps bounds (0,0,w,h) while the module addresses it with
+        // hotspot-relative rects, the source clip refuses the strip above/left of the stored bounds, and
+        // the band that should erase the previous cel stays unwritten (Bogglins' explosion "smoke").
+        // Those stray SetOrigins also shift the SCREEN port's coordinate system for the rest of the run.
+        // ADNOCPORTCUR=1 leaves cur_port alone for A/B.
         if(!g_nocportcur){ adpq_save(C); C.cur_port = port; adpc_load(C); adpq_load(C); } }
     } else if(opcode==0xAA06){ // SetPortPix(pm:PixMapHandle) — set current port's portPixMap, pop 4
       uint32_t pm=mem->read_u32b(r.a[7]); r.a[7]+=4;
@@ -6188,35 +5617,26 @@ int main(int argc, char** argv){
         (*trap_stubs)[fullop]=stub;
         // First sighting of an UNHANDLED trap: log it. These fall to an rts-stub that pops NO stack args,
         // so any FUNCTION/PROC trap with Pascal args causes a per-call A7 drift that corrupts the caller's
-        // saved registers (see Color2Index/0xAA33 addendum-38). ADUNHANDLED surfaces candidates to fix.
+        // saved registers. ADUNHANDLED surfaces candidates to fix.
         if(getenv("ADUNHANDLED")) fprintf(stderr,"[UNHANDLED-TRAP] %04X (tb=%d tn=0x%03X) first seen at pc=%08X\n",fullop,tb?1:0,tn,r.pc); }
       r.a[0]=stub; r.d[0].u=0;
-    } else if(opcode==0xA868){ // FixMul(a,b:Fixed):Fixed = (a*b)>>16 — args on stack (a@[A7],b@[A7+4]), RESULT IN D0
-      // Frost & Fire uses the FULL PASCAL FUNCTION form (addm 449): its MatrixMulPoints/plasma callers
-      // `clr.l -(A7)` (reserve result slot R), push a, push b, trap, then read the result back from R
-      // (`move.l (A7)+,Dn`/`2D5F move.l (A7)+,d(A6)`/`add.l Dn,(A7)+`) — NEVER from D0. With the result
-      // only in D0 every FixMul returned R=0 (the clr.l seed) -> the plasma coordinate/height math
-      // collapsed -> the offscreen buffer was uniform (index 255) -> blank.
-      // addm 660: UNIFIED — FixMul is a Pascal FUNCTION trap for EVERY caller (Fractal Forest reads the
-      // result from the reserved slot via `add.l (A7)+,D0`, exactly like F&F/Rose). Write the result to
-      // the reserved slot unconditionally. (legacy-cleanup addm 679: the ADFRACLEGACY A/B revert to the
-      // old name-gated/D0-only write is retired — dead by default in main.)
+    } else if(opcode==0xA868){ // FixMul(a,b:Fixed):Fixed = (a*b)>>16 — args on stack (a@[A7],b@[A7+4])
+      // FixMul is a Pascal FUNCTION trap for EVERY caller: the caller `clr.l -(A7)` reserves the result
+      // slot, pushes a then b, traps, and reads the result back from that slot (`move.l (A7)+,Dn`,
+      // `add.l (A7)+,D0`, ...) — never from D0. Write the result to the reserved slot unconditionally.
       int32_t a=(int32_t)mem->read_u32b(r.a[7]), b=(int32_t)mem->read_u32b(r.a[7]+4); r.a[7]+=8;
       int32_t fmres=(int32_t)(((int64_t)a*(int64_t)b)>>16);
       r.d[0].u=(uint32_t)fmres;
       try{ mem->write_u32b(r.a[7], (uint32_t)fmres); }catch(...){}  // Pascal FUNCTION: result -> reserved slot
-    } else if(opcode==0xA84B){ // FracDiv(x,y:Fixed):Fract = (x/y) as 2.30 — Pascal FUNCTION form (addm 449).
+    } else if(opcode==0xA84B){ // FracDiv(x,y:Fixed):Fract = (x/y) as 2.30 — Pascal FUNCTION form.
       // The caller `clr.l -(A7)` reserves R, pushes x then y, and reads the result back from R
-      // (`move.l (A7)+,D7`). addm 660: UNIFIED — served for EVERY caller (authentic Pascal FUNCTION trap).
-      // (legacy-cleanup addm 679: ADFRACLEGACY A/B revert retired — dead by default in main.)
+      // (`move.l (A7)+,D7`). Served the same way for every caller.
       int32_t y=(int32_t)mem->read_u32b(r.a[7]), x=(int32_t)mem->read_u32b(r.a[7]+4); r.a[7]+=8;
       int32_t res = y ? (int32_t)(((int64_t)x<<30)/y) : (((int64_t)x<0)?(int32_t)0x80000000:(int32_t)0x7FFFFFFF);
       r.d[0].u=(uint32_t)res; try{ mem->write_u32b(r.a[7], (uint32_t)res); }catch(...){}
-    } else if(opcode==0xA84D){ // FixDiv(a,b:Fixed):Fixed = (a<<16)/b — args on stack (a@[A7+4],b@[A7]), result D0
-      // Same Pascal FUNCTION form as FixMul above for Frost & Fire (result read from the reserved slot,
-      // not D0). Arg order (a=[A7+4] numerator, b=[A7] denominator) already matches F&F's push order.
-      // addm 660: UNIFIED — FixDiv is a Pascal FUNCTION trap for EVERY caller; write result to the
-      // reserved slot unconditionally. (legacy-cleanup addm 679: ADFRACLEGACY A/B revert retired.)
+    } else if(opcode==0xA84D){ // FixDiv(a,b:Fixed):Fixed = (a<<16)/b — args on stack (a@[A7+4],b@[A7])
+      // Same Pascal FUNCTION form as FixMul above: the result is read from the caller's reserved slot,
+      // not D0. Arg order (a=[A7+4] numerator, b=[A7] denominator) matches the caller's push order.
       int32_t b=(int32_t)mem->read_u32b(r.a[7]), a=(int32_t)mem->read_u32b(r.a[7]+4); r.a[7]+=8;
       int32_t fdres = b ? (int32_t)(((int64_t)a<<16)/b) : (a<0?(int32_t)0x80000000:(int32_t)0x7FFFFFFF);
       r.d[0].u=(uint32_t)fdres;
@@ -6226,10 +5646,8 @@ int main(int argc, char** argv){
       // POINTER (Pascal): caller does `clr.l -(A7)` (reserve the 4-byte Fixed result) then `pea src` (pointer
       // to the 80-bit extended), then the trap. So [A7]=src-ptr, [A7+4]=result slot. Read the extended via the
       // pointer, scale (Fixed=16.16 -> *2^16; Fract=2.30 -> *2^30), POP the 4-byte pointer, and write the Fixed
-      // result to the reserved slot (now at [A7]) AND D0. (Prior code read 10 raw stack bytes by value and
-      // popped 10 -> read the pointer bytes as garbage AND over-popped by 6 -> Rose's init A7 drifted a few
-      // bytes per call until an rts returned into extended-float bytes @0xA953FD4E. ADX2FIXVAL forces the old
-      // by-value form for any module that genuinely pushes the 10-byte extended.)
+      // result to the reserved slot (now at [A7]) AND D0. ADX2FIXVAL forces the by-value form for a
+      // module that genuinely pushes the 10-byte extended.
       double scale = (opcode==0xA846)? 1073741824.0 : 65536.0;
       double v;
       if(getenv("ADX2FIXVAL")){ v=ext80_read(mem, r.a[7]); r.a[7]+=10; }
@@ -6238,22 +5656,17 @@ int main(int argc, char** argv){
       r.d[0].u=(uint32_t)(int32_t)s;
       if(!getenv("ADX2FIXVAL")){ try{ mem->write_u32b(r.a[7], r.d[0].u); }catch(...){} }  // result -> reserved slot
     } else if(opcode==0xA842){ // Frac2Fix(x:Fract):Fixed — Pascal FUNCTION trap
-      // addm 660 (TRAP-IDENTITY FIX): 0xA842 is Frac2Fix (Fract 2.30 -> Fixed 16.16 = x>>14), NOT Fix2X.
-      // resource_dasm/m68kdasm labels it Frac2Fix, and the corpus uses it that way: Spotlight's BUILDSPOTS
-      // (`FracSin -> A842 -> FixMul(speed) -> Fix2Long`) and Fractal Forest (`FracCos -> A842 -> FixMul`)
-      // push a 4-byte Fract and read a 4-byte Fixed back from the reserved slot. The old Fix2X handler
-      // (below) converted to an 80-bit EXTENDED and wrote 10 bytes -> the caller's 4-byte read got the
-      // extended's sign/exponent bytes = a garbage-magnitude Fixed (addm 661 §iv: Spotlight's velocity
-      // too large / spots teleport). Serve the real Frac2Fix and the magnitude is right. (legacy-cleanup
-      // addm 679: the ADFRACLEGACY/ADNOSCALARPASCAL A/B revert to the old Fix2X-for-A842 handling below
-      // is retired — dead by default in main.)
+      // 0xA842 is Frac2Fix (Fract 2.30 -> Fixed 16.16 = x>>14), NOT Fix2X: resource_dasm/m68kdasm
+      // labels it Frac2Fix and the corpus uses it that way — Spotlight's BUILDSPOTS (`FracSin -> A842
+      // -> FixMul(speed) -> Fix2Long`) and Fractal Forest (`FracCos -> A842 -> FixMul`) push a 4-byte
+      // Fract and read a 4-byte Fixed back from the reserved slot. Converting to an 80-bit extended
+      // here would write 10 bytes and hand the caller's 4-byte read the sign/exponent bytes.
       int32_t fr=(int32_t)mem->read_u32b(r.a[7]); r.a[7]+=4;
       int64_t fx=((int64_t)fr + (1<<13)) >> 14;   // 2.30 -> 16.16
       if(fx> 2147483647LL) fx= 2147483647LL; if(fx<-2147483648LL) fx=-2147483648LL;
       r.d[0].u=(uint32_t)(int32_t)fx; try{ mem->write_u32b(r.a[7], r.d[0].u); }catch(...){}
       if(getenv("ADFRACLOG")) fprintf(stderr,"    Frac2Fix in=%08X -> %08X\n",(uint32_t)fr,r.d[0].u);
     } else if(opcode==0xA845){ // Frac2X: Fract (4B on stack) -> extended80 result
-      // (A842/Fix2X no longer reaches here — see the Frac2Fix branch above; it now always claims A842.)
       // Pascal returns the 10-byte struct via a caller-reserved slot pushed BELOW the arg: [A7]=Fixed(4),
       // [A7+4]=&result(4)... but the common trap form writes the extended to [A7+4] (the reserved 10B) and
       // pops the 4-byte arg. Convert and write ext80 to the result area just above the popped arg.
@@ -6262,8 +5675,6 @@ int main(int argc, char** argv){
       r.a[7]+=4; ext80_write(mem, r.a[7], v);   // result extended at the (now-top) reserved slot
     } else if(opcode==0xAA03){ // NewPixMap():PixMapHandle - no args; caller reserved a 4-byte result slot.
       // The self-loading ADgm modules (Marbles) build an offscreen via NewPixMap + CopyPixMap(port,pm).
-      // Unimplemented, NewPixMap left a stale stack value as the "handle"; the module then deref'd it
-      // (movea.l [A0],A1; move.w [A1+0x20]) -> fault -> its own "Marbles: Can't allocate" error path.
       // Allocate a real PixMap (0x32 bytes) initialised from the screen pixmap (valid bounds/rowBytes/
       // pixelSize/colorTable) and return a Handle to it in the reserved slot (caller pops it).
       uint32_t pm=mem->allocate(0x32); mem->memset(pm,0,0x32);
@@ -6302,14 +5713,14 @@ int main(int argc, char** argv){
       // block gives empty strings (strlen 0 = OK path). dll#-gated via g_dll_adfd.
       r.a[0] = g_dll_adfd; r.d[0].u = 0;  // A0=response ptr, D0=noErr
       if(getenv("ADGESTLOG")) fprintf(stderr,"    Gestalt 'ADfd' -> response=%08X (faceplate descriptor)\n", g_dll_adfd);
-    } else if(opcode==0xA1AD && r.d[0].u==0x666F6C64 && getenv("ADREALFS")){ ADSTUB("A1AD_Gestalt_fold_stub"); // addm 354: Gestalt('fold')
+    } else if(opcode==0xA1AD && r.d[0].u==0x666F6C64 && getenv("ADREALFS")){ ADSTUB("A1AD_Gestalt_fold_stub"); // Gestalt('fold')
       // FindFolder-availability probe. ADFOLDAVAIL=1 -> report AVAILABLE (resp=1); default under ADREALFS
       // -> report UNAVAILABLE (gestaltUndefSelectorErr) so the engine's LinkModule takes its relative-path
       // fallback (FSMakeFSSpec, which we serve) instead of the FindFolder folder-walk we can't satisfy.
       if(getenv("ADFOLDAVAIL")){ r.a[0]=1; r.d[0].u=0; }
       else { r.a[0]=0; r.d[0].u=0xFFFFEA51; }   // gestaltUndefSelectorErr = -5551
       if(getenv("ADFSLOG")) fprintf(stderr,"    Gestalt('fold') -> %s\n", getenv("ADFOLDAVAIL")?"avail":"UNAVAIL");
-    } else if(opcode==0xA1AD && r.d[0].u==0x71642020 && g_dll_ay && !getenv("ADNOQDGEST")){ ADSTUB("A1AD_Gestalt_qd_ver_const"); // addm 369: Gestalt('qd  ')
+    } else if(opcode==0xA1AD && r.d[0].u==0x71642020 && g_dll_ay && !getenv("ADNOQDGEST")){ ADSTUB("A1AD_Gestalt_qd_ver_const"); // Gestalt('qd  ')
       // gestaltQuickdrawVersion. 4.0/dll# module init (e.g. Art Critic) queries 'qd  ' and, when it goes
       // UNANSWERED, reads stack garbage as the QD version -> computes a bad dispatch and branches wild
       // (observed: jump to 0x00430000, a7=0x170). Forge a plausible 32-bit Color QuickDraw version so the
@@ -6342,21 +5753,12 @@ int main(int argc, char** argv){
       if(getenv("ADGESTLOG")) fprintf(stderr,"    Gestalt '%c%c%c%c'(%08X) -> %08X known=%d\n",
         (char)(sel>>24),(char)(sel>>16),(char)(sel>>8),(char)sel, sel, resp, known);
     } else if(opcode==0xA83F){ // Long2Fix(x:LongInt):Fixed = x<<16
-      // addm 660 §SCALAR (DEFAULT ON): the scalar conversions are ALSO Pascal FUNCTION traps. Spotlight's
-      // BUILDSPOTS velocity chain (fn0x782) and Fractal Forest call `clr.l -(A7); push arg; A83F;
-      // move.l (A7)+,D0` — the result is read from the RESERVED SLOT, not D0. D0-only left Spotlight reading
-      // the clr.l seed 0 -> zero velocity -> frozen spots (addm 661 §iv, masked as "frozen velocity" for 3
-      // rounds). Writing the slot UNFREEZES Spotlight's velocity: under the authentic reveal path
-      // (ADSPOTFULLSCR / g_spot_reveal) the spots now MOVE (20/20 distinct frames) while holding EXACTLY
-      // 15720 nonblack (the two oval spots) with edge bounce — no accumulation (VERIFIED; the reveal agent's
-      // acceptance gate). The magnitude is correct because A842 is also fixed to Frac2Fix below (the reveal
-      // agent's ADFMEXT lacked that -> their spots teleported/accumulated 26k->40k). Meadow stays a valid
-      // meadow (different flower placement); Fractal Forest grows an authentic vertical trunk.
-      // (legacy-cleanup addm 679: the ADFRACLEGACY/ADNOSCALARPASCAL A/B revert to D0-only is retired —
-      // dead by default in main.)
+      // The scalar conversions are Pascal FUNCTION traps too: callers `clr.l -(A7); push arg; A83F;
+      // move.l (A7)+,D0` read the result from the RESERVED SLOT, not D0. Write both. The magnitude is
+      // only right because A842 is served as Frac2Fix (below) rather than Fix2X.
       int32_t x=(int32_t)mem->read_u32b(r.a[7]); r.a[7]+=4; r.d[0].u=(uint32_t)(x<<16);
       try{ mem->write_u32b(r.a[7], r.d[0].u); }catch(...){}
-    } else if(opcode==0xA840){ // Fix2Long(x:Fixed):LongInt = round(x>>16) — scalar (see A83F §SCALAR note)
+    } else if(opcode==0xA840){ // Fix2Long(x:Fixed):LongInt = round(x>>16) — scalar (see the A83F note)
       int32_t x=(int32_t)mem->read_u32b(r.a[7]); r.a[7]+=4; r.d[0].u=(uint32_t)(int32_t)((x+0x8000)>>16);
       try{ mem->write_u32b(r.a[7], r.d[0].u); }catch(...){}
     } else if(opcode==0xA869){ // FixRatio(numer,denom:Integer):Fixed = (numer<<16)/denom — scalar (see A83F note)
@@ -6366,54 +5768,14 @@ int main(int argc, char** argv){
     } else if(opcode==0xA86C){ // FixRound(x:Fixed):Integer = (x+0x8000)>>16 — result in D0
       int32_t x=(int32_t)mem->read_u32b(r.a[7]); r.a[7]+=4;
       r.d[0].u=(r.d[0].u&0xFFFF0000)|(uint16_t)(int16_t)((x+0x8000)>>16);
-    } else if(opcode==0xA847||opcode==0xA848){ // FracCos/FracSin(x:Fixed):Fract — TWO calling conventions.
-      // (A) REGISTER-based (Mac ROM / Fractal Forest): input Fixed(16.16 radians) in D0, result Fract(2.30) in D0.
-      //     The module chains FracCos->FracMul with D0 and no intervening push.
-      // (B) STACK-based (ADgm engine / GeoBounce, addm 378/403): the module pushes the Fixed arg (`move.l Dn,-(A7)`),
-      //     traps, then pops the Fract result straight back off the stack (`move.l (A7)+,<dst>`). The ADgm runtime's
-      //     own fixed-point FracSin/Cos returns the result IN the arg slot, NOT D0. With the register-only impl the
-      //     module read back its un-transformed angle -> D6/D7 (cos/sin) held garbage -> exploded sprite coordinates
-      //     -> degenerate CopyBits/FillRect rects (s[32000,32000,-31999,-31999]) -> nothing lands on screen.
-      // Discriminate by the instruction immediately AFTER the trap word (r.pc): a `move.l (A7)+, Dn`
-      // (pop the result straight into a DATA register) means convention (B) — read the input from the stack and
-      // write the result there. Mask (op & 0xF1FF)==0x201F = move.l, src (A7)+, dest mode Dn, any data reg.
-      // This is specifically the GeoBounce physics pattern (`move.l (A7)+,D6/D7`). It intentionally EXCLUDES
-      // `movea.l (A7)+,An` (e.g. Fractal Forest's 0x205F) and memory-dest pops, so register-based FracCos/FracMul
-      // chains (Fractal Forest) stay byte-identical — zero regression (delta-verified).
-      // (C) FULL PASCAL FUNCTION form (Frost & Fire, addm 402): the caller RESERVES a result slot AND pushes the
-      //     arg (`clr.l -(A7); move.l Dn,-(A7); trap; move.l (A7)+,Dn`) — TWO slots, so the trap must POP the arg
-      //     and leave the result in the reserved slot (unlike GeoBounce's 1-slot form which pops nothing). Without
-      //     the pop, F&F's RotateMapping (FracSin+FracCos) leaks 8 bytes -> movem epilogue restores A3 8 bytes off
-      //     -> deref fault at 0x100788 (address 726F7374). Name-gated so GeoBounce's 1-slot form is untouched.
-      // addm 603: STRUCTURAL per-call-site discriminator (retires the GeoBounce NAME-GATE). The convention
-      // is read from the RESULT CONSUMER in the instruction stream at the return address (r.pc):
-      //   REGISTER form (Fractal Forest): result in D0 — the consumer is `movea.l (A7)+,An` (0x205F, a
-      //     register-restore, NOT the Fract), a trap (A842 Fix2X / A84A FracMul chain), or `tst.l (A7)+`
-      //     (0x4A9F). NONE is a `move.l (A7)+,<data-reg|memory>`.
-      //   STACK/PASCAL form (GeoBounce, Frost & Fire): the module immediately pops the Fract off the stack
-      //     with `move.l (A7)+, <dst>` where dst is a DATA register (GeoBounce spin 0x2C1F/0x2E1F, F&F
-      //     0x2A1F/0x2C1F, Spotlight 0x201F) OR MEMORY (GeoBounce bounce 0x295F, init `movea.l (A3),A0 ;
-      //     move.l (A7)+,$38(A0)` = 0x2053 then 0x215F). The addm-403 test saw only the Dn case (0x201F mask)
-      //     and MISSED GeoBounce's memory-dest pops (addm 591 bug). Generalize: a `move.l (A7)+, <dst>` with
-      //     dst mode != An (mode 1, which is the register-restore movea) => STACK, optionally one A7-neutral
-      //     `movea.l (An),Am` reload skipped first. All STACK forms use the 2-slot Pascal treatment (read the
-      //     arg from [A7], POP it, write the result to the reserved slot the module pops) — GeoBounce uses
-      //     ONLY A848 so this reproduces its former Pascal 2-slot behavior at EVERY site by construction.
-      //     Verdict cached per return-PC.)
-      // addm 660: UNIFIED AUTHENTIC SEMANTIC (default ON). The real Toolbox FixMath traps are Pascal
-      // FUNCTION traps: the caller RESERVES a 4-byte result slot, PUSHES the Fixed arg, invokes the trap
-      // (inline or via a GetTrapAddress trampoline), and reads the Fract result back from the reserved
-      // slot. Disassembly of EVERY corpus call site (Rose, Frost & Fire, GeoBounce, Spotlight AND
-      // Fractal Forest) confirms this ONE convention — there is no register-only caller. Fractal Forest's
-      // consumers (`movea.l (A7)+,An` feeding the next FracMul; `tst.l (A7)+`; `add.l (A7)+,Dn`) read the
-      // result FROM THE STACK SLOT exactly like the others; the addm-403 discriminator merely failed to
-      // recognize those consumers as stack-pops and fell to a fictitious "register" path that fed sin/cos
-      // the un-pushed D0 (leftover MoveTo coord) -> Fractal Forest rendered a single degenerate line.
-      // Serving Pascal form unconditionally makes every site correct with ZERO per-module classification —
-      // the old F&F/Rose name gate and the addm-603 structural discriminator (retained above under
-      // ADFRACNAMED/ADFRACLEGACY) are both unnecessary. (legacy-cleanup addm 679: that A/B revert path,
-      // and the g_frac_pascal state it read, are retired — dead by default in main. See addm 660 for the
-      // site-by-site evidence.)
+    } else if(opcode==0xA847||opcode==0xA848){ // FracCos/FracSin(x:Fixed):Fract — Pascal FUNCTION trap.
+      // The caller RESERVES a 4-byte result slot, PUSHES the Fixed (16.16 radians) arg, invokes the
+      // trap (inline or via a GetTrapAddress trampoline) and reads the Fract (2.30) result back from
+      // the reserved slot; consumers take the form `move.l (A7)+,Dn`, a memory-dest pop, `movea.l
+      // (A7)+,An` feeding the next FracMul, `tst.l (A7)+` or `add.l (A7)+,Dn`. Every corpus call site
+      // (Rose, Frost & Fire, GeoBounce, Spotlight, Fractal Forest) uses this ONE convention, so the
+      // trap pops the arg and writes the result to the reserved slot for every caller — no per-module
+      // classification.
       int32_t x = (int32_t)mem->read_u32b(r.a[7]);
       double ang=(double)x/65536.0;
       double v=(opcode==0xA847)?cos(ang):sin(ang);        // FracCos=0xA847, FracSin=0xA848
@@ -6423,37 +5785,31 @@ int main(int argc, char** argv){
       r.d[0].u=res;
       r.a[7]+=4; mem->write_u32b(r.a[7], res);   // 2-slot Pascal: pop arg, result -> reserved slot
       if(getenv("ADFRACLOG")) fprintf(stderr,"    FracSin/Cos op=%04X pc=%08X inX=%08X ang=%g -> %08X\n",opcode,r.pc,(uint32_t)x,ang,res);
-    } else if(opcode==0xA84A){ // FracMul(x,y):Fract = round((x*y)>>30) — x (Fract 2.30, e.g. FracCos result)
-      // in D0; y on the stack top (a Fixed 16.16 length), consumed (pop 4). Product 2.30*16.16 >>30 = a
-      // Fixed 16.16 delta, which the module then >>16's to pixels. Result in D0.
-      // addm 660: UNIFIED — FracMul is a Pascal FUNCTION trap for EVERY caller. Fractal Forest's chain
-      // (`FracCos -> movea.l (A7)+,An -> add const -> push -> FracMul -> move.l (A7)+,Dn`) reserves a
-      // result slot and reads the FracMul result from it, exactly like Frost & Fire (the immediately
-      // chained `A847;A84A` is two Pascal calls: FracCos writes its slot, which IS FracMul's first arg).
-      // (legacy-cleanup addm 679: the ADFRACLEGACY A/B revert to the old name-gated/register-D0 split is
-      // retired — dead by default in main.)
+    } else if(opcode==0xA84A){ // FracMul(x,y):Fract = round((x*y)>>30) — Pascal FUNCTION trap: the caller
+      // reserves a result slot and pushes x then y, so the product of a Fract 2.30 (e.g. a FracCos
+      // result) and a Fixed 16.16 length comes back in that slot as a Fixed 16.16 delta the module
+      // then >>16's to pixels. A chained `A847;A84A` is two Pascal calls: FracCos writes its slot,
+      // which IS FracMul's first arg.
       {
         // Pascal FUNCTION form: caller reserved a result slot, pushed x then y, so
         // [A7]=y, [A7+4]=x, [A7+8]=reserved. Pop BOTH args (a7+=8) and write the result to the reserved
-        // slot (now top) + D0. The old register-D0 form popped nothing -> 8-byte A7 leak/call -> movem
-        // epilogue restores A3 from stack junk (0xFF5B0000) -> handle-deref fault.
+        // slot (now top) + D0.
         int32_t y=(int32_t)mem->read_u32b(r.a[7]), x=(int32_t)mem->read_u32b(r.a[7]+4); r.a[7]+=8;
         int32_t res=(int32_t)((((int64_t)x*(int64_t)y)+(1<<29))>>30);
         r.d[0].u=(uint32_t)res; try{ mem->write_u32b(r.a[7], (uint32_t)res); }catch(...){}
         if(getenv("ADFRACLOG")) fprintf(stderr,"    FracMul(pascal) x=%08X y=%08X -> %08X\n",(uint32_t)x,(uint32_t)y,(uint32_t)res);
       }
     } else if(opcode==0xA82E){ // _Pack12 = Color Picker Package (Inside Macintosh VI). Selector WORD on stack
-      // top, Pascal args below it. addm 545 (was addm 543 item 10 NEEDS-RE): RE'd Photon's call @00100FF6 —
+      // top, Pascal args below it. Photon's call @00100FF6:
       //   pea (A3+0xB4)         ; INPUT  hsl  (hue=green-band+12bit jitter, sat=0xFFFF, light=0x8000..0xFFFF)
       //   pea (A3+D0.w+0x1E)    ; OUTPUT rgb  (D0=idx*6 -> walking 6-byte-stride palette array, left ZEROED)
       //   move.w #5,-(A7) ; _Pack12 ; moveq #0,D0   (result discarded)
       // Pascal proc pushes args L->R so [A7+6]=hsl(in), [A7+2]=rgb(out); pop 10, no result slot. Selector 5 =
       // HSL2RGB per the Color Picker table (1 Fix2SmallFract, 2 SmallFract2Fix, 3 CMY2RGB, 4 RGB2CMY,
-      // 5 HSL2RGB, 6 RGB2HSL, 7 HSV2RGB, 8 RGB2HSV, 9 GetColor=UI dialog=INAPPLICABLE). Previously the host
-      // stubbed sel 5 (popped 10 but wrote NOTHING) so Photon's palette stayed all-zero -> black particles;
-      // now the real HSL->RGB fills it (glowing green->white by lightness). All 3..8 are 2-ptr procs (in@A7+6,
-      // out@A7+2, pop 10) implemented for real; 1/2 are value functions (documented pops). Only Photon calls
-      // 0xA82E in the 88-module corpus (census) -> zero regression surface. Opt-out ADNOPACK12 = legacy stub.
+      // 5 HSL2RGB, 6 RGB2HSL, 7 HSV2RGB, 8 RGB2HSV, 9 GetColor=UI dialog=INAPPLICABLE). The handler
+      // does the real conversion (Photon's palette glows green->white by lightness); a stub that
+      // pops but writes nothing leaves it all-zero. All 3..8 are 2-ptr procs (in@A7+6, out@A7+2,
+      // pop 10); 1/2 are value functions with documented pops. Opt-out ADNOPACK12 = balance stub.
       { uint16_t sel=mem->read_u16b(r.a[7]);
         if(getenv("ADPACK12LOG")){ uint32_t p1=mem->read_u32b(r.a[7]+2), p2=mem->read_u32b(r.a[7]+6);
           fprintf(stderr,"    Pack12 sel=%u pc=%08X out@%08X in@%08X",sel,r.pc,p1,p2);
@@ -6482,13 +5838,13 @@ int main(int argc, char** argv){
             r.a[7]+=2; r.d[0].u=0; break;
         }
       }
-    } else if(opcode==0xADE9){ // _Pack2 autoPop — CodeWarrior 68K integer-math runtime (LIB510, addm 377).
+    } else if(opcode==0xADE9){ // _Pack2 autoPop — CodeWarrior 68K integer-math runtime (LIB510).
       // These "packages" are the CW 68K signed/unsigned 32-bit integer-math helpers (___mul/___div/…),
       // dispatched by a selector glue:  movea.l (A7)+,A0 ; move.w D2,-(A7) ; move.l A0,-(A7) ; _Pack2,autoPop.
       // On real HW the autoPop trap dispatches to the CW runtime (installed by the CRT __start that the
       // two-A5 path skips) and RETURNS to the caller (top of stack), popping the callee's args (Pascal
-      // callee-clean). The host had no handler -> the trap fell through the glue tail `moveq #N,D2 ;
-      // jmp [A5+0x5858]` back to the glue entry -> infinite self-loop / stack overflow (Art Critic init).
+      // callee-clean). Without a handler the trap falls through the glue tail `moveq #N,D2 ;
+      // jmp [A5+0x5858]` back to the glue entry -> infinite self-loop / stack overflow.
       // Stack at the trap: [A7]=caller-return(4), [A7+4]=selector(2), [A7+6..]=the pushed long args.
       // Implement the selectors init exercises (32x32 multiply for rand()'s LCG etc.); pop return(4)+
       // selector(2)+args, return to caller with the result in D0. Only twoA5 large 4.0 modules emit this.
@@ -6499,24 +5855,23 @@ int main(int argc, char** argv){
           default:
             if(g_census_on){ char lb[48]; snprintf(lb,sizeof(lb),"_Pack2 sel=0x%02X",sel);
               census_note(((uint64_t)opcode<<16)|sel, r.pc, lb, "PACK2-DEFAULT-pop6"); }
-            // addm 551: gate this per-call stderr write behind ADPACK2LOG (was `||true` — a debug-residue
-            // that spammed stderr on EVERY unimplemented _Pack2 selector; the l40 dll# engine modules hit it
-            // thousands of times per frame, throttling them so hard they never reach their animation phase).
+            // Keep this per-call stderr write gated behind ADPACK2LOG: the dll# engine modules hit
+            // unimplemented selectors thousands of times per frame, and logging them throttles the run
+            // so hard they never reach their animation phase.
             if(getenv("ADPACK2LOG")) fprintf(stderr,"    [_Pack2 UNIMPL sel=%u caller=%08X a1=%08X a2=%08X]\n",sel,caller,a1,a2); ADSTUB("ADE9_Pack2_default");
             pop=6; break;
         }
         if(getenv("ADPACK2LOG")) fprintf(stderr,"    _Pack2 sel=%u a1=%08X a2=%08X -> %08X (pop %d) caller %08X\n",sel,a1,a2,res,pop,caller);
         r.a[7]=sp+pop; r.pc=caller; r.d[0].u=res; }
-    } else if(opcode==0xAC2E){ // _Pack12 autoPop — CW selector-glue idiom, IDENTICAL to _Pack2/0xADE9 (addm 428).
+    } else if(opcode==0xAC2E){ // _Pack12 autoPop — CW selector-glue idiom, IDENTICAL to _Pack2/0xADE9.
       // Glue @0x100A96 (Meadow): move.l (A7)+,D0 [pop bsr-return -> selector]; movea.l (A7)+,A1;
       // move.w D0,-(A7); move.l A1,-(A7); _Pack12,autoPop. Trampoline table @0x100AA8 (sel 0..9). Static
       // scan of Meadow's WHOLE relocated segment: only selector 8 is issued there (3 call sites
       // 0x1023C6/25F0/2688), each pushing TWO 4-byte pointer args -> argbytes=8 -> pop=6+8=14.
       // Stack at trap: [sp]=caller-return(4), [sp+4]=selector(2), [sp+6]=arg1 ptr(4), [sp+0xA]=arg2 ptr(4).
       //
-      // addm 707: the "Meadow is the ONLY module touching 0xAC2E" claim is REFUTED — Modern Art's
-      // ROTHKO style (and only that style; Mondrian/Pollock never trap here) issues selector 7 from
-      // three sites 0x104EE4/0x104F1A/0x104F50. Disassembled:
+      // Modern Art's ROTHKO style (and only that style; Mondrian/Pollock never trap here) issues
+      // selector 7 from three sites 0x104EE4/0x104F1A/0x104F50:
       //     move.w -12(A6),-10(A6)                  ; hsv.hue   = the band hue
       //     ...rand(0x8ACF..0xFFFF)... -> -8(A6)    ; hsv.sat
       //     ...rand(0x8ACF..0xFFFF)... -> -6(A6)    ; hsv.value
@@ -6526,14 +5881,11 @@ int main(int argc, char** argv){
       // i.e. the SAME Color Picker Package procs the 0xA82E arm already implements (selector 7 =
       // HSV2RGB), reached through the autoPop glue instead of the direct trap. Selectors 3..7 are all
       // Proc(inColor; VAR outColor), so pin=[sp+0xA], pout=[sp+6], pop=6+8=14 — exactly the A82E
-      // pin/pout convention (out pushed last, hence nearer the stack top). The old default arm wrote
-      // NOTHING and popped only 6, so Rothko's three RGBColors stayed at their zeroed init value:
-      // black fields painted on a black screen = the field-reported "every style but Mondrian does
-      // nothing". This is addm 545's Photon bug (stub pops but never fills the palette) one trap-arm
-      // over. Selector 8 stays on the Meadow path: meadow_pack12_sel8 is an empirical fit whose
-      // src/dst roles are the REVERSE of this Pascal convention (mode 2 treats [sp+6] as the source),
-      // and Meadow does not strict-animate either way — reconciling it is Meadow's lane, not this fix.
-      // ADNOPACK12 reverts both Pack12 arms to the legacy balance-only stub.
+      // pin/pout convention (out pushed last, hence nearer the stack top). A stub that writes NOTHING
+      // and pops only 6 leaves Rothko's three RGBColors at their zeroed init value: black fields on a
+      // black screen. Selector 8 stays on the Meadow path: meadow_pack12_sel8 is an empirical fit
+      // whose src/dst roles are the REVERSE of this Pascal convention (mode 2 treats [sp+6] as the
+      // source). ADNOPACK12 reverts both Pack12 arms to the balance-only stub.
       { uint32_t sp=r.a[7]; uint32_t caller=mem->read_u32b(sp); uint16_t sel=mem->read_u16b(sp+4);
         uint32_t p1=mem->read_u32b(sp+6), p2=mem->read_u32b(sp+0xA); int pop=6; uint32_t res=0;
         switch(sel){
@@ -6558,14 +5910,13 @@ int main(int argc, char** argv){
         if(g_tm_primed && !g_pf_hook_installed && g_pf_install_hook) g_pf_install_hook(); }
     } else if(opcode==0xA059){ // RmvTime(tmTaskPtr A0) — remove the task.
       g_tm_primed=false;
-    } else if(opcode==0xA9C6){ // Secs2Date(D0=seconds since 1904-01-01, A0=&DateTimeRec) — was UNHANDLED (no-op).
+    } else if(opcode==0xA9C6){ // Secs2Date(D0=seconds since 1904-01-01, A0=&DateTimeRec)
       // The run-once-then-inert LIFE/PATTERNS class (Life & All, Guernsey Madness, Einstein, Slow Burn,
       // Frost & Fire) gates its per-frame generation-step on the WALL-CLOCK time-of-day CHANGING:
       // XGetTimeAndDate reads Time@0x20C, calls Secs2Date, and DoDrawFrame steps only when the resulting
-      // time differs from the previous frame's. With Secs2Date a no-op the DateTimeRec stayed constant, so
-      // the step was skipped forever. Fill the DateTimeRec properly; combined with the per-frame Time@0x20C
-      // advance below, the seconds field changes each frame and the step fires. (Correct classic-Mac
-      // semantics; zero cost for modules that never call Secs2Date.)
+      // time differs from the previous frame's, so the DateTimeRec must be filled properly; combined
+      // with the per-frame Time@0x20C advance below, the seconds field changes each frame and the
+      // step fires. Correct classic-Mac semantics, and zero cost for modules that never call it.
       uint32_t secs=r.d[0].u, rec=r.a[0];
       uint32_t totalDays=secs/86400, rem=secs%86400;
       int hour=(int)(rem/3600), minute=(int)((rem%3600)/60), second=(int)(rem%60);
@@ -6596,21 +5947,18 @@ int main(int argc, char** argv){
       r.a[7]+=8;                                          // stub's rts now returns A7 -> result slot
       if(getenv("ADTRAPLOG")) fprintf(stderr,"      ADmfAlloc sz=%u -> H=%08X blk=%08X\n",sz,h,blk);
     } else if(opcode==0xAAFD){ // ADSd extension allocator ADSdAlloc(arg1):Ptr — host-serviced Pascal fn.
-      // REACHED ONLY FROM THE dll# ARM (addm 791; the "name-gated to the Nocturnes bucket
-      // (Nocturnes/Rose/Zot!/Einstein)" line that stood here died with the addm-773 key retirement —
-      // the classic arm now gets the return-0 stub, so nothing classic reaches this trap). Measured
-      // callers on current main, 200 f: Clocks x34 via AD3_Sound OPENSOUND's [record+0x02]; and,
-      // because this same address also backs +0x06/+0x0A/+0x0E, Bad Dog's CLOSESOUND x1 and Daredevil
-      // Dan's PLAYSOUND x145 / QUIETSOUND x6 land here too — on arg counts this handler does not
-      // match (see the 'ADSd' block). Called as a Pascal fn with
-      // ONE 4-byte arg and a long result slot; the requested size arrives in D1. Stack at entry:
-      // [A7]=ret, [A7+4]=arg1, [A7+8]=result slot. The caller (@0x101410) reads the result back from
-      // the result slot (movea.l (A7)+,A3; move.l A3,D0) and requires it NON-ZERO. The success path
-      // @0x101412 then does `A0 = [result]; [A0] = subObject` — i.e. it dereferences the result as a
-      // HANDLE (like ADmf): [result] must be a valid master pointer to a data block into whose [0]
-      // slot the engine stores the owning sub-object. So return a real Handle (ptr -> master ptr ->
-      // zeroed data block, size from D1 floored). Then Pascal-clean the single arg so the stub's rts
-      // lands A7 on the result slot.
+      // Reached only from the dll# arm; the classic arm gets the return-0 stub, so nothing classic
+      // reaches this trap. Callers seen: Clocks via AD3_Sound OPENSOUND's [record+0x02] and — because
+      // this same address also backs +0x06/+0x0A/+0x0E — Bad Dog's CLOSESOUND and Daredevil Dan's
+      // PLAYSOUND/QUIETSOUND, whose arg counts this handler does not match (see the 'ADSd' block).
+      // Called as a Pascal fn with ONE 4-byte arg and a long result slot; the requested size arrives
+      // in D1. Stack at entry: [A7]=ret, [A7+4]=arg1, [A7+8]=result slot. The caller (@0x101410) reads
+      // the result back from the result slot (movea.l (A7)+,A3; move.l A3,D0) and requires it
+      // NON-ZERO. The success path @0x101412 then does `A0 = [result]; [A0] = subObject` — i.e. it
+      // dereferences the result as a HANDLE (like ADmf): [result] must be a valid master pointer to a
+      // data block into whose [0] slot the engine stores the owning sub-object. So return a real Handle
+      // (ptr -> master ptr -> zeroed data block, size from D1 floored). Then Pascal-clean the single
+      // arg so the stub's rts lands A7 on the result slot.
       uint32_t sz = r.d[1].u & 0xFFFF; if(sz < 0x40) sz = 0x40;
       uint32_t rslot = r.a[7]+8;
       uint32_t blk = mem->allocate(sz); mem->memset(blk,0,sz);
@@ -6649,8 +5997,8 @@ int main(int argc, char** argv){
       mem->write_u32b(canvasObj + 0x1E, g_dll_canvasbs);
       g_dll_canvasobj = canvasObj;   // capture for ADCANVASFIX pre-draw patch experiment
       // EXPERIMENT (ADCANVASPIXMAP): the AD3 draw-commit chain is MacOffScreenPixels::AccessPixels/LockPixels
-      // -> IMacColorPixels builds a row-table from the LOCKED pixmap -> C_SetPixel8BitOpr writes (addenda
-      // 182-184). LockPixels reads the pixmap Handle at [this+0x38] (offscreen, flag [this+4]!=0). Build a
+      // -> IMacColorPixels builds a row-table from the LOCKED pixmap -> C_SetPixel8BitOpr writes.
+      // LockPixels reads the pixmap Handle at [this+0x38] (offscreen, flag [this+4]!=0). Build a
       // real Mac PixMap {baseAddr=g_fb, rowBytes=W|0x8000, bounds=[0,0,Hh,W], pixelSize=8, cmpCount/Size=1/8}
       // as a Handle and wire it at canvasObj+0x38 with +0x04=1, so LockPixels returns g_fb.
       if(getenv("ADCANVASPIXMAP")){
@@ -6741,7 +6089,7 @@ int main(int argc, char** argv){
       uint32_t ret = mod_retstack.empty()? 0x00000FF0u : mod_retstack.back(); if(!mod_retstack.empty()) mod_retstack.pop_back();
       r.pc=ret;
       if(getenv("AD2A5LOG")) fprintf(stderr,"    [2A5 leave] A5<-%08X(mod) resume=%08X depth=%zu\n",lib510.a5_mod,ret,mod_retstack.size());
-    } else if(opcode==0xAAFA && lib510.twoA5){ // addm 460: bidirectional A5-switch ENTER (universal trampoline).
+    } else if(opcode==0xAAFA && lib510.twoA5){ // bidirectional A5-switch ENTER (universal trampoline).
       // Reached via a self-reading TV-band island {0xAAFA ; target.L} in EITHER world (target read from mem[pc]
       // since the A-line fetch left pc at island+2; NO register is clobbered). [A7]=caller return, args
       // above. Classify the target's fragment world (module code -> a5_mod, else library a5_lib), save the
@@ -6771,7 +6119,7 @@ int main(int argc, char** argv){
         if(getenv("AD2A5LOG")) fprintf(stderr,"    [2A5sw enter] target=%08X A5 %08X->%08X(%s) ret=%08X depth=%zu\n",
           target,curA5,targetA5,targetA5==lib510.a5_mod?"mod":"lib",savedRet,a5sw_stack.size());
       }
-    } else if(opcode==0xAAEE && lib510.twoA5){ // addm 460: bidirectional A5-switch RESTORE stub.
+    } else if(opcode==0xAAEE && lib510.twoA5){ // bidirectional A5-switch RESTORE stub.
       uint32_t savedA5=lib510.a5_mod, savedRet=0x00000FF0u;
       if(!a5sw_stack.empty()){ savedA5=a5sw_stack.back().first; savedRet=a5sw_stack.back().second; a5sw_stack.pop_back(); }
       r.a[5]=savedA5; r.pc=savedRet;
@@ -6799,19 +6147,16 @@ int main(int argc, char** argv){
       // plain rts (pop return only); the stub word after the trap is a real 0x4E75 but we already
       // consumed nothing, so advance PC past the trap and let the stub's rts run naturally.
     } else if(opcode==0xA975){ // TickCount:LongInt — read the Mac Ticks clock into the reserved stack slot
-      // addm 742: this used to do `g_ticks++` — asking the time made time pass. That is not a clock,
-      // and it silently rewrites every "spend N ticks doing work" budget loop into "do exactly N
-      // iterations": Fractal Forest's tree grower (ADgm 0x00100236: `t0=TickCount; while(TickCount <
-      // t0+5) growOneNode()`) got 5 nodes per frame instead of a tree, and every module's clock ran
-      // fast in proportion to how often it polled (FF also aged its 30 s forest out ~6x early, so the
-      // tree was wiped mid-trunk — the census' "bare trunk, no branches"). Ticks now advance ONLY from
-      // the two real time sources: the per-frame step (ADTICKRATE / wall clock) and the 256-cycle
-      // intra-frame tick, which is what actually breaks Ticks busy-waits. That tick is universal —
-      // the lean path runs it off the InterruptManager (see the addm-710 pf_im block), so it survives
-      // even the 42 modules that install NO debug hook, and the full hook keeps its own copy. Verified
-      // load-bearing rather than assumed: with BOTH disabled (ADNOTICKSPIN + the advance below) Fractal
-      // Forest hangs to the timeout; with only this one removed it does not, and it is insensitive to
-      // the 256-cycle period. ADNOTICKCLOCK restores the per-call advance.
+      // Reading the clock must NOT make time pass: an advance-per-call rewrites every "spend N ticks
+      // doing work" budget loop into "do exactly N iterations" (Fractal Forest's tree grower, ADgm
+      // 0x00100236: `t0=TickCount; while(TickCount < t0+5) growOneNode()`, grows 5 nodes per frame
+      // instead of a tree) and runs every module's clock fast in proportion to how often it polls.
+      // Ticks advance ONLY from the two real time sources: the per-frame step (ADTICKRATE / wall
+      // clock) and the 256-cycle intra-frame tick, which is what breaks Ticks busy-waits. That tick is
+      // universal — the lean path runs it off the InterruptManager (see the pf_im block), so it
+      // survives even the 42 modules that install NO debug hook, and the full hook keeps its own copy.
+      // It is load-bearing: with both it and the per-call advance disabled (ADNOTICKSPIN) Fractal
+      // Forest hangs to the timeout. ADNOTICKCLOCK restores the per-call advance.
       static const bool tick_legacy = getenv("ADNOTICKCLOCK")!=nullptr;
       if(tick_legacy) g_ticks++;
       mem->write_u32b(0x16A, g_ticks); mem->write_u32b(r.a[7], g_ticks);
@@ -6821,10 +6166,8 @@ int main(int argc, char** argv){
       //   clr.w -(A7)            ; result slot
       //   pea (&arg); move.w #sel,-(A7); _OSDispatch    ; sel=0x38
       //   move.w (A7)+,D7 ; cmpi #0xFDA8,D7 / beq done ; tst.w D7 / bne loop
-      // With no handler the popped result is garbage != 0 -> the loop spins forever, leaking
-      // the stack until it faults. Returning 0 (== "proceed", the fall-through path) lets the
-      // module continue into its real draw code. Stack: [sel:w][&arg:l][result:w]; consume
-      // sel+ptr (6 bytes) so A7 lands on the result slot, then write 0.
+      // A garbage result makes that loop spin forever, leaking the stack until it faults. Returning 0
+      // (== "proceed", the fall-through path) lets the module continue into its real draw code.
       // OSDispatch is a Pascal fn whose arg count varies by selector; the caller reserves
       // a result slot BELOW the args, pushes pointer args, then the selector word on top.
       // Consume selector+args so A7 lands on the result slot, then write 0 (== proceed).
@@ -6844,8 +6187,8 @@ int main(int argc, char** argv){
       }
       // libAlloc: the OSDispatch was issued from inside the shared LIB510 library CODE arena (the
       // XHeap offscreen-buffer allocator at 0x0101FBBC). Gates the twoA5/dll# XHeap fixes so classic
-      // modules that issue the same selectors from their own code are untouched. (Hoisted from the 0x1D
-      // case so sel 0x1E/0x20 below can share it.)
+      // modules that issue the same selectors from their own code are untouched. Shared by the sel 0x1D
+      // arm and the sel 0x1E/0x20 arm below.
       bool libAlloc = (g_lib510CodeHi>g_lib510CodeLo && r.pc>=g_lib510CodeLo && r.pc<g_lib510CodeHi);
       switch(sel){
         case 0x16: ADSTUB("A88F_OSDisp_sel16_zero"); r.a[7]+=2;  mem->write_u32b(r.a[7], 0); break;
@@ -6854,14 +6197,13 @@ int main(int argc, char** argv){
         // after the sel-0x1D TempNewHandle — e.g. 0101FC5C `move.l handle,-(A7); pea &status; #0x1E;
         // _OSDispatch` and the 0x20 cleanup twin at 0101FCBE. Each pushes TWO long args (handle/count +
         // &status) plus the selector word = 10 bytes and reserves NO result slot (void proc; status is
-        // returned through the pointer arg). The old default consumed only the 2-byte selector, LEAKING
-        // 8 bytes of stack -> A7 landed 8 bytes too low -> the allocator's tail `movem.l (A7)+,D3,D4,D6,
-        // A2,A3,A4` at 0101FD3A restored every callee-saved reg from the WRONG slot: A2 (the CALLER's
-        // this, e.g. 0x00394628) came back as 1 and the real value slid into A4. Its caller (the XHeap
-        // ctor IXHeap) then passed that odd this to UseHeap -> the "straddled 0x880060EC" XHeap fault
-        // (addm 384 THE ONE REMAINING GATE). Consume sel(2)+2 longs(8)=10 so A7 lands at the pre-call
-        // baseline, and write noErr(0) to the status word (2nd arg, [A7+2]) like sel 0x1D. Gated to the
-        // LIB510 allocator / twoA5 so any classic caller keeps the legacy default path (zero regression).
+        // returned through the pointer arg). Consuming only the 2-byte selector LEAKS 8 bytes of stack,
+        // so the allocator's tail `movem.l (A7)+,D3,D4,D6,A2,A3,A4` at 0101FD3A restores every
+        // callee-saved reg from the WRONG slot (A2, the CALLER's this, comes back as 1) and its caller
+        // (the XHeap ctor IXHeap) passes that bogus this to UseHeap -> an XHeap fault. Consume
+        // sel(2)+2 longs(8)=10 so A7 lands at the pre-call baseline, and write noErr(0) to the status
+        // word (2nd arg, [A7+2]) like sel 0x1D. Gated to the LIB510 allocator / twoA5 so any classic
+        // caller keeps the default path.
         case 0x1E:
         case 0x20:
           if(g_sbReaderPC || libAlloc){
@@ -6870,12 +6212,12 @@ int main(int argc, char** argv){
             if(stp>0x1000) mem->write_u16b(stp, 0);     // noErr
           } else { r.a[7]+=2; mem->write_u16b(r.a[7], 0); }
           break;
-          // TempMaxMem (free temporary memory, LONG result). The default wrote only a WORD, leaving the
-          // low word of the reserved LONG slot as stack garbage -> the caller's `freeMem < needed` test was
-          // unpredictable. LIB510's offscreen-buffer allocator (0x0101FBBC) tests `TempMaxMem() >= needed`
-          // and, when short, throws 0x101 instead of falling back (Art Critic init, addm 377). Report ample
-          // free temp memory (32MB) as a clean LONG so it proceeds to allocate via sel 0x1D (host-served).
-          // Only twoA5 large 4.0 modules reach this path.
+          // TempMaxMem (free temporary memory, LONG result). A WORD-only write leaves the low word of
+          // the reserved LONG slot as stack garbage, so the caller's `freeMem < needed` test is
+          // unpredictable. LIB510's offscreen-buffer allocator (0x0101FBBC) tests `TempMaxMem() >=
+          // needed` and, when short, throws 0x101 instead of falling back. Report ample free temp memory
+          // (32MB) as a clean LONG so it proceeds to allocate via sel 0x1D (host-served). Only twoA5
+          // large 4.0 modules reach this path.
         case 0x38: ADSTUB("A88F_OSDisp_sel38_zero"); r.a[7]+=6;
           if(getenv("ADOSD38")) mem->write_u16b(r.a[7], 0xFDA8);   // EXP: sentinel -> loop's beq exit
           else mem->write_u16b(r.a[7], 0);
@@ -6884,30 +6226,25 @@ int main(int argc, char** argv){
           // Object-buffer allocator used in the ADgm constructor cluster (Marbles, Marbles!, and
           // siblings). Stack: [sel:w][obj:l][size:l][result:l]. The module reserves a LONG result
           // slot (subq #4), pushes obj ptr then a byte size (e.g. 0x1388) then the selector, calls
-          // _OSDispatch, and pops a LONG pointer. The old default popped only the selector and wrote
-          // a WORD 0 -> 8 bytes of stack leaked AND the popped "result" was a fragment of the obj
-          // pointer (0x00003538), corrupting the constructor's frame so it returned NULL, which then
-          // ran an A5-save/restore helper with a null context that zeroed A5 -> module dead -> blank.
-          // Allocate a zeroed buffer of the requested size and return it (non-zero) so construction
-          // proceeds. Consume sel(2)+obj(4)+size(4)=10, leaving A7 on the LONG result slot.
+          // _OSDispatch, and pops a LONG pointer. Allocate a zeroed buffer of the requested size and
+          // return it (non-zero) so construction proceeds. Consume sel(2)+obj(4)+size(4)=10, leaving A7
+          // on the LONG result slot.
           uint32_t sz = mem->read_u32b(r.a[7]+6);
           if(sz<0x10) sz=0x10; if(sz>0x200000) sz=0x200000;
           uint32_t buf = mem->allocate(sz); mem->memset(buf, 0, sz);
           uint32_t ret = buf;
-          // twoA5 LIB510 (addm 377): this selector is TempNewHandle(size, OSErr*) — it returns a HANDLE
+          // For twoA5 LIB510 this selector is TempNewHandle(size, OSErr*) — it returns a HANDLE
           // (the LIB510 offscreen allocator derefs the result: `movea.l (blk+0xE),A0 ; move.l (A0),..`) and
-          // [A7+2] points at an OSErr status word the caller tests (`if(err) fail`). The host previously
-          // returned a raw pointer and left the status as stack garbage, so LIB510 saw a spurious error /
-          // then a corrupt heap. Return a real Handle (master ptr -> block) and write noErr(0) to the
-          // status word. Gated on g_sbReaderPC so classic sel-0x1D callers (Marbles cluster, which expect a
-          // raw pointer and use [A7+2] as an object ptr) are untouched.
+          // [A7+2] points at an OSErr status word the caller tests (`if(err) fail`). Return a real
+          // Handle (master ptr -> block) and write noErr(0) to the status word. Gated on g_sbReaderPC
+          // so classic sel-0x1D callers (Marbles cluster, which expect a raw pointer and use [A7+2] as
+          // an object ptr) are untouched.
           // Fire the Handle+noErr behaviour for the LIB510 XHeap allocator, identified either by the
           // twoA5 screen-bounds gate (g_sbReaderPC, e.g. Art Critic) OR by the sel-0x1D _OSDispatch being
           // issued from inside the shared LIB510 library CODE arena (0x0101FBBC allocator). The latter
           // covers NON-twoA5 dll# two-stage modules (Guernsey Madness, Life & All, ...) whose ctor throws
           // 0x101 otherwise. Classic Marbles-cluster callers issue sel 0x1D from their own module code
-          // (outside the library arena) and are left on the raw-pointer path. Clocks makes no OSDispatch
-          // calls at all, so its working driver is provably unaffected.
+          // (outside the library arena) and are left on the raw-pointer path.
           if(g_sbReaderPC || libAlloc){   // libAlloc hoisted above the switch (shared with sel 0x1E/0x20)
             uint32_t h=mem->allocate(4); mem->write_u32b(h, buf); (*blk_size)[h]=sz; (*blk_size)[buf]=sz; ret=h;
             uint32_t stp=mem->read_u32b(r.a[7]+2); if(stp>0x1000) mem->write_u16b(stp, 0);
@@ -6931,22 +6268,19 @@ int main(int argc, char** argv){
             mem->write_u32b(r.a[6]-0x28, mem->read_u32b(r.a[6]+0x0C)); }
           break;
         case 0x39: {
-          // addm 545 (was addm 543 item 10 NEEDS-RE): RE'd from its SOLE caller in the whole 88-module
-          // corpus (Bugs — census: the only A88F-default site anywhere) @010368B4, inside the LIB510 proc
-          // MacsBug-named "FindSystemLayer":
+          // RE'd from its SOLE caller in the whole 88-module corpus (Bugs — the only A88F-default site
+          // anywhere) @010368B4, inside the LIB510 proc MacsBug-named "FindSystemLayer":
           //   clr.w -(A7)          ; WORD result slot
           //   pea (A6-8)           ; ptr arg  -> 8-byte local buffer
           //   moveq #-1,D0; move.l D0,-(A7)   ; LONG arg = -1
           //   move.w #$39,-(A7); _OSDispatch
           //   addq.l #2,A7         ; pops the WORD result and DISCARDS it (never read/tested)
           // So sel 0x39 is FUNCTION(param: LONG; buf: Ptr): WORD. Correct pop = sel(2)+long(4)+ptr(4)=10
-          // (the pre-545 default popped only 2 -> an 8-byte A7 leak; harmless at exactly one call, but
-          // ABI-wrong). This mirrors the proven neighbor shape (0x38 pops 6+word, 0x3A pops 10+word).
+          // — mirroring the neighbour shapes (0x38 pops 6+word, 0x3A pops 10+word).
           // The result word is ignored by the caller; the 8-byte layer-descriptor buffer is a discarded
           // FindSystemLayer local (unlk'd, never returned as A0/D0) whose struct format has NO second
           // caller and NO Lunacy symbol to pin, so it is filled with the "no layer" zero result rather
-          // than a fabricated descriptor. ABI fully derived; the deeper descriptor bytes are genuinely
-          // underdetermined and provably unobserved by Bugs' rendering. Opt-out ADNOOSD39 = legacy stub.
+          // than a fabricated descriptor. Opt-out ADNOOSD39 = balance-only stub.
           if(getenv("ADNOOSD39")){ ADSTUB("A88F_OSDispatch_default"); r.a[7]+=2; mem->write_u16b(r.a[7], 0); break; }
           uint32_t bufp = mem->read_u32b(r.a[7]+6);
           if(bufp>0x1000){ try{ mem->write_u32b(bufp,0); mem->write_u32b(bufp+4,0); }catch(...){} }
@@ -6969,9 +6303,9 @@ int main(int argc, char** argv){
       uint8_t op = opw & 0x001F; uint16_t fmt = opw & 0x3800;
       // One-operand FP68K ops push a single operand pointer (pop 6); two-operand ops push
       // src+dst (pop 10). SANE splits these by parity: even = arithmetic, odd = environment/
-      // status control. Getting the count wrong corrupts the caller's stack -- the FOPROCENTRY
-      // (0x17)/FOSETENV (0x01) glue Can of Worms & Vertigo emit was popped as binary (+10 vs +6),
-      // leaving the pushed 0x6000 env word to be read back as an address -> fault at 0x60000000.
+      // status control. Getting the count wrong corrupts the caller's stack: the FOPROCENTRY (0x17) /
+      // FOSETENV (0x01) glue Can of Worms & Vertigo emit is unary, and popping 10 instead of 6 leaves
+      // the pushed 0x6000 env word to be read back as an address -> fault at 0x60000000.
       // (The genuinely 2-operand odd ops 0x09/0x0B/0x11/0x13 are deliberately NOT listed so they
       // stay pop-10; none are used by any in-scope module.)
       bool unary = (op==0x12||op==0x14||op==0x16||op==0x1A||op==0x1C||    // monadic arithmetic
@@ -7005,12 +6339,12 @@ int main(int argc, char** argv){
         case 0x1A: rv=logb(a); ext80_write(mem,dst,rv); break;         // FOLOGB (unary)
         case 0x0D: rv=-a;      ext80_write(mem,dst,rv); break;         // FONEG  (unary, in-place negate)
         case 0x0F: rv=fabs(a); ext80_write(mem,dst,rv); break;         // FOABS  (unary, in-place absolute)
-        // 0x01/03/05/07/17/19 = SANE environment & halt-vector control. addm 543 item 8: real
-        // round-trip storage (g_sane_env/sane_hv). Rounding mode etc. are still modeled as the SANE
-        // default in the arithmetic (host double = round-to-nearest-extended), but GETENV now returns
-        // what SETENV/PROCENTRY stored, and PROCENTRY/PROCEXIT save/restore correctly. We LOG any
-        // attempt to install a NON-default (nonzero) environment — if that ever fires we must honour
-        // the rounding mode in the FP ops. ADNOFPENV reverts all of these to the old no-op.
+        // 0x01/03/05/07/17/19 = SANE environment & halt-vector control, with real round-trip storage
+        // (g_sane_env/sane_hv). Rounding mode etc. are still modeled as the SANE default in the
+        // arithmetic (host double = round-to-nearest-extended), but GETENV returns what SETENV/
+        // PROCENTRY stored, and PROCENTRY/PROCEXIT save/restore correctly. Any attempt to install a
+        // NON-default (nonzero) environment is LOGGED — if that ever fires the rounding mode must be
+        // honoured in the FP ops. ADNOFPENV reverts all of these to a no-op.
         case 0x01: /*FOSETENV*/ if(g_no_fpenv){ ADSTUB("A9EB_FP68K_env_default_noop"); }
                    else { g_sane_env = mem->read_u16b(dst);
                      if(g_sane_env && (getenv("ADFPLOG")||getenv("ADFPENVLOG")))
@@ -7054,9 +6388,9 @@ int main(int argc, char** argv){
         case 0x10: rv=pow(x,y); break;      case 0x12: rv=pow(x,y); break;         // FOXPWRI / FOXPWRY
         case 0x20: {                        // FORANDX: SANE RandomX — Park-Miller minimal-standard LCG.
           // x is the current seed (a whole number in [1, 2^31-2]); the result (written back in place)
-          // is next = (16807*x) mod (2^31-1), which is also the new seed. Returning a constant 0.5 made
-          // every "random" identical, so random-driven savers collapsed (Can of Worms' worms all stacked
-          // at one point -> ~16px). 16807*seed <= ~3.6e13 stays exact in a double (53-bit mantissa).
+          // is next = (16807*x) mod (2^31-1), which is also the new seed. A constant result makes every
+          // "random" identical and collapses random-driven savers. 16807*seed <= ~3.6e13 stays exact
+          // in a double (53-bit mantissa).
           double seed = x; if(seed < 1.0 || seed >= 2147483647.0) seed = 1.0;
           rv = fmod(16807.0 * seed, 2147483647.0);
           if(rv < 1.0) rv = 1.0;
@@ -7073,35 +6407,20 @@ int main(int argc, char** argv){
       // where(Point@+10, reused as a 32-bit ptr) = adglob (whose +0x0C = version).
       if(getenv("ADINPUTLOG")){ static long n=0; if(++n<=60) fprintf(stderr,"    [input] GetOSEvent mask=%08X A0=%08X pc=%08X anim=%d\n", r.d[0].u, r.a[0], r.pc, g_anim_phase?1:0); }
       uint32_t er=r.a[0];
-      // *** addm 740: the handshake's discriminator is IN THE CALL, not in a host phase. ***
-      // The AD shell glue linked into every classic module probes the engine like this (the module's
-      // own AFTERDARKEXISTS): it PRE-FILLS the EventRecord's message field with 'aYmm', calls
-      // GetOSEvent with an EMPTY mask (a real GetOSEvent returns nothing for mask 0), and tests
-      // whether the message came back as 'ADr\0' with `where` repurposed as a pointer to the engine
-      // globals (version word at +0x0C). So the AD app's GetOSEvent patch answers exactly the polls
-      // carrying the 'aYmm' cookie and leaves every other one alone — a rule that holds for the whole
-      // life of the module, not only while it is initialising.
-      // The host keyed this off g_anim_phase (init => forge, animating => null event). That works for
-      // the FIRST init and silently breaks every LATER probe: a module that finishes a cycle, tears
-      // its instance down and re-initialises gets "no After Dark" from its own version gate and
-      // aborts into its "requires After Dark 2.0" path — a dead screen for the rest of the run
-      // (Dominoes between games; Confetti Factory at frame ~158). Reachability census (62 roster
-      // entries, 200f): the answer changes for CONFETTI FACTORY ONLY (1 call); every other module 0.
-      // ADOSEVLEGACY restores the phase gate for A/B.
-      //   addm 759 — THAT CENSUS UNDERCOUNTS, because it drives every module at its FACTORY controls.
-      // A module only re-probes if it re-initialises mid-run, and for some modules re-initialisation is
-      // a NON-DEFAULT control setting. MODERN ART is the case: at Style=Mondrian/Rothko/Pollock it
-      // probes exactly once, at init (1 call, anim=0 — legacy and fixed agree, 400-frame fb-hash streams
-      // byte-identical). At Style=Random (5) or "-" (4) the module re-selects a style mid-run and probes
-      // again on every re-selection (150f: 6 calls, 4 with anim=1, all from its AFTERDARKEXISTS glue at
-      // pc=0010030A, mask=0, cookie 'aYmm'). Under the legacy phase gate those four are denied, the
-      // module falls into its no-After-Dark path, and the very next draw faults reading a drawing
-      // descriptor that was never built ("address 28506F6E not within any arena" at pc=00103102, i.e.
-      // inside SetUpDrawing@001030F6 — the addm 725/739 signature, which those addenda recorded as
-      // "module-internal, not host-fixable"). This fix is its whole cure: 400f Random/"-" = 511 faults
-      // + 4 distinct frames under ADOSEVLEGACY vs 0 faults + 98 distinct frames without it. So the
-      // reachability rule for THIS mechanism is "every module that re-inits", and a factory-controls
-      // census cannot see the ones that only re-init off-default.
+      // The handshake's discriminator is IN THE CALL, not in a host phase. The AD shell glue linked
+      // into every classic module probes the engine like this (the module's own AFTERDARKEXISTS): it
+      // PRE-FILLS the EventRecord's message field with 'aYmm', calls GetOSEvent with an EMPTY mask (a
+      // real GetOSEvent returns nothing for mask 0), and tests whether the message came back as 'ADr\0'
+      // with `where` repurposed as a pointer to the engine globals (version word at +0x0C). So the AD
+      // app's GetOSEvent patch answers exactly the polls carrying the 'aYmm' cookie and leaves every
+      // other one alone — a rule that holds for the whole life of the module, not only while it is
+      // initialising. Keying the answer off an init/animating host phase instead breaks every LATER
+      // probe: a module that finishes a cycle, tears its instance down and re-initialises gets "no
+      // After Dark" from its own version gate and aborts into its "requires After Dark 2.0" path — a
+      // dead screen for the rest of the run (Dominoes between games; Confetti Factory; Modern Art at
+      // Style=Random or "-", which re-selects a style mid-run and re-probes on every re-selection, then
+      // faults in SetUpDrawing reading a drawing descriptor that was never built). ADOSEVLEGACY
+      // restores the phase gate for A/B.
       static const bool k_osev_legacy = getenv("ADOSEVLEGACY")!=nullptr;
       bool ay=false; if(er){ try{ ay = (mem->read_u32b(er+2)==0x61596D6D); }catch(...){} }
       bool handshake = k_osev_legacy ? !g_anim_phase : ay;
@@ -7120,8 +6439,8 @@ int main(int argc, char** argv){
           int16_t hh=(int16_t)(C.fb_w/2 + (C.fb_w/3)*std::cos(a));
           int16_t vv=(int16_t)(C.fb_h/2 + (C.fb_h/3)*std::sin(a));
           where=((uint32_t)(uint16_t)vv<<16)|(uint16_t)hh; }
-        // addm 574: event.modifiers (+14) carries the caps-lock STATE (alphaLock 0x0400)
-        // even on a nullEvent, matching a real Mac. Default (caps off) -> 0 == pre-574.
+        // event.modifiers (+14) carries the caps-lock STATE (alphaLock 0x0400) even on a nullEvent,
+        // matching a real Mac; with caps off it is 0.
         uint16_t mods = g_caps ? 0x0400 : 0;
         if(er){ mem->write_u16b(er+0,0); mem->write_u32b(er+2,0);
                 mem->write_u32b(er+6,nowt); mem->write_u32b(er+10,where); mem->write_u16b(er+14,mods); }
@@ -7137,7 +6456,7 @@ int main(int argc, char** argv){
       if(getenv("ADBMTRACE")) fprintf(stderr,"    BlockMove src=%08X dst=%08X len=%u\n",s,d,c);
       // ADBMTEXT: dump short BlockMove payloads as text. The AD3 runtime reports failures by
       // GetResource('STR#',1) + BlockMove of the chosen message — so this prints the module's OWN
-      // error string, which names what actually failed (addm 315).
+      // error string, which names what actually failed.
       if(getenv("ADBMTEXT") && c>0 && c<=96){ std::string t; bool pr=true;
         for(uint32_t i=0;i<c;i++){ uint8_t b=0; try{b=mem->read_u8(s+i);}catch(...){}
           if(b>=32&&b<127) t+=(char)b; else if(b==0||b<32) t+='.'; else { t+='?'; } if(b>127) pr=false; }
@@ -7156,19 +6475,17 @@ int main(int argc, char** argv){
     } else if(base==0x023){ // DisposeHandle(h:Handle) A0=handle — free master ptr + the handle cell
       uint32_t h=r.a[0];
       if(getenv("ADXHP")){ static int dn=0; if(dn++<200) fprintf(stderr,"      [xhp DisposeHandle A0=%08X pc=%08X]\n",h,r.pc); }
-      // ADXHFIX (addm 418): a Resource-Manager-owned handle (one served by get_res, cached in rez_handles)
-      // must be EVICTED from that cache when the caller DisposeHandle's it, so the NEXT GetResource RELOADS
-      // a fresh copy — matching Mac "reload a released resource" semantics. Without this, the cache hands
-      // the freed (dangling, no tracked size) handle back to the LIB510 XHandle cel-bank builder; its
-      // XHandle::GetSize -> GetHandleSize then returns 0, the bank COUNT [obj+0xC0] collapses to 1, and
-      // Super Guy's cel record #1047 (bank index 1) fails the bounds check @0x0102B638 -> Throw(0x104) ->
-      // the singleton never publishes -> blank. The specific case here: a transient XHandle over 'OFmm'
-      // (CalcMemNeeded) is Dispose()'d after the memory-sizing read, freeing the SAME resource handle the
-      // cel-table XHandle later re-fetches from cache. Eviction makes the re-fetch reload -> GetSize=16 ->
-      // count=16 -> record bank index 1 < 16 passes. Working modules are unaffected: their records only
-      // reference bank 0 (0 < count for any count>=1), and modules that never dispose+re-get keep the same
-      // cached handle exactly as before.
-      // addm 418: default-ON (correct Mac reload-after-release semantics); ADNOXHFIX reverts.
+      // ADXHFIX: a Resource-Manager-owned handle (one served by get_res, cached in rez_handles) must
+      // be EVICTED from that cache when the caller DisposeHandle's it, so the NEXT GetResource RELOADS
+      // a fresh copy — matching Mac "reload a released resource" semantics. Without this the cache
+      // hands the freed (dangling, no tracked size) handle back to the LIB510 XHandle cel-bank builder;
+      // its XHandle::GetSize -> GetHandleSize then returns 0, the bank COUNT [obj+0xC0] collapses to 1,
+      // and a cel record with bank index 1 fails the bounds check @0x0102B638 -> Throw(0x104) -> the
+      // singleton never publishes -> blank. The case in point: a transient XHandle over 'OFmm'
+      // (CalcMemNeeded) is Dispose()'d after the memory-sizing read, freeing the SAME resource handle
+      // the cel-table XHandle later re-fetches from cache. Eviction makes the re-fetch reload ->
+      // GetSize=16 -> count=16 -> record bank index 1 < 16 passes. Modules that never dispose+re-get
+      // keep the same cached handle. Default-ON (correct Mac semantics); ADNOXHFIX reverts.
       if(!getenv("ADNOXHFIX") && h){ for(auto it=rez_handles->begin(); it!=rez_handles->end(); ){ if(it->second==h) it=rez_handles->erase(it); else ++it; } }
       if(h && !getenv("ADNODISPOSE")){ try{ uint32_t p=mem->read_u32b(h); if(p){ try{ mem->free(p);}catch(...){} blk_size->erase(p);} }catch(...){}
              try{ mem->free(h); }catch(...){} blk_size->erase(h); }
@@ -7179,10 +6496,10 @@ int main(int argc, char** argv){
       r.d[0].u=0;
     } else if(base==0x01A){ ADSTUB("A01A_GetZone_dummy"); // GetZone -> A0=zone (SetZone 0x1B handled as no-op above)
       r.a[0]=0x00000700; r.d[0].u=0;     // dummy zone ptr in low mem
-    } else if(opcode==0xAA52 && getenv("ADREALFS")){ // addm 350: _HighLevelFSDispatch — FSMakeFSSpec etc.
+    } else if(opcode==0xAA52 && getenv("ADREALFS")){ // _HighLevelFSDispatch — FSMakeFSSpec etc.
       uint16_t sel=(uint16_t)(r.d[0].u & 0xFFFF); uint32_t sp=r.a[7];
       if(sel==1){   // FSMakeFSSpec(vRefNum:short, dirID:long, fileName:StringPtr, spec:FSSpecPtr):OSErr
-        // Frame (decoded addm 349): [sp]=spec, [sp+4]=fileName, [sp+8]=dirID, [sp+12]=vRefNum(2). 14 param bytes.
+        // Frame: [sp]=spec, [sp+4]=fileName, [sp+8]=dirID, [sp+12]=vRefNum(2). 14 param bytes.
         uint32_t spec=mem->read_u32b(sp), namep=mem->read_u32b(sp+4);
         std::string mac; if(namep){ uint8_t L=mem->read_u8(namep); for(int i2=0;i2<L && i2<255;i2++) mac+=(char)mem->read_u8(namep+1+i2); }
         std::string disk = mac.empty()? std::string() : rf_resolve(mac);
@@ -7211,14 +6528,14 @@ int main(int argc, char** argv){
       uint32_t fsSel = r.d[0].u;            // capture BEFORE we overwrite D0 with the result
       uint32_t fsPB  = r.a[0];
       bool served=false;
-      // addm 348 (gate ADREALFS): PBGetCatInfo (sel 9) / PBGetFInfo (sel 8) answer HONESTLY for paths that
+      // Under ADREALFS, PBGetCatInfo (sel 9) / PBGetFInfo (sel 8) answer HONESTLY for paths that
       // exist under the Deluxe folder. Everything else keeps the fnfErr default. ioNamePtr@+18.
       if(getenv("ADREALFS") && ((fsSel&0xFF)==0x09 || (fsSel&0xFF)==0x08) && fsPB){
         std::string mac; try{ uint32_t np=mem->read_u32b(fsPB+18);
           if(np){ uint8_t L=mem->read_u8(np); for(int i2=0;i2<L;i2++) mac+=(char)mem->read_u8(np+1+i2); } }catch(...){}
-        // addm 348b: the engine's LinkModule locates files by DIRECTORY ENUMERATION (ioFDirIndex>0, empty
-        // name), not by name string. Serve index-N of the Deluxe root as a flat world: write the entry's
-        // name back through ioNamePtr, then fall through to the exists-path below.
+        // The engine's LinkModule locates files by DIRECTORY ENUMERATION (ioFDirIndex>0, empty name),
+        // not by name string. Serve index-N of the Deluxe root as a flat world: write the entry's name
+        // back through ioNamePtr, then fall through to the exists-path below.
         if(mac.empty()){
           int16_t fdIdx=0; try{ fdIdx=(int16_t)mem->read_u16b(fsPB+28); }catch(...){}
           if(fdIdx>0){
@@ -7249,9 +6566,9 @@ int main(int argc, char** argv){
         }
       }
       if(!served && getenv("ADFSPROBEOK") && ((fsSel&0xFF)==0x08 || (fsSel&0xFF)==0x09) && fsPB){
-        // addm 354 experiment: the engine's LinkModule loops on near-empty GetCatInfo/GetFCBInfo probes
-        // (all-zero pb) that just need to SUCCEED. Return noErr with a synthetic dir so the probe loop
-        // breaks and LinkModule advances toward the actual open.
+        // The engine's LinkModule loops on near-empty GetCatInfo/GetFCBInfo probes (all-zero pb) that
+        // just need to SUCCEED. Return noErr with a synthetic dir so the probe loop breaks and
+        // LinkModule advances toward the actual open.
         r.d[0].u=0; mem->write_u16b(fsPB+16,0);                 // ioResult=noErr
         try{ mem->write_u16b(fsPB+22,0xFFFF); }catch(...){}     // ioVRefNum = -1 (our synthetic vol)
         try{ mem->write_u32b(fsPB+48,0x00000002); }catch(...){}  // ioDirID = 2 (root)
@@ -7283,40 +6600,18 @@ int main(int argc, char** argv){
       if(getenv("ADRNDLOG")){ static int rc=0; if(rc++<12) fprintf(stderr,"    Random -> %04X (a7=%08X)\n",(uint16_t)(seed&0xFFFF),r.a[7]); }
     } else if(opcode==0xA86E){ ADSTUB("A86E_InitGraf_noop"); // InitGraf(globalPtr: Ptr) — procedure, pops its own 4-byte arg.
       // QuickDraw globals are already set up by the host; this is a no-op besides the pop.
-      // TRIAGE FIX (2026-07-30): previously unhandled -> fell to the generic rts-stub which pops
-      // NO args, drifting A7 by 4 (the documented A7-drift bug class: unhandled Pascal-arg trap ->
-      // corrupted stack -> derailed execution). Cluster: Guernsey Madness/Life & All/Rainforest/
-      // Shadow Agents/Slow Burn/Time Flies all call InitGraf then Microseconds during init and
-      // fault deep in a corrupted downward spin (pc=0101D9BE addr=0027FFFE, ADE9-decoded garbage).
       r.a[7]+=4;
     } else if(opcode==0xA193){ // Microseconds(VAR count: UnsignedWide) — an OS trap (0xA1xx, bit 11 clear):
-      // REGISTER/STACK-PRESERVING, i.e. it fills the 8-byte UnsignedWide at the pointer on the stack but does
-      // NOT pop that pointer (the caller pops it). The shared MODULE_129 glue @0x0103CDB0 proves it:
-      // `pea (A6-8); _Microseconds; movea.l (A7)+,A1; move.l (A1)+,A0; move.l (A1),D0` — the module pops the
-      // pointer back ITSELF and dereferences it. The 2026-07-30 triage's `r.a[7]+=4` over-popped for this glue:
-      // pea(-4)+host-pop(+4)+module-pop(+4) = +4 drift -> `movea.l (A7)+,A1` read the movem-saved D3 instead of
-      // the buffer pointer -> Life & All init fault pc=0103CDC2 addr=0x0020D992 (saved-D3 content, NOT a slot/
-      // import as addm-390 guessed) and Guernsey Madness's detect derail pc=005A4654 (same drift; there saved D3
-      // was a mapped heap ptr -> garbage time -> derail downstream). The drift is self-limiting per call (unlk
-      // restores A7) but corrupts the caller's movem-restored D3-D6 and returns garbage time.
-      // addm 400 GATED the fix single-A5-only, keeping the twoA5 legacy pop on the belief that its
-      // corrupted-D3-D6/garbage-time behavior DROVE Rodger Dodger's distinct=8 render. addm 639 (S3) RETIRES
-      // that gate: execution-level RE proved RD does NOT consume the Microseconds value under its real l40
-      // census drive — the legacy pop feeds RD a CONSTANT 0 (traced: the glue's `movea.l (A7)+,A1` loads the
-      // saved-D3 stack slot = 0 -> a NULL VAR ptr -> the module reads 0/0 as time) yet RD's fbhash sequence
-      // AND its census signature (d95/l42) are IDENTICAL to correct no-pop. The addm-400 "distinct=8" rested on
-      // a Recipe-A (ADMULONLY headless 8-frame) run where saved-D3 was nonzero -> varying garbage; that is not
-      // RD's operating config. So no-pop is now GLOBAL (all lanes), which also folds in the addm-447/504/454
-      // RPS/Bad Dog!/Slow Burn name-gate exceptions (they already forced no-pop). (legacy-cleanup addm
-      // 679: the ADLEGACYPOP A/B revert to the twoA5 over-pop is retired — dead by default in main.)
+      // REGISTER/STACK-PRESERVING: it fills the 8-byte UnsignedWide at the pointer on the stack but does
+      // NOT pop that pointer — the caller pops it. The shared MODULE_129 glue @0x0103CDB0 shows the
+      // convention: `pea (A6-8); _Microseconds; movea.l (A7)+,A1; move.l (A1)+,A0; move.l (A1),D0` — the
+      // module pops the pointer back itself and dereferences it, so the host must not pop it here.
       uint32_t cp=mem->read_u32b(r.a[7]);
       uint64_t us=(uint64_t)g_ticks*16667ull;
       // The real _Microseconds trap returns the 64-bit count in REGISTERS A0(high):D0(low); the Pascal
       // VAR glue (`movea.l (A7)+,A1; move.l A0,(A1)+; move.l D0,(A1)`) then STORES those regs into the
-      // caller's UnsignedWide buffer. addm-400 misread that glue's two stores as loads (68k operand-order
-      // confusion) and had the host write the buffer directly — but this module's glue OVERWRITES the buffer
-      // with the (stale) A0/D0 the host never set, freezing Time Flies' ms clock. Fix: set A0/D0 (the actual
-      // trap convention). Keep the buffer write too, harmless for any direct-buffer reader. (addm 413)
+      // caller's UnsignedWide buffer, so setting A0/D0 is what actually reaches the caller. The buffer
+      // write below is kept too, harmless for any direct-buffer reader.
       r.a[0]=(uint32_t)(us>>32); r.d[0].u=(uint32_t)(us&0xFFFFFFFFu);
       if(cp){ mem->write_u32b(cp,(uint32_t)(us>>32)); mem->write_u32b(cp+4,(uint32_t)(us&0xFFFFFFFFu)); }
     } else if(opcode==0xA8A7){ // SetRect(VAR r; l,t,rt,b: Integer) — Rect = {top,left,bottom,right}
@@ -7334,22 +6629,17 @@ int main(int argc, char** argv){
       int16_t t=(int16_t)mem->read_u16b(rp),l=(int16_t)mem->read_u16b(rp+2),
               b=(int16_t)mem->read_u16b(rp+4),rt=(int16_t)mem->read_u16b(rp+6);
       bool empty=(rt<=l||b<=t);
-      // ENGINE-CONTRACT FIX (addm 582): a Pascal Boolean function result occupies the HIGH byte of the
-      // reserved result word ([A7] low address, big-endian). Modules read it with `move.b (A7)+`
-      // (Vertigo @0x100b98, Boris) — the low-byte write served them 0x00 = FALSE forever, so their
-      // self-loop TERMINATION test (EmptyRect on the shrinking sweep rect) never fired -> permanent
-      // freeze in one eternal DRAW sweep. Serve the truth value in the high byte for ALL modules, exactly
-      // like the already-correct RectInRgn/PtInRgn/EmptyRgn handlers. Any `tst.w`/`beq` word-reader sees
-      // 0x0100 = nonzero = true too, so this is strictly more correct than the old low-byte quirk.
-      // ADNOENGBOOL reverts to the legacy per-Boris low-byte behavior for A/B.
+      // A Pascal Boolean function result occupies the HIGH byte of the reserved result word ([A7] low
+      // address, big-endian). Modules read it with `move.b (A7)+` (Vertigo @0x100b98, Boris), so the
+      // truth value must live there; a `tst.w`/`beq` word-reader sees 0x0100 = nonzero = true as well.
+      // Matches the RectInRgn/PtInRgn/EmptyRgn handlers. ADNOENGBOOL serves the low byte instead, for A/B.
       if(getenv("ADNOENGBOOL")) { if(g_boris) mem->write_u16b(r.a[7], empty?0x0100:0);
                                   else        mem->write_u16b(r.a[7], empty?1:0); }
       else mem->write_u16b(r.a[7], empty?0x0100:0);   // Pascal Boolean in the HIGH byte (real Toolbox)
     } else if(opcode==0xA85D){ // BitTst(bytePtr:Ptr; bitNum:LONGINT):Boolean — Toolbox bit# is BIG-ENDIAN
       int32_t bitNum=(int32_t)mem->read_u32b(r.a[7]); uint32_t bp=mem->read_u32b(r.a[7]+4); r.a[7]+=8;
       uint8_t byte = bp? mem->read_u8(bp+(uint32_t)(bitNum>>3)) : 0;
-      // addm 590 (Boolean-slot audit): was LOW byte -> a move.b(A7)+ (HIGH byte) reader saw 0=FALSE forever
-      // (the Vertigo/EmptyRect wrong-byte class). Serve it in the HIGH byte; tst.w readers unaffected.
+      // Serve the Boolean in the HIGH byte (the `move.b (A7)+` slot); tst.w readers are unaffected.
       { uint8_t bit=(byte>>(7-(bitNum&7)))&1;
         if(g_nobool) mem->write_u16b(r.a[7], bit);
         else         mem->write_u16b(r.a[7], bit?0x0100:0); }
@@ -7366,9 +6656,9 @@ int main(int argc, char** argv){
       int16_t cnt=(int16_t)mem->read_u16b(r.a[7]); uint32_t val=mem->read_u32b(r.a[7]+2); r.a[7]+=6;
       mem->write_u32b(r.a[7], cnt>=0?(val<<(cnt&31)):(val>>((-cnt)&31)));
     } else if(opcode==0xA8D8){ // NewRgn: Pascal fn, no args, RgnHandle (4B) result on stack
-      // addm 478 (opt-in ADDDRGNSTEER, DD-only): bump-allocate the region + handle from the high end of the
-      // already-mapped is40 low heap so a fresh region can never pack between the section nodes. NEGATIVE RESULT
-      // (kept for reproducibility): this regresses DD because the section builder needs node/region adjacency.
+      // ADDDRGNSTEER (opt-in, DD-only): bump-allocate the region + handle from the high end of the
+      // already-mapped is40 low heap so a fresh region can never pack between the section nodes. This
+      // regresses DD — the section builder needs node/region adjacency — so it stays off by default.
       auto ddRgnAlloc=[&](uint32_t sz)->uint32_t{
         if(g_ddRgnEnd==0){ g_ddRgnNext=0x00F00000; g_ddRgnEnd=0x01000000; }
         uint32_t a=(g_ddRgnNext+0xF)&~0xFu; g_ddRgnNext=a+((sz+0xF)&~0xFu);
@@ -7379,15 +6669,8 @@ int main(int argc, char** argv){
       if(getenv("ADDDCOLLIDE") && rgn>=0x003FA000 && rgn<0x003FC000)
         fprintf(stderr,"[ddcollide] NewRgn allocate() -> rgn=%08X (IN DD section-array band) caller-pc=%08X\n",rgn,r.pc);
       C.rgn_mask_drop(rgn);                              // fresh region: no shape mask yet
-      // S2 (addm 638): NewRgn now returns an EMPTY region by DEFAULT — the true Inside Macintosh
-      // semantics. The historical host default was a FULL-SCREEN bbox ("so a fill through an unset
-      // region still paints"); that was an approximation that happened to satisfy most callers but is
-      // WRONG for exclusion-region users (Nocturnes' spawn gate, gate #18). Verified: emptying the
-      // default is BYTE-IDENTICAL to the full-screen default across 30/31 std-lane 68K modules at 200f
-      // (the lone diff, Bugs, is pre-existing launch nondeterminism — froze identically both ways).
-      // This dissolves gate #18 (ADEMPTYRGN / ADNONOCTRGN) and retires the noct_bucket_rgn NewRgn
-      // special-case: every fresh NewRgn is empty for everyone, refined by RectRgn/SetRectRgn/CloseRgn.
-      // ADFULLRGN restores the old full-screen default for A/B / any future bounds-only regression.
+      // NewRgn returns an EMPTY region, the true Inside Macintosh semantics; it is refined later by
+      // RectRgn/SetRectRgn/CloseRgn. ADFULLRGN restores a full-screen bbox default for A/B.
       if(getenv("ADFULLRGN")){ mem->write_u16b(rgn+2,0);mem->write_u16b(rgn+4,0);
         mem->write_u16b(rgn+6,(uint16_t)C.fb_h);mem->write_u16b(rgn+8,(uint16_t)C.fb_w); }
       uint32_t h = steerThis ? ddRgnAlloc(4) : mem->allocate(4); mem->write_u32b(h,rgn);
@@ -7430,24 +6713,11 @@ int main(int argc, char** argv){
               if(nx*nx+ny*ny<=1.0) ad_put1(g1b,g1rb,g1bt,g1bl,g1bb,g1br,x,y,on1); } }
           else ad_fill1(g1b,g1rb,g1bt,g1bl,g1bb,g1br,t,l,b,rr2,on1);
         } else {
-        // addm 564: A8D3=PaintRgn fills with the FOREGROUND, A8D4=EraseRgn with the BACKGROUND
-        // (Inside Macintosh). The DEFAULT is now this IM-correct mapping (was: legacy A8D3->bg /
-        // A8D4->fg). RESOLUTION of the addm-543 tension: the IM mapping was rejected then because it
-        // "froze Photon" (distinct 1622->1) — that observation is STALE. Under the current merged host
-        // (post the addm-549/550/551 palette + blackdrop wave) Photon renders BYTE-IDENTICAL under both
-        // mappings at 80 frames: its lone fullscreen PaintRgn (fg=215) no longer determines the frame
-        // (CLUT[0]->black + backdrop-black changed what survives), so the legacy mapping was papering
-        // over a bug those fixes have since removed. FULL-CORPUS A/B (all 61 modules) is byte-identical
-        // under the IM mapping EXCEPT Spin Brush, which is IMPROVED: its canvas-reset EraseRgn (fg=215
-        // blue, bg=0) flashed the WHOLE SCREEN blue every reset under legacy (erasing with the paint
-        // colour — a bug); IM-correct clears it to the real black background. Every other A8D3/A8D4
-        // caller (Tunnel 73x, Pearls 37x[empty rgns], Punch Out, Photon, Zot!, Zooommm!, Draw Morph)
-        // is byte-identical at 40 frames. (legacy-cleanup addm 679: the ADRGNLEGACY A/B revert to the
-        // old pre-564 mapping is retired — dead by default in main.)
+        // A8D3 = PaintRgn fills with the FOREGROUND, A8D4 = EraseRgn with the BACKGROUND (Inside Macintosh).
         uint8_t idx = (opcode==0xA8D4?C.qd_bg:C.qd_fg);  // IM-correct (DEFAULT)
         if(getenv("ADQDAUDIT")) fprintf(stderr,"[QDAUDIT] mod=%s op=%s fg=%d bg=%d flagMatters=%d bbox=%d,%d,%d,%d pat=%d\n",
           g_audit_mod, opcode==0xA8D3?"PaintRgn":(opcode==0xA8D4?"EraseRgn":"FillRgn"),
-          C.qd_fg,C.qd_bg,(opcode!=0xA8D6 && C.qd_fg!=C.qd_bg)?1:0,t,l,b,rr2,patp?1:0);  // addm 564 item 4 census
+          C.qd_fg,C.qd_bg,(opcode!=0xA8D6 && C.qd_fg!=C.qd_bg)?1:0,t,l,b,rr2,patp?1:0);  // census
         auto* mask = C.rgn_mask(rgn,false);              // real shape known?
         if(patp){ // tile the 8x8 pattern (honouring the shape mask if present)
           uint8_t pat[8]; for(int i=0;i<8;i++) pat[i]=mem->read_u8(patp+i);
@@ -7455,9 +6725,9 @@ int main(int argc, char** argv){
           for(int y=yt;y<yb;y++){ uint8_t row=pat[y&7];
             for(int x=xl;x<xr;x++){ if(mask && !(*mask)[(size_t)y*C.fb_w+x]) continue;
               C.qd_px(x,y,(row>>(7-(x&7)))&1 ? C.qd_fg : C.qd_bg); } } }
-        // addm 718b: an EraseRgn with a background PixPat installed fills with the PATTERN, not a flat
-        // colour (Inside Macintosh: the background pattern is what Erase* paints). Only reachable when a
-        // module actually called BackPixPat with a decodable 'ppat' — Spin Brush is the corpus' only one.
+        // An EraseRgn with a background PixPat installed fills with the PATTERN, not a flat colour
+        // (Inside Macintosh: the background pattern is what Erase* paints). Only reachable when a module
+        // actually called BackPixPat with a decodable 'ppat' — Spin Brush is the corpus' only one.
         else if(opcode==0xA8D4 && g_bg_pixpat && g_bg_pixpat->w>0){
           const PixPatTile& P=*g_bg_pixpat;
           int yt=mask?0:std::max(t,0), yb=mask?C.fb_h:std::min(b,C.fb_h);
@@ -7466,11 +6736,11 @@ int main(int argc, char** argv){
             if(mask && !(*mask)[(size_t)y*C.fb_w+x]) continue;
             C.qd_px(x,y,P.idx[(size_t)(((y%P.h)+P.h)%P.h)*P.w + (size_t)(((x%P.w)+P.w)%P.w)]); }
         }
-        else if(mask){ g_rgnc_fillmask++; C.rgn_mask_fill(rgn, idx); }  // addm 669: count shaped fills (behaviour-identical)
+        else if(mask){ g_rgnc_fillmask++; C.rgn_mask_fill(rgn, idx); }  // count shaped fills
         else if(!C.rgn_mask_fill(rgn, idx)){            // paint the real shape, else oval/bbox
-          // addm 543: single-oval region (recorded by OpenRgn/FrameOval/CloseRgn) — fill the true
-          // ellipse. Valid only while the live bbox still equals the registered oval rect (any
-          // region mutation changes the bbox and silently invalidates the entry).
+          // Single-oval region (recorded by OpenRgn/FrameOval/CloseRgn) — fill the true ellipse. Valid
+          // only while the live bbox still equals the registered oval rect (any region mutation changes
+          // the bbox and silently invalidates the entry).
           auto ov=rgn_oval->find(rgn);
           if(ov!=rgn_oval->end() && ov->second[0]==(int16_t)t && ov->second[1]==(int16_t)l &&
              ov->second[2]==(int16_t)b && ov->second[3]==(int16_t)rr2 && b>t && rr2>l){
@@ -7484,30 +6754,22 @@ int main(int argc, char** argv){
         if(getenv("ADTRAPLOG")) fprintf(stderr,"      FillRgn bbox=%d,%d,%d,%d fg=%d mask=%d pat@%08X\n",
           t,l,b,rr2,C.qd_fg,mask?1:0,patp); } } }
     } else if(opcode==0xAA21){ // OpColor(RGBColor*) — the ARITHMETIC-transfer-mode operand colour
-      // addm 785: this used to read "set the current fill colour" and assigned
-      //   C.qd_fg = rgb_to_index(the OpColor RGB)
-      // which is wrong. Inside Macintosh (Imaging With QuickDraw, OpColor): OpColor sets the
-      // OPERAND colour for the arithmetic transfer modes only — the weight colour for `blend`
-      // and the maximum/minimum colour for addPin/subPin. It never touches the port's foreground
-      // colour, and it draws nothing by itself.
+      // Inside Macintosh (Imaging With QuickDraw, OpColor): OpColor sets the OPERAND colour for the
+      // arithmetic transfer modes only — the weight colour for `blend` and the maximum/minimum colour
+      // for addPin/subPin. It never touches the port's foreground colour, and it draws nothing itself.
       //
-      // WHY IT MATTERED (the Shapes medium-gray background). Shapes' msg-2 blank is exactly
-      //   OpColor(<intensity colour>) ; RectRgn(fullscreen) ; FillRgn(rgn, pat)
-      // and the FillRgn only runs when the module's "Clear Screen First" checkbox (xVal 1003 ->
-      // controlValues[3]) is on. Shapes has not called RGBForeColor at that point, so the port
-      // foreground is still the default qd_fg = rgb_to_index(black) = 255 and FillRgn's pattern
-      // 1-bits should paint BLACK. The old handler had already overwritten qd_fg with the
-      // intensity colour, which resolves onto the System palette's gray ramp (index 250 =
-      // #777777), so "clear screen first" cleared the screen to medium gray. Shapes' Intensity
-      // control is documented on its own µVal as working "only on CLUT devices" — it is a blend
-      // weight, which is precisely what OpColor is for and precisely what it is not: a fill colour.
+      // Shapes depends on this: its msg-2 blank is OpColor(<intensity colour>) ; RectRgn(fullscreen) ;
+      // FillRgn(rgn, pat), and the FillRgn only runs when its "Clear Screen First" checkbox (xVal 1003
+      // -> controlValues[3]) is on. Shapes has not called RGBForeColor at that point, so the port
+      // foreground must still be the default black for the pattern's 1-bits to paint black. Its Intensity
+      // control is a blend weight — precisely what OpColor's operand is, and precisely what a fill colour
+      // is not.
       //
-      // The operand is recorded, not applied: qd_penpx/qd_penpx_res (ad_toolbox.hh) deliberately
-      // fall back to patCopy for every mode outside 0..15, because an 8-bit indexed framebuffer
-      // has no meaningful partial mix (Pearls' PenMode=38 subOver already depends on that
-      // fallback). So there is no consumer today; keeping the value costs nothing and is what a
-      // future true-colour compositing path would read. ADOPCOLORFG=1 restores the pre-fix
-      // clobber for A/B.
+      // The operand is recorded, not applied: qd_penpx/qd_penpx_res (ad_toolbox.hh) deliberately fall
+      // back to patCopy for every mode outside 0..15, because an 8-bit indexed framebuffer has no
+      // meaningful partial mix (Pearls' PenMode=38 subOver depends on that fallback). There is no
+      // consumer today; the value is what a future true-colour compositing path would read.
+      // ADOPCOLORFG=1 makes OpColor clobber the foreground colour instead, for A/B.
       uint32_t cp=mem->read_u32b(r.a[7]); r.a[7]+=4;
       g_opcolor[0]=mem->read_u16b(cp); g_opcolor[1]=mem->read_u16b(cp+2); g_opcolor[2]=mem->read_u16b(cp+4);
       if(getenv("ADOPCOLORFG")) C.qd_fg=C.rgb_to_index(g_opcolor[0],g_opcolor[1],g_opcolor[2]);
@@ -7522,14 +6784,12 @@ int main(int argc, char** argv){
         mem->write_u16b(rg+6,(uint16_t)b); mem->write_u16b(rg+8,(uint16_t)rt);
         if(b>t&&rt>l) C.rgn_mask_setrect(rg,t,l,b,rt); else C.rgn_mask_drop(rg); }
     } else if(opcode==0xAA3A||opcode==0xAA3B||opcode==0xAA4C||opcode==0xAA4D){ ADSTUB("AA3A_ColorSearchProcs_noop"); // AddSearch/AddComp/DelSearch/DelComp(proc:ProcPtr)
-      // Color Manager custom colour search/complement procs. We don't run custom matching -> no-op, but MUST
-      // pop the 4-byte ProcPtr (Pascal PROCEDURE). Was UNHANDLED -> rts-stub popped nothing -> -4 A7 drift ->
-      // corrupted the CALLER's movem-saved regs (Tunnel: AddSearch leak shifted its `movem A2,A3,(A7)+` epilogue
-      // -> A3 restored garbage 0x3039A8 -> deref fault @0x1017A0). Same class as Color2Index(0xAA33)/OpenPort.
-      // addm 627: track proc-active for the index-in-red CLUT-animation idiom (see g_search_active above).
+      // Color Manager custom colour search/complement procs. The host doesn't run custom matching -> no-op,
+      // but it MUST pop the 4-byte ProcPtr (Pascal PROCEDURE) or the caller's stack drifts.
+      // Track proc-active for the index-in-red CLUT-animation idiom (see g_search_active above).
       // AA3A/AA3B = AddSearch/AddComp (proc now active); AA4C/AA4D = DelSearch/DelComp (proc removed).
       if(opcode==0xAA3A||opcode==0xAA3B) g_search_active=true; else g_search_active=false;
-      // addm 720: keep the REAL list. AA3A/AA4C are the colour-search procs the Color Manager consults for
+      // Keep the real list: AA3A/AA4C are the colour-search procs the Color Manager consults for
       // RGB->index; AA3B/AA4D are complement procs and are not part of matching, so they stay out of it.
       { uint32_t proc=mem->read_u32b(r.a[7]);
         if(opcode==0xAA3A){ if(proc) g_search_procs.push_back(proc);
@@ -7539,10 +6799,7 @@ int main(int argc, char** argv){
             if(g_search_procs[i]==proc){ g_search_procs.erase(g_search_procs.begin()+(long)i); break; } } }
       r.a[7]+=4;
     } else if(opcode==0xA8E9){ // RectInRgn(r:Rect; rgn:RgnHandle):Boolean — result-first Pascal FUNCTION.
-      // TRAP-NUMBER FIX (2026-07-16): 0xA8E9 is RectInRgn, NOT OffsetRgn (that is 0xA8E0, handled below).
-      // This branch was a WRONG leftover that ran OffsetRgn code on RectInRgn's stack: it read the rect
-      // pointer as a region handle and wrote through it -> GeoBounce (RectInRgn during draw) faulted at
-      // address *(rect). Real OffsetRgn callers use 0xA8E0, so correcting 0xA8E9 cannot regress them.
+      // 0xA8E9 is RectInRgn; OffsetRgn is 0xA8E0, handled below.
       // Stack (caller reserved a 2-byte Boolean, then pushed): [A7]=rgnHandle, [A7+4]=rect ptr, [A7+8]=result.
       uint32_t h=mem->read_u32b(r.a[7]); uint32_t rectP=mem->read_u32b(r.a[7]+4); r.a[7]+=8;
       bool inside=false;
@@ -7559,7 +6816,7 @@ int main(int argc, char** argv){
         fprintf(stderr,"    RectInRgn rect[%d,%d,%d,%d] rgnbbox[%d,%d,%d,%d] -> %d\n",
           (int16_t)mem->read_u16b(rectP),(int16_t)mem->read_u16b(rectP+2),(int16_t)mem->read_u16b(rectP+4),(int16_t)mem->read_u16b(rectP+6),
           rg?(int16_t)mem->read_u16b(rg+2):0,rg?(int16_t)mem->read_u16b(rg+4):0,rg?(int16_t)mem->read_u16b(rg+6):0,rg?(int16_t)mem->read_u16b(rg+8):0, inside); }
-    } else if((opcode==0xA997||opcode==0xA81A) && getenv("ADREALFS")){ // addm 348: OpenResFile / HOpenResFile
+    } else if((opcode==0xA997||opcode==0xA81A) && getenv("ADREALFS")){ // OpenResFile / HOpenResFile
       // OpenResFile(name:Str255):short          stack: [A7]=namePtr, +4=result(2)
       // HOpenResFile(vRef:short,dirID:long,name:Str255,perm:SInt8):short
       //                                          stack: [A7]=perm(2), +2=namePtr(4), +6=dirID(4), +10=vRef(2), +12=result(2)
@@ -7578,23 +6835,23 @@ int main(int argc, char** argv){
       else if(g_ode.bootActive && id==0 && type==0x4452454C) h=g_ode.drelResH;   // 'DREL' -> engine '+DRL'
       else {
         h=0;
-        // addm 348: honour the Resource Manager chain when real files are open. Get1Resource searches the
-        // CURRENT file only; GetResource searches the whole chain (open files newest-first, module last).
+        // Honour the Resource Manager chain when real files are open. Get1Resource searches the CURRENT
+        // file only; GetResource searches the whole chain (open files newest-first, module last).
         if(getenv("ADREALFS") && !rf_open->empty()){
           if(opcode==0xA81F){ RFOpen* f=rf_find(*rf_cur); if(f) h=rf_get(f,type,(int16_t)id,mem.get()); }
           else { for(auto it2=rf_open->rbegin(); it2!=rf_open->rend() && !h; ++it2) h=rf_get(&*it2,type,(int16_t)id,mem.get()); }
         }
         if(!h && !(getenv("ADREALFS") && opcode==0xA81F && *rf_cur!=2 && rf_find(*rf_cur)))
           h=get_res(type,(int16_t)id);
-        // EXPERIMENT ADBUGSG4FIX: Bugs gate-4 — SuperBugSprite passes &(a dead MacOffScreenCanvas temp) as
-        // the FOURCC-ptr, so type is a heap object address; substitute a real 'Rdat'/'RLEP' at that id.
+        // ADBUGSG4FIX: Bugs' SuperBugSprite passes &(a dead MacOffScreenCanvas temp) as the FOURCC-ptr, so
+        // type is a heap object address; substitute a real 'Rdat'/'RLEP' at that id.
         if(!h && getenv("ADBUGSG4FIX") && ((type>>24)&0xFF)==0x02){
           h=get_res(FOURCC("Rdat"),(int16_t)id); if(!h) h=get_res(FOURCC("RLEP"),(int16_t)id);
           if(getenv("ADBUGSLOG")) fprintf(stderr,"      [g4fix] bad type %08X id %d -> substituted h=%08X\n",type,(int16_t)id,h); }
-        // EXPERIMENT (ADSNDFB): Art Critic (dll# LIB510) loads a 'snd ' per art frame (id 26000+idx) but
-        // only some frames ship sound (ids are sparse). A missing 'snd ' makes the module Throw(0x104),
-        // whose restored handler context our emulator can't execute (heap PC) -> init derails. Substitute
-        // the nearest existing 'snd ' so the load succeeds and the throw never fires.
+        // ADSNDFB: Art Critic (dll# LIB510) loads a 'snd ' per art frame (id 26000+idx) but only some
+        // frames ship sound (ids are sparse). A missing 'snd ' makes the module Throw(0x104), whose
+        // restored handler context this emulator can't execute (heap PC) -> init derails. Substitute the
+        // nearest existing 'snd ' so the load succeeds and the throw never fires.
         if(!h && type==FOURCC("snd ") && getenv("ADSNDFB")){
           auto& sids=rez_ids[FOURCC("snd ")];
           if(!sids.empty()){ int16_t pick=sids[0]; for(int16_t s:sids){ if((uint16_t)s<=(uint16_t)id) pick=s; }
@@ -7618,7 +6875,7 @@ int main(int argc, char** argv){
           fprintf(stderr,"      stack@A7:"); for(int k=0;k<0x40;k+=4) fprintf(stderr," %08X",rd(r.a[7]+k)); fprintf(stderr,"\n");
         }
       }
-      set_res_err(h);                             // addm 543: track ResError (noErr / resNotFound)
+      set_res_err(h);                             // track ResError (noErr / resNotFound)
       mem->write_u32b(r.a[7]+6, h); r.a[7]+=6;    // pop args, leave Handle result
       if(getenv("ADTRAPLOG")){ char t[5]={(char)(type>>24),(char)(type>>16),(char)(type>>8),(char)type,0};
         fprintf(stderr,"      GetResource '%s' %d -> %08X\n",t,(int16_t)id,h); }
@@ -7632,10 +6889,9 @@ int main(int argc, char** argv){
         fprintf(stderr,"      Get1IndResource '%s' [%d/%zu] -> %08X\n",t,idx,ids.size(),h); }
     } else if(opcode==0xA9A8){ // GetResInfo(theResource:Handle; VAR theID:Integer; VAR theType:ResType; VAR name:Str255)
       // Pascal proc; args pushed L->R so on the stack (top=last): [A7]=&name, +4=&theType, +8=&theID,
-      // +12=theResource. Was UNHANDLED -> theID left as garbage. Marbles (and the storage-bail cluster)
-      // walks its 'CODE' behaviour resources and captures the one whose (id-0x80)==1 (id 0x81) as its
-      // root object; with theID never written it never matched -> construction recorded memFullErr and
-      // the object was disposed -> blank. Reverse-map the handle to its (type,id) via rez_handles.
+      // +12=theResource. Marbles (and the storage-bail cluster) walks its 'CODE' behaviour resources and
+      // captures the one whose (id-0x80)==1 (id 0x81) as its root object, so theID must be written or it
+      // never matches. Reverse-map the handle to its (type,id) via rez_handles.
       uint32_t namep=mem->read_u32b(r.a[7]), typep=mem->read_u32b(r.a[7]+4);
       uint32_t idp=mem->read_u32b(r.a[7]+8), theRes=mem->read_u32b(r.a[7]+12);
       r.a[7]+=16;
@@ -7712,32 +6968,32 @@ int main(int argc, char** argv){
       if(getenv("ADTRAPLOG")){ char t[5]={(char)(type>>24),(char)(type>>16),(char)(type>>8),(char)type,0};
         fprintf(stderr,"      Count1Resources '%s' -> %zu\n",t,rez_ids[type].size()); }
     } else if(opcode==0xA9A2||opcode==0xA992){ // LoadResource(A9A2) / DetachResource(A992) — proc, pop 4.
-      // addm 543 item 5: LoadResource is a no-op (our resources are always in memory). DetachResource
-      // (A992) DISOWNS the handle: the module now owns that block, so the RM cache must forget it — the
-      // NEXT GetResource of the same (type,id) then reloads a FRESH copy (the block itself is kept; the
-      // module owns it). Evict by handle value from rez_handles (addm-418 DisposeHandle precedent).
+      // LoadResource is a no-op (resources are always in memory here). DetachResource (A992) DISOWNS the
+      // handle: the module now owns that block, so the RM cache must forget it — the NEXT GetResource of
+      // the same (type,id) then reloads a FRESH copy (the block itself is kept; the module owns it).
+      // Evict by handle value from rez_handles.
       uint32_t h=mem->read_u32b(r.a[7]); r.a[7]+=4;
       if(opcode==0xA992 && !g_no_relres && h){
         for(auto it=rez_handles->begin(); it!=rez_handles->end(); ){ if(it->second==h) it=rez_handles->erase(it); else ++it; }
       } else if(opcode==0xA9A2) ADSTUB("A9A2_LoadDetachResource_noop");
       res_err=0;
     } else if(opcode==0xA9A3){ // ReleaseResource(Handle) — proc, pop 4.
-      // addm 543 item 5: release the resource — evict from the RM cache so the next GetResource RELOADS a
-      // fresh handle (the arena can't physically free the block, but eviction reproduces the observable
-      // "released -> reloaded" semantics). ADNORELRES keeps the old alias-the-cache no-op for A/B.
+      // Release the resource — evict from the RM cache so the next GetResource RELOADS a fresh handle
+      // (the arena can't physically free the block, but eviction reproduces the observable "released ->
+      // reloaded" semantics). ADNORELRES keeps a no-op that aliases the cache instead, for A/B.
       uint32_t h=mem->read_u32b(r.a[7]); r.a[7]+=4;
       if(!g_no_relres && h){
         for(auto it=rez_handles->begin(); it!=rez_handles->end(); ){ if(it->second==h) it=rez_handles->erase(it); else ++it; }
       } else ADSTUB("A9A3_ReleaseResource_noop");
       res_err=0;
     } else if(opcode==0xA99B||opcode==0xA998){ ADSTUB("A99B_SetResLoadUseResFile_noop"); // SetResLoad(Boolean)/UseResFile(short) — proc, pop 2
-      if(opcode==0xA998 && getenv("ADREALFS")) *rf_cur=(int16_t)mem->read_u16b(r.a[7]);   // addm 348
+      if(opcode==0xA998 && getenv("ADREALFS")) *rf_cur=(int16_t)mem->read_u16b(r.a[7]);   // UseResFile
       r.a[7]+=2;
     } else if(opcode==0xA994){ ADSTUB("A994_CurResFile_const"); // CurResFile():short — no args, 2-byte result slot on top
       mem->write_u16b(r.a[7], getenv("ADREALFS") ? (uint16_t)*rf_cur : 0);
     } else if(opcode==0xA9A5){ // SizeRsrc(theResource:Handle):LongInt — return the resource's byte size.
-      // (Previously mis-handled as GetResAttrs -> wrote 0. A9A5 is SizeRsrc; A9A6 is GetResAttrs.)
-      if(getenv("ADOLDA9A5")){ r.a[7]+=4; mem->write_u16b(r.a[7], 0); }  // A/B: old (wrong) behavior
+      // A9A5 is SizeRsrc; A9A6 is GetResAttrs.
+      if(getenv("ADOLDA9A5")){ r.a[7]+=4; mem->write_u16b(r.a[7], 0); }  // A/B: write 0 instead of the size
       else {
         uint32_t h=mem->read_u32b(r.a[7]); r.a[7]+=4;
         auto it=blk_size->find(h); uint32_t sz = (it!=blk_size->end()? it->second : 0);
@@ -7755,7 +7011,7 @@ int main(int argc, char** argv){
         opcode==0xA8A1?"FrameRect":opcode==0xA8A2?"PaintRect":opcode==0xA8A3?"EraseRect":"InvertRect",t,l,b,rr2,C.qd_fg,C.qd_bg,_bs,_on?1:0); }
       if(g_bortitle) fprintf(stderr,"[bortitle] %s phase=%s [t%d,l%d,b%d,r%d] fg=%d bg=%d\n",
         opcode==0xA8A1?"FrameRect":opcode==0xA8A2?"PaintRect":opcode==0xA8A3?"EraseRect":"InvertRect",g_cm_phase,t,l,b,rr2,C.qd_fg,C.qd_bg);
-      rgn_ext(l,t); rgn_ext(rr2,b);   // addm 543: framed-shape extent into OpenRgn capture (no-op unless recording)
+      rgn_ext(l,t); rgn_ext(rr2,b);   // framed-shape extent into OpenRgn capture (no-op unless recording)
       if(rgn_rec) rgn_rec_others++;   // a rect shape: recording is not single-oval
       uint32_t r1b;int r1rb,r1bt,r1bl,r1bb,r1br; bool rect1bit=ad_dst1bit(r1b,r1rb,r1bt,r1bl,r1bb,r1br);
       if(rect1bit){ // 1-bit destination: Frame outlines / Paint,Invert fill / Erase clears — all as bits
@@ -7767,17 +7023,17 @@ int main(int argc, char** argv){
       else if(opcode==0xA8A2) C.qd_penfill(t,l,b,rr2);                        // PaintRect (pen pattern/mode)
       else {
         uint8_t fillidx = (opcode==0xA8A3)?C.qd_bg:C.qd_fg;                    // Erase(bg)/Invert(fg)
-        // *** addm 551 CLASS-B BACKDROP-BLACK ***: the shared AD 4.0 engine (MacCanvas::SetBackgroundColor,
-        // lib pc 0100E5D0) clears the screen each frame with RGBBackColor(<engine bg global>) + a full-screen
-        // EraseRect. That global (A5-0x2080) ships WHITE (0xFFFFFFFF) in our loaded AD4Library, so l40/dll#
-        // engine modules (Fish World, Guernsey Madness, Shadow Agents, Magic Turtle, CYb3r W@t) paint a WHITE
-        // backdrop and draw their colour sprites on top — but After Dark blanks the screen BLACK (field
-        // report; the engine's PerformBlank convention). We CANNOT just force qd_bg black: the module's own
-        // control flow reads the background colour and the engine loops forever on a non-white value (dll#
-        // step-budget hang at lib pc 0102xxxx), and per-sprite CopyBits compositing also uses qd_bg. So —
-        // exactly like the addm-549 CLUT[0]->black lever — change only the DISPLAYED backdrop, not the index
-        // the module reasons with: a full-screen on-screen EraseRect whose bg is PURE WHITE paints the
-        // palette's BLACK index instead, leaving qd_bg untouched. Sprites drawn after the clear land on black.
+        // BACKDROP-BLACK: the shared AD 4.0 engine (MacCanvas::SetBackgroundColor, lib pc 0100E5D0) clears
+        // the screen each frame with RGBBackColor(<engine bg global>) + a full-screen EraseRect. That global
+        // (A5-0x2080) ships WHITE (0xFFFFFFFF) in the loaded AD4Library, so l40/dll# engine modules (Fish
+        // World, Guernsey Madness, Shadow Agents, Magic Turtle, CYb3r W@t) paint a WHITE backdrop and draw
+        // their colour sprites on top — but After Dark blanks the screen BLACK (the engine's PerformBlank
+        // convention). qd_bg cannot simply be forced black: the module's own control flow reads the
+        // background colour and the engine loops forever on a non-white value (dll# step-budget hang at lib
+        // pc 0102xxxx), and per-sprite CopyBits compositing also uses qd_bg. So change only the DISPLAYED
+        // backdrop, not the index the module reasons with: a full-screen EraseRect whose bg is PURE WHITE
+        // paints the palette's BLACK index instead, leaving qd_bg untouched. Sprites drawn after the clear
+        // land on black.
         if(opcode==0xA8A3 && !getenv("ADNOBLACKDROP")){
           uint32_t base;int rb9,bt9,bl9,bb9,br9; bool onscr = C.cur_pm(base,rb9,bt9,bl9,bb9,br9) && base==C.g_fb;
           // Large top-left-anchored erase = the engine's screen blank. Measured by CLIPPED area (>=50% of
@@ -7789,48 +7045,31 @@ int main(int argc, char** argv){
           bool fullscr = l<=1 && t<=1 && cw>0 && ch>0 && (long)cw*ch >= (long)C.fb_w*C.fb_h/2;
           uint32_t e0=C.g_clut+8+(uint32_t)C.qd_bg*8;
           bool bgwhite = mem->read_u16b(e0+2)>=0xFF00 && mem->read_u16b(e0+4)>=0xFF00 && mem->read_u16b(e0+6)>=0xFF00;
-          // addm 633: with SetGWorld tracking generalized (g_gwtrack corpus-wide), the AD 4.0 engine's
-          // full-screen WHITE backdrop EraseRect now lands in the module's OFFSCREEN compose GWorld (cur_port
-          // redirected) instead of the screen, so `onscr` is false and the substitution used to be skipped —
-          // the white backdrop then reached the screen via the module's offscreen->screen composite blit
-          // (Guernsey Madness white 580->90718 px, Marbles! 4216->143829 px). The addm-551 rule ("the engine's
-          // white backdrop must DISPLAY black") applies to that compose buffer identically: substitute black
-          // there too, so the blit carries a black backdrop + the colour sprites drawn on top. Restricted to
-          // g_gwtrack (our new default) + a non-screen current pixmap => ADNOGWTRACK/legacy stay byte-identical,
-          // and it only touches a genuinely full-screen white erase (fullscr guard) — sprite save-unders (Fish
-          // World, Magic Turtle) are small, never fullscr, so their IMPROVED result is unaffected.
+          // With SetGWorld tracking on (g_gwtrack), the engine's full-screen WHITE backdrop EraseRect lands
+          // in the module's OFFSCREEN compose GWorld (cur_port redirected) rather than the screen, and the
+          // white backdrop then reaches the screen via the module's offscreen->screen composite blit. The
+          // same rule applies to that compose buffer: substitute black there too, so the blit carries a
+          // black backdrop with the colour sprites on top. Restricted to g_gwtrack + a non-screen current
+          // pixmap, and only for a genuinely full-screen erase (the fullscr guard) — sprite save-unders
+          // (Fish World, Magic Turtle) are small and never fullscr.
           bool offscreen_compose = g_gwtrack && base && base!=C.g_fb;
           bool tgt = onscr || offscreen_compose;
-          // *** addm 648 S5 COMPOSE-BACKDROP (colour-irrelevant) ***: recover the AD4 MacCanvas engine's
-          // real compositing convention. RE (ADFILLTRACE/ADCBTRACE + disasm): the l40/dll# MacCanvas modules
-          // (Guernsey Madness, Marbles!, CYb3r W@t, Shadow Agents, Fish World, Rodger Dodger, ...) render each
-          // frame into an OFFSCREEN compose GWorld — clear the whole canvas to the current BACKGROUND colour
-          // (an EraseRect, which by definition fills qd_bg), draw the colour sprites on top, then present the
-          // buffer to the screen by a DIRECT pixel copy (the engine's own 68K loop; NO CopyBits/StdBits trap
-          // fires — verified: Guernsey/Marbles issue ZERO blit traps, only the backdrop EraseRect is
-          // interceptable). On a real Mac After Dark the screen blank is BLACK, and the engine composites the
-          // canvas over that blank with the background colour acting as the TRANSPARENT backdrop — so only the
-          // sprites show, on black. Filling the compose backdrop BLACK reproduces that transparent-over-black
-          // present exactly (a plain copy of {black backdrop + sprites} == transparent-copy of {bg backdrop +
-          // sprites} onto a black screen), and — because the fill is display-only (fillidx, NOT qd_bg) — the
-          // module's control flow, which reads qd_bg and would hang on a non-bg value (addm 551), is untouched.
-          //   The backdrop COLOUR is IRRELEVANT: the canvas clear is definitionally the engine's background
-          // (Erase == bg), i.e. AD's blank, whatever index it resolved to under the loaded palette (pure white
-          // for CYb3r/Shadow at addm-633; near-white idx-245 rgb238,238,238 for Guernsey; near-white idx-1
-          // rgb247,250,247 for Marbles!; the sys7-palette churn since addm-633 shifted CYb3r/Shadow to
-          // near-white 245/244 too). The addm-551 `bgwhite` (bg>=0xFF00) guard was only a PROXY for "this is the
-          // engine's white bg backdrop"; the true invariant is "full-screen Erase on the compose canvas".
-          // Dropping the colour test on the offscreen-compose path removes the last near-white-threshold tuning
-          // and dissolves the addm-633 {Guernsey Madness, Marbles!} gwtrack exclusions (they hit this path once
-          // tracked). This SUBSUMES the addm-551 pure-white OFFSCREEN extension (addm-633): every tracked
-          // MacCanvas backdrop is now blacked colour-free. The ON-SCREEN path (onscr, i.e. legacy/ADNOGWTRACK
-          // when SetGWorld isn't redirecting) KEEPS the pure-white `bgwhite` guard: a DIFFERENT layer (direct-
-          // to-screen savers, addm 549/551) where a module may legitimately paint a coloured full-screen back-
-          // ground; it must stay byte-identical under ADNOGWTRACK, and under the default gwtrack it is inert
-          // (every MacCanvas backdrop erase is redirected offscreen — verified: 0 onscr fires corpus-wide).
-          // The fullscr guard (>=50% of screen, top-left anchored) already scopes this to the screen-sized
-          // compose canvas, never the small per-sprite/per-tile scratch GWorlds (Guernsey's 189x145 = 9%,
-          // Marbles' bands) which keep their bg fills.
+          // COMPOSE-BACKDROP: the AD4 MacCanvas engine's compositing convention. The l40/dll# MacCanvas
+          // modules (Guernsey Madness, Marbles!, CYb3r W@t, Shadow Agents, Fish World, Rodger Dodger, ...)
+          // render each frame into an OFFSCREEN compose GWorld — clear the whole canvas to the current
+          // BACKGROUND colour (an EraseRect, which by definition fills qd_bg), draw the colour sprites on
+          // top, then present the buffer to the screen by a DIRECT pixel copy (the engine's own 68K loop;
+          // no CopyBits/StdBits trap fires, so only the backdrop EraseRect is interceptable). On real
+          // hardware the screen blank is BLACK and the engine composites the canvas over it with the
+          // background colour acting as the TRANSPARENT backdrop, so only the sprites show. Filling the
+          // compose backdrop BLACK reproduces that present exactly, and because the fill is display-only
+          // (fillidx, not qd_bg) the module's control flow — which reads qd_bg and would hang on another
+          // value — is untouched. The backdrop COLOUR is irrelevant on this path: the canvas clear is
+          // definitionally the engine's background, whatever index it resolved to under the loaded palette.
+          // The ON-SCREEN path keeps the pure-white `bgwhite` guard, because a direct-to-screen saver may
+          // legitimately paint a coloured full-screen background. The fullscr guard (>=50% of screen,
+          // top-left anchored) scopes this to the screen-sized compose canvas, never the small per-sprite
+          // or per-tile scratch GWorlds, which keep their bg fills.
           bool blackdrop = offscreen_compose ? true : bgwhite;   // compose canvas: colour-irrelevant; screen: pure-white only
           if(tgt && fullscr && blackdrop){ fillidx = C.rgb_to_index(0,0,0);
             if(getenv("ADFILLTRACE")) fprintf(stderr,"      [backdrop-black] full-screen EraseRect -> black idx=%d (onscr=%d compose=%d bg=%d base=%08X)\n",fillidx,onscr?1:0,offscreen_compose?1:0,C.qd_bg,base); }
@@ -7838,21 +7077,13 @@ int main(int argc, char** argv){
         C.qd_fillrect(t,l,b,rr2, fillidx);
       }
     } else if(opcode==0xA8A5){ // FillRect(r: Rect*; pat: Pattern*) — 2 ptr args
-      // *** addm 655 S5 FILLRECT SLOT + PATTERN FIX (default ON, ADNOFILLRECT reverts) ***
-      // SLOT: FillRect is a Pascal 2-arg proc pushed LEFT->RIGHT, so the Rect (first arg) is DEEPER at [A7+4]
-      // and the Pattern (last arg) is at [A7] — exactly the ordering the 6-arg CopyBits handler encodes (first
-      // arg srcBits @[A7+18], last arg maskRgn @[A7]). The pre-653 handler read the RECT from [A7] = the PATTERN
-      // pointer; for a solid-BLACK fill the pattern is all-ones (0xFF..FF) so the "rect" decoded to [-1,-1,-1,-1]
-      // = EMPTY => EVERY FillRect in the corpus was a silent NO-OP since the handler was written (RE'd via
-      // Spotlight's screen DARKEN @ADgm 0x1D20 `pea [A4+0x22E8](rect); pea [A4+0x22F8](black pat); FillRect`).
-      // PATTERN: real QuickDraw FillRect paints the rect with the 8x8 pattern in patCopy — 1-bit=>fg, 0-bit=>bg
-      // (addm 653's collapse-to-qd_fg dropped white/gray/dither fills). Model it: solid-black pattern (all 0xFF)
-      // = solid qd_fg, solid-white (all 0x00) = solid qd_bg (both via the clip-correct qd_fillrect), any dither
-      // = per-pixel pen_bit->fg/bg through qd_px (same clip/region/origin pipeline). ADFILLRECTCENSUS logs
-      // module+pattern+rect+class. Default-flip verified per-caller (addm 655): the corpus FillRect callers
-      // (Dominoes, Strange Attractors, Clocks, Spotlight, ...) were silently missing these fills; changes are
-      // corrections. (legacy-cleanup addm 679: the ADNOFILLRECT A/B revert to the exact pre-653 behaviour
-      // is retired — dead by default in main.)
+      // FillRect is a Pascal 2-arg proc pushed LEFT->RIGHT, so the Rect (first arg) is DEEPER at [A7+4]
+      // and the Pattern (last arg) is at [A7] — the same ordering the 6-arg CopyBits handler encodes
+      // (first arg srcBits @[A7+18], last arg maskRgn @[A7]).
+      // Real QuickDraw FillRect paints the rect with the 8x8 pattern in patCopy — 1-bit => fg, 0-bit => bg.
+      // Model it: a solid-black pattern (all 0xFF) = solid qd_fg, solid-white (all 0x00) = solid qd_bg
+      // (both via the clip-correct qd_fillrect), any dither = per-pixel pen bit -> fg/bg through qd_px
+      // (the same clip/region/origin pipeline). ADFILLRECTCENSUS logs module+pattern+rect+class.
       uint32_t patp = mem->read_u32b(r.a[7]);                                 // Pattern* (last arg, @[A7])
       uint32_t rp   = mem->read_u32b(r.a[7]+4);                               // Rect* (@[A7+4] fixed)
       r.a[7]+=8;                                                              // pop both args
@@ -7872,13 +7103,12 @@ int main(int argc, char** argv){
              C.qd_px(x,y, ((pat[y&7]>>(7-(x&7)))&1)? C.qd_fg : C.qd_bg);
     } else if(opcode==0xA8B7||opcode==0xA8B8||opcode==0xA8B9||opcode==0xA8BA||opcode==0xA8BB){ // Frame/Paint/Erase/Invert/Fill Oval
       // Ovals (0xA8B7-0xA8BB) take just a Rect ptr (4 bytes); FillOval (0xA8BB) adds a Pattern ptr
-      // (8 bytes total). Filled-ellipse approximation. (NOTE: PaintArc is 0xA8BF, a different trap;
-      // do not confuse — the trap_name table historically mislabeled 0xA8B7 as PaintArc.)
+      // (8 bytes total). Filled-ellipse approximation. PaintArc is a different trap, 0xA8BF.
       uint32_t rp=mem->read_u32b(r.a[7]); r.a[7]+=(opcode==0xA8BB)?8:4;
       int t=(int16_t)mem->read_u16b(rp),l=(int16_t)mem->read_u16b(rp+2),
           b=(int16_t)mem->read_u16b(rp+4),rr2=(int16_t)mem->read_u16b(rp+6);
       if(getenv("ADOVALTRACE")) fprintf(stderr,"    Oval [%d,%d,%d,%d] fg=%d bg=%d\n",t,l,b,rr2,C.qd_fg,C.qd_bg);
-      rgn_ext(l,t); rgn_ext(rr2,b);   // addm 543: framed-shape extent into OpenRgn capture (no-op unless recording)
+      rgn_ext(l,t); rgn_ext(rr2,b);   // framed-shape extent into OpenRgn capture (no-op unless recording)
       if(rgn_rec){ rgn_rec_ovals++; rgn_ov[0]=(int16_t)t; rgn_ov[1]=(int16_t)l; rgn_ov[2]=(int16_t)b; rgn_ov[3]=(int16_t)rr2; }
       if(getenv("ADOVALPC")){ static long op=0; if(op++<3) fprintf(stderr,"    [OvalPC] pc=%08X rectptr=%08X\n",r.pc,rp); }
       uint8_t col = (opcode==0xA8B9)?C.qd_bg:C.qd_fg;                         // EraseOval uses bg
@@ -7918,18 +7148,18 @@ int main(int argc, char** argv){
       if(opcode==0xA894){ C.pen_h+=h; C.pen_v+=v; } else { C.pen_h=h; C.pen_v=v; }
       if(poly_rec && poly_cur) (*poly_pts)[poly_cur].push_back({C.pen_h,C.pen_v}); // recording a poly vertex
       rgn_ext(C.pen_h,C.pen_v); // Meadow region bbox (no-op unless rgn_rec)
-      // S2: a MoveTo starts a new sub-path but does NOT itself emit a region edge (pen reposition).
+      // A MoveTo starts a new sub-path but does NOT itself emit a region edge (pen reposition).
       if(rgn_rec){ rgn_subs->emplace_back(); rgn_subs->back().push_back({C.pen_h,C.pen_v}); *rgn_pen_moved=true; }
     } else if(opcode==0xA884){ // DrawString(s: ConstStr255Param) — ptr to a Pascal string, pop 4
       uint32_t sp=mem->read_u32b(r.a[7]); r.a[7]+=4;
       if(g_bortitle && sp){ uint8_t ln=0; try{ln=mem->read_u8(sp);}catch(...){} std::string s; for(int k=0;k<ln&&k<80;k++){uint8_t c=0;try{c=mem->read_u8(sp+1+k);}catch(...){} s+=(char)c;}
         uint32_t retpc=0; try{ retpc=mem->read_u32b(r.a[7]); }catch(...){}
         fprintf(stderr,"[bortitle] DrawString phase=%s pc=%08X ret=%08X pen=(%d,%d) fg=%d \"%s\"\n",g_cm_phase,r.pc,retpc,C.pen_h,C.pen_v,C.qd_fg,s.c_str()); }
-      // addm 699: capture+suppress the timed banner at its draw site. Two mechanism-grounded sources (caller PC):
-      //   (1) shared-lib DoUserMessage banner routine [0x01022332,0x01022420) — "<Scene>:  <fact>" for every
-      //       AD4 dll# module (Slow Burn, Fish World, Flying Toasters, ...), the 68K analog of the PPC adxpl510
-      //       banner (addm 622); (2) Boris's module-own please-wait DrawString @~0x0010081A. Suppressing the draw
-      //       keeps the banner OUT of g_fb / the sprite background; the present-time overlay shows it for N frames.
+      // Capture and suppress the timed banner at its draw site. Two sources, identified by caller PC:
+      //   (1) the shared-lib DoUserMessage banner routine [0x01022332,0x01022420) — "<Scene>:  <fact>" for
+      //       every AD4 dll# module (Slow Burn, Fish World, Flying Toasters, ...);
+      //   (2) Boris's module-own please-wait DrawString @~0x0010081A. Suppressing the draw keeps the banner
+      //       out of g_fb / the sprite background; the present-time overlay shows it for N frames.
       bool banner_src = ( (r.pc>=0x01022332 && r.pc<0x01022420)
                         || (r.pc>=0x00100810 && r.pc<0x00100820) );
       if(banner_src && sp && !getenv("ADNOBANNEROVL")){
@@ -7974,7 +7204,7 @@ int main(int argc, char** argv){
       int th = (opcode==0xA892)? C.pen_h+h : h, tv = (opcode==0xA892)? C.pen_v+v : v;
       rgn_ext(C.pen_h,C.pen_v); rgn_ext(th,tv); // region bbox capture (no-op unless rgn_rec)
       if(rgn_rec){ rgn_rec_others++;            // a line segment: recording is not single-oval
-        // S2: LineTo/Line emits a region edge AND extends the current sub-path.
+        // LineTo/Line emits a region edge AND extends the current sub-path.
         if(rgn_subs->empty()) rgn_subs->emplace_back();
         if(rgn_subs->back().empty()) rgn_subs->back().push_back({C.pen_h,C.pen_v});
         rgn_subs->back().push_back({th,tv});
@@ -8003,16 +7233,16 @@ int main(int argc, char** argv){
         default:  R=G=B=0; break;                      // unknown -> black
       }
       if(opcode==0xA862) C.qd_fg=C.rgb_to_index(R,G,B);
-      else                C.qd_bg=bg_to_index(R,G,B);   // addm 708c: background is force-immune
+      else                C.qd_bg=bg_to_index(R,G,B);   // background is force-immune
     } else if(opcode==0xAA14){ // RGBForeColor(RGBColor*) — pointer to 3 u16
       uint32_t cp=mem->read_u32b(r.a[7]); r.a[7]+=4;
       uint16_t R=mem->read_u16b(cp),G=mem->read_u16b(cp+2),B=mem->read_u16b(cp+4);
-      // addm 627: while a custom colour-search proc is registered, honour the palette-index-in-red idiom
-      // (Tunnel CLUT animation) — the desired CLUT index is packed in the red channel (stored directly for
-      // small values, or in the high byte for index<<8). Nearest-match would collapse the whole ring gradient.
-      uint8_t fgi = fg_resolve(R,G,B);                  // addm 720: the module's own search proc, else nearest
+      // While a custom colour-search proc is registered, honour the palette-index-in-red idiom (Tunnel
+      // CLUT animation) — the desired CLUT index is packed in the red channel (stored directly for small
+      // values, or in the high byte for index<<8). Nearest-match would collapse the whole ring gradient.
+      uint8_t fgi = fg_resolve(R,G,B);                  // the module's own search proc, else nearest
       if(getenv("ADRGBLOG")) fprintf(stderr,"    RGBForeColor R=%04X G=%04X B=%04X -> idx=%d%s\n",R,G,B,fgi,g_search_procs.empty()?"":" [search proc]");
-      g_fg_rgb[0]=R; g_fg_rgb[1]=G; g_fg_rgb[2]=B;   // addm 782: exact value, for GetForeColor
+      g_fg_rgb[0]=R; g_fg_rgb[1]=G; g_fg_rgb[2]=B;   // exact value, for GetForeColor
       C.qd_fg=fgi;
     } else if(opcode==0xA874){ // GetPort(VAR port: GrafPtr) — return the current port.
       // Mandelbrot's vertical mirror does CopyBits(&thePort->portBits ...); if GetPort returns
@@ -8032,9 +7262,9 @@ int main(int argc, char** argv){
       r.a[7]+=4;
       if(g_orglegacy){ C.qd_org_h=h; C.qd_org_v=v; }
       else {
-        // addm 708: authentic SetOrigin — reposition the CURRENT port's portRect + PixMap.bounds.
-        // qd_org_h/v stay 0 so the rasterisers get the origin from the bounds they already read
-        // (pixel = local - bounds.topLeft), the same single map CopyBits/CopyMask use.
+        // Authentic SetOrigin — reposition the CURRENT port's portRect + PixMap.bounds. qd_org_h/v stay 0
+        // so the rasterisers get the origin from the bounds they already read (pixel = local -
+        // bounds.topLeft), the same single map CopyBits/CopyMask use.
         C.qd_org_h=0; C.qd_org_v=0; g_org_h=h; g_org_v=v;
         uint32_t p0=C.cur_port?C.cur_port:C.g_port;
         if(p0) try{
@@ -8056,7 +7286,7 @@ int main(int argc, char** argv){
         try{ uint32_t pmh=mem->read_u32b(p0+0x02); base=mem->read_u32b(mem->read_u32b(pmh)); }catch(...){}
         bool isgw=false; for(uint32_t gw:C.gworlds) if(gw==p0) isgw=true;
         fprintf(stderr,"    [ORG] SetOrigin(h=%d,v=%d) curport=%08X gport=%08X isGW=%d pmbase=%08X\n",h,v,C.cur_port,C.g_port,isgw?1:0,base); }
-      if(getenv("ADQDAUDIT") && (h||v)){ // addm 564 item 6: pattern-phase risk = nonzero origin AND non-uniform pen pattern
+      if(getenv("ADQDAUDIT") && (h||v)){ // pattern-phase risk = nonzero origin AND non-uniform pen pattern
         bool allFF=true, all00=true; for(int k=0;k<8;k++){ if(C.pen_pat[k]!=0xFF) allFF=false; if(C.pen_pat[k]!=0x00) all00=false; }
         fprintf(stderr,"[QDAUDIT] mod=%s op=SetOrigin h=%d v=%d phaseMatters=%d\n",
           g_audit_mod,h,v,(!allFF && !all00)?1:0); }
@@ -8065,28 +7295,25 @@ int main(int argc, char** argv){
       uint32_t rp=mem->read_u32b(r.a[7]); r.a[7]+=4;
       if(rp){ C.qd_clip_t=(int16_t)mem->read_u16b(rp); C.qd_clip_l=(int16_t)mem->read_u16b(rp+2);
               C.qd_clip_b=(int16_t)mem->read_u16b(rp+4); C.qd_clip_r=(int16_t)mem->read_u16b(rp+6); }
-      // addm 669: ClipRect installs a RECTANGULAR clip, superseding any non-rect region clip the port
-      // carried. The host's per-pixel clip_rgn (installed by SetClip of a shaped region) must be cleared,
-      // or it lingers and wrongly restricts every later draw. Dormant while masks are off (clip_rgn is
-      // always 0 then); load-bearing once masks are default-on. ADNOCLIPRECTRGN reverts.
+      // ClipRect installs a RECTANGULAR clip, superseding any non-rect region clip the port carried. The
+      // host's per-pixel clip_rgn (installed by SetClip of a shaped region) must be cleared, or it lingers
+      // and wrongly restricts every later draw. Dormant while masks are off (clip_rgn is always 0 then).
+      // ADNOCLIPRECTRGN keeps the region clip installed, for A/B.
       if(!getenv("ADNOCLIPRECTRGN")) C.clip_rgn=0;
-      adpc_save(C);   // addm 717b: ClipRect edits THIS port's clipRgn, not a machine-wide one
+      adpc_save(C);   // ClipRect edits THIS port's clipRgn, not a machine-wide one
     } else if(opcode==0xAA16){ // SetCPixel(h,v: Integer; cPix: RGBColor*) — plot one pixel.
-      // Pascal args pushed L->R (h deepest): [A7]=cPix(4), +4=v(2), +6=h(2). Unhandled before,
-      // so the 8 arg bytes leaked the stack — the direct-pixel plotters (Mandelbrot, Satori,
-      // plasma-style savers) call this per fractal pixel and starved/derailed. Draw the pixel
-      // into the 8-bit canvas at the RGBColor's nearest palette index.
+      // Pascal args pushed L->R (h deepest): [A7]=cPix(4), +4=v(2), +6=h(2). The direct-pixel plotters
+      // (Mandelbrot, Satori, plasma-style savers) call this per fractal pixel. Draw the pixel into the
+      // 8-bit canvas at the RGBColor's nearest palette index.
       uint32_t cp=mem->read_u32b(r.a[7]);
       int16_t v=(int16_t)mem->read_u16b(r.a[7]+4), h=(int16_t)mem->read_u16b(r.a[7]+6);
       r.a[7]+=8;
       C.qd_px(h, v, C.rgb_to_index(mem->read_u16b(cp),mem->read_u16b(cp+2),mem->read_u16b(cp+4)));
       if(getenv("ADPIXTRACE")) fprintf(stderr,"    SetCPixel(%d,%d) idx=%d\n",h,v,C.qd_fg);
     } else if(opcode==0xAA17){ // GetCPixel(h,v: Integer; VAR cPix: RGBColor) — read one pixel.
-      // Mirror of SetCPixel. Same arg layout: [A7]=cPix(4), +4=v(2), +6=h(2). Previously
-      // unhandled, so it (a) leaked its 8 arg bytes and (b) returned nothing — collision
-      // logic that reads the pixel ahead (Snake reads the cell in front to detect food/
-      // wall/self) got garbage and stalled. Read the canvas index at (h,v) and write its
-      // CLUT RGBColor back into the caller's struct.
+      // Mirror of SetCPixel. Same arg layout: [A7]=cPix(4), +4=v(2), +6=h(2). Collision logic that reads
+      // the pixel ahead (Snake reads the cell in front to detect food/wall/self) depends on it. Read the
+      // canvas index at (h,v) and write its CLUT RGBColor back into the caller's struct.
       uint32_t cp=mem->read_u32b(r.a[7]);
       int16_t v=(int16_t)mem->read_u16b(r.a[7]+4), h=(int16_t)mem->read_u16b(r.a[7]+6);
       r.a[7]+=8;
@@ -8107,12 +7334,10 @@ int main(int argc, char** argv){
           fprintf(stderr,"\n      deref +%d=%08X:",off,p);
           if(p>0x1000&&p<0x400000) for(int j=0;j<16;j+=2) fprintf(stderr," %04X",mem->read_u16b(p+j)); }
         fprintf(stderr,"\n"); }
-      // _StdBits (0xA8EB) is the QuickDraw bottleneck: it has FIVE args (srcBits,srcRect,dstRect,
-      // mode,maskRgn) and blits into the CURRENT port's portBits implicitly — there is NO dstBits
-      // arg. _CopyBits (0xA8EC) has SIX (explicit dstBits). Nocturnes' DRAWPAIR calls _StdBits
-      // directly to blit its 32x32 ICON creatures onto the screen; parsing it with the 6-arg
-      // CopyBits layout read the real srcBits as "dstBits" (and garbage as srcBits) and popped 22
-      // instead of 18 -> nothing drawn + A7 drift. Split the two traps.
+      // _StdBits (0xA8EB) is the QuickDraw bottleneck: it has FIVE args (srcBits,srcRect,dstRect,mode,
+      // maskRgn) and blits into the CURRENT port's portBits implicitly — there is NO dstBits arg.
+      // _CopyBits (0xA8EC) has SIX (explicit dstBits), so the two traps are parsed separately.
+      // Nocturnes' DRAWPAIR calls _StdBits directly to blit its 32x32 ICON creatures onto the screen.
       bool isStdBits = (opcode==0xA8EB);
       uint32_t maskRgn = mem->read_u32b(r.a[7]);   // maskRgn RgnHandle @[A7] (both StdBits & CopyBits); 0 = none
       if(maskRgn && (getenv("ADCBMASKCENSUS")||getenv("ADCBTRACE")))
@@ -8137,21 +7362,14 @@ int main(int argc, char** argv){
       // &thePort->portBits; for a CGrafPort that field (port+0x02) is a PixMapHandle, so deref
       // handle->PixMap. Detect the port case by matching known ports (screen + GWorlds); else
       // treat the arg as an inline PixMap/BitMap (baseAddr@0, rowBytes@4, bounds@6).
-      // addm 707: resolveBits also classifies the bitmap's DEPTH. The blit loop below reads the
-      // source one BYTE per pixel, which silently assumes every source is 8bpp indexed. Classic
-      // QuickDraw's other source kind is the old-style 1-bit BitMap, and the corpus does use it:
-      // Nocturnes' DRAWPAIR blits its 32x32 ICON eye-pairs (rowBytes=4, bounds 32 wide) straight
-      // from the loaded 'ICON' resource. Read as 8bpp, each destination row of 32 pixels consumed
-      // 32 source bytes out of a 4-byte row — walking 8 icon rows per screen row and treating the
-      // mask BYTES (0x00/0x3C/0xFF…) as colour indices. That is exactly the field-reported
-      // "diagonal rainbow streaks": sheared, multi-coloured debris where a pair of eyes belongs.
-      // (The PICT decoder already got this right — see the `pixelSize==1 -> ci? qd_fg : qd_bg`
-      // arm — CopyBits just never learned it.)
-      // DISCRIMINATOR (structural, name-free, and self-evidencing): a row that is too SMALL to
-      // hold one byte per pixel but exactly big enough to hold one BIT per pixel can only be a
-      // 1-bit bitmap. Requiring rb < width keeps every 8bpp pixmap (rb >= width, always) on the
-      // legacy path byte-for-byte, including the host-synthesized GrafPort portBits at 4463 whose
-      // rowBytes carries no PixMap flag — so the flag bit alone would NOT have been safe to trust.
+      // resolveBits also classifies the bitmap's DEPTH. The blit loop below reads the source one BYTE per
+      // pixel, which assumes an 8bpp indexed source; classic QuickDraw's other source kind is the old-style
+      // 1-bit BitMap, and the corpus uses it (Nocturnes' DRAWPAIR blits its 32x32 ICON eye-pairs,
+      // rowBytes=4, bounds 32 wide, straight from the loaded 'ICON' resource).
+      // DISCRIMINATOR (structural, name-free): a row that is too SMALL to hold one byte per pixel but
+      // exactly big enough to hold one BIT per pixel can only be a 1-bit bitmap. Requiring rb < width keeps
+      // every 8bpp pixmap (rb >= width, always) on the byte-per-pixel path, including the host-synthesized
+      // GrafPort portBits whose rowBytes carries no PixMap flag — the flag bit alone is not safe to trust.
       auto resolveBits=[&](uint32_t bits,uint32_t&base,int&rb,int&bt,int&bl,int&bb,int&br,int&depth){
         uint32_t port = (bits>=2)? bits-2 : 0; bool isPort=(port==C.g_port||port==C.cur_port);
         for(uint32_t gw:C.gworlds) if(port==gw) isPort=true;
@@ -8163,14 +7381,12 @@ int main(int argc, char** argv){
         bb=(int16_t)mem->read_u16b(pmx+10); br=(int16_t)mem->read_u16b(pmx+12);
         int w=br-bl;
         depth = (!(rbRaw&0x8000) && w>0 && rb>0 && rb<w && rb*8>=w) ? 1 : 8;
-        // addm 751: now that NewGWorld honours the requested depth, a HOST-BUILT port's pixmap carries a
-        // truthful pixelSize@0x20 backed by a buffer of that depth, and the rb<width discriminator above
-        // cannot see it (a PixMap always sets the 0x8000 flag). Trust pixelSize for host-built ports only,
-        // never for a guest-supplied inline pixmap whose +0x20 may be uninitialised.
-        // addm 758 closes the gap 751 recorded here: the loops now also read 2 and 4 bits per pixel,
-        // and REFUSE 16/32bpp direct colour instead of misreading it. Only pixelSize values this host
-        // can name are trusted; anything else (0, garbage) keeps the legacy classification, so the
-        // 8bpp corpus is byte-identical by construction.
+        // NewGWorld honours the requested depth, so a HOST-BUILT port's pixmap carries a truthful
+        // pixelSize@0x20 backed by a buffer of that depth, which the rb<width discriminator above cannot
+        // see (a PixMap always sets the 0x8000 flag). Trust pixelSize for host-built ports only, never for
+        // a guest-supplied inline pixmap whose +0x20 may be uninitialised. The loops read 1/2/4/8 bits per
+        // pixel and REFUSE 16/32bpp direct colour rather than misreading it; only pixelSize values this
+        // host can name are trusted, anything else (0, garbage) keeps the default classification.
         if(isPort && !g_no_gwdepth){ int psz=0; try{ psz=(int)mem->read_u16b(pmx+0x20); }catch(...){}
           if(psz==1||psz==2||psz==4||psz==16||psz==32) depth=psz; }
       };
@@ -8180,69 +7396,49 @@ int main(int argc, char** argv){
       if(sdepth==1 && getenv("ADNO1BITSRC")) sdepth=8;   // A/B revert to the legacy 8bpp read
       int st,sl,sb,sr, dt,dl,db,dr; rdrect(srcRectP,st,sl,sb,sr); rdrect(dstRectP,dt,dl,db,dr);
       int sw=sr-sl, sh=sb-st, dw=dr-dl, dh=db-dt;
-      // addm 718: the read-path seed detector (g_copyfrom_screen / g_copyfrom_area / g_copy_s2s) and the
-      // addm-661 "seed g_fb at Spotlight's init-time save" hook that used to live here are DELETED. Both
-      // existed to get a source image to the right module at the right moment; the pre-init desktop seed
-      // puts it on the screen before msg 0, so a save-under, a transformer read and Spotlight's full-screen
-      // save all capture the real screen contents exactly as they did on hardware. ADSPOTTRACE retired with
-      // the hook. See the seed block near g_seed_on for the model and the measurement behind it.
-      // addm 708: the addm-561 g_boris "shadow-buffer reposition" heuristic that used to live here is
-      // DELETED. It reconstructed, by guesswork (rect entirely outside bounds + fits the pixel dims ->
-      // re-latch bounds.topLeft to the rect's topLeft), the very repositioning that SetOrigin performs for
-      // real — and it guessed the origin from the save rect, which is one row below the module's actual
-      // SetOrigin, so it also produced Boris' per-step residue row. The SetOrigin handler now writes the
-      // authentic bounds, so the buffer is already screen-aligned when it gets here and no heuristic (or
-      // module name) is needed. ADORGLEGACY=1 restores the old global-offset SetOrigin for A/B.
-      // Transfer mode: srcCopy(0) writes every pixel (unchanged legacy path). transparent(36) and
-      // srcOr(1) are the sprite-composite modes — skip source pixels equal to the background index
-      // (0) so a sprite's bounding-box background doesn't wipe the scene. Higher-fidelity blend/xor
-      // modes fall back to copy for now.
+      // Transfer mode: srcCopy(0) writes every pixel. transparent(36) and srcOr(1) are the sprite-composite
+      // modes — skip source pixels equal to the background index (0) so a sprite's bounding-box background
+      // doesn't wipe the scene. Higher-fidelity blend/xor modes fall back to copy.
       int tmode = (int)(mode & 0x3F);
       bool skipBG = (tmode==36 /*transparent*/ || tmode==1 /*srcOr*/);
-      // addm 561: QuickDraw transparent mode (36) suppresses source pixels equal to the port
-      // BACKGROUND colour, not just index 0. Boris' cat sprite sheet is composited mode=36 over a
-      // WHITE (index 255) matte — the host resolves qd_bg to 0 (black-blank) and never sees Boris set a
-      // white bkColor, so skipping only 0 left the whole sheet matte as an opaque WHITE box around the
-      // cat (the addm-474 "solid-white silhouette" mask gap). Worse, the save-under then re-SAVEs and
-      // re-BLITs that white box each step, and the 12x substep accelerator smears it into the growing
-      // white "fan" that is the field-report noise. Treat 255 as transparent for Boris' mode-36
-      // composites so the cat lands on the real (black) background and the window margin stays black
-      // (self-erasing) instead of seeding the fan. Name-gated to Boris (matches addm-474) -> every
-      // other module's mode-36 blits are byte-identical. (The old ADNOSHADOW opt-out name is
-      // retired, addm 775 — its last live consumer left with the addm-768 srcZeroFill retirement.)
-      // addm 708b: transparent/srcOr also suppresses the palette's WHITE index (see g_white_idx). When the
-      // palette puts white at index 0 — every module whose CLUT the black-blank does not disturb — this is
-      // the same index the rule below already skips, so the blit is byte-identical.
+      // QuickDraw transparent mode (36) suppresses source pixels equal to the port BACKGROUND colour, not
+      // just index 0. Boris' cat sprite sheet is composited mode=36 over a WHITE (index 255) matte, and the
+      // host resolves qd_bg to 0 (black-blank) because Boris never sets a white bkColor — skipping only 0
+      // would leave the whole sheet matte as an opaque white box around the cat, which the save-under then
+      // re-saves and re-blits every step. Treat 255 as transparent for Boris' mode-36 composites so the cat
+      // lands on the real (black) background and the window margin stays black (self-erasing).
+      // Name-gated to Boris; every other module's mode-36 blits are unaffected.
+      // transparent/srcOr also suppresses the palette's WHITE index (see g_white_idx). When the palette
+      // puts white at index 0 — every module whose CLUT the black-blank does not disturb — that is the
+      // same index the rule below already skips.
       bool skipBGmatte = skipBG && g_white_idx && !g_nowhitematte;
-      if(getenv("ADQDAUDIT")){ // addm 564 census: type, transfer mode, stretch, src-OOB (srcRect vs src bounds)
+      if(getenv("ADQDAUDIT")){ // census: type, transfer mode, stretch, src-OOB (srcRect vs src bounds)
         bool stretch = (sw!=dw || sh!=dh);
         bool srcOOB  = (sbb>sbt && sbr>sbl) && (st<sbt||sl<sbl||sb>sbb||sr>sbr);
         fprintf(stderr,"[QDAUDIT] mod=%s op=%s mode=%d stretch=%d srcOOB=%d s[%d,%d,%d,%d](%dx%d) d(%dx%d) sbnd(%d,%d,%d,%d) srcFB=%d\n",
           g_audit_mod, isStdBits?"StdBits":"CopyBits", tmode, stretch?1:0, srcOOB?1:0,
           st,sl,sb,sr,sw,sh,dw,dh, sbt,sbl,sbb,sbr, (sbase==C.g_fb)?1:0); }
-      if(getenv("ADPMLOG")){ // DIAG: source/dest PixMap depth + colour table (erase-class RE)
+      if(getenv("ADPMLOG")){ // DIAG: source/dest PixMap depth + colour table
         auto pmi=[&](uint32_t bits)->std::string{ char b[200];
           uint32_t port=(bits>=2)?bits-2:0; bool isP=(port==C.g_port||port==C.cur_port);
           for(uint32_t gw:C.gworlds) if(port==gw) isP=true;
           uint32_t pmx=bits; if(isP){ try{ pmx=mem->read_u32b(mem->read_u32b(port+0x02)); }catch(...){} }
           int psz=0,ptyp=0; uint32_t ct=0,ct2=0; try{ ptyp=mem->read_u16b(pmx+0x1E); psz=mem->read_u16b(pmx+0x20);
             ct=mem->read_u32b(pmx+0x2A); ct2=mem->read_u32b(pmx+0x1C);}catch(...){}
-          // addm 758: the long at +0x1C is no longer a legacy pmTable alias — it is vRes' low half
-          // followed by pixelType. Printed raw so a run can be checked against the layout in force.
+          // The long at +0x1C is vRes' low half followed by pixelType, not a pmTable alias. Printed raw so
+          // a run can be checked against the layout in force.
           snprintf(b,sizeof(b),"pm=%08X isPort=%d pixelType=%d pixelSize=%d pmTable=%08X raw@1C=%08X",pmx,isP?1:0,ptyp,psz,ct,ct2);
           return std::string(b); };
         fprintf(stderr,"    [PMLOG] mode=%d SRC{%s} DST{%s} g_clut=%08X\n",tmode,pmi(srcBits).c_str(),pmi(dstBits).c_str(),C.g_clut); }
       if(getenv("ADCBTRACE")) fprintf(stderr,"    CopyBits mode=%d src=%08X[rb%d bt%d bl%d] dst=%08X[rb%d b(%d,%d,%d,%d)] s[%d,%d,%d,%d]->d[%d,%d,%d,%d]\n",
         tmode,sbase,srb,sbt,sbl,dbase,drb,dbt,dbl,dbb,dbr,st,sl,sb,sr,dt,dl,db,dr);
-      // *** addm 777: COLOUR-MATCHED CopyBits — honour the SOURCE PixMap's OWN ColorTable ***
-      // Real Color QuickDraw copies indices verbatim ONLY when the two pixmaps share a colour table
-      // (the ctSeed fast path). When the seeds differ it builds a 256-entry TRANSLATION table:
-      // source index -> srcTable[i] RGB -> the closest index in the DESTINATION device's table. Our
-      // single-global-CLUT host always took the verbatim path, so any module that hands its offscreen
-      // pixmap a pmTable of its own and then installs a DIFFERENT table on the screen shows every
-      // pixel through the wrong entry. Structural + name-free: identical tables keep the verbatim
-      // path (byte-identical by construction), only a genuinely divergent source table remaps.
-      // Lever ADNOCBSRCTAB=1 restores the verbatim copy.
+      // COLOUR-MATCHED CopyBits — honour the SOURCE PixMap's OWN ColorTable. Real Color QuickDraw copies
+      // indices verbatim ONLY when the two pixmaps share a colour table (the ctSeed fast path). When the
+      // seeds differ it builds a 256-entry TRANSLATION table: source index -> srcTable[i] RGB -> the
+      // closest index in the DESTINATION device's table. A module that hands its offscreen pixmap a
+      // pmTable of its own and then installs a DIFFERENT table on the screen would otherwise show every
+      // pixel through the wrong entry. Identical tables keep the verbatim path; only a genuinely divergent
+      // source table remaps. ADNOCBSRCTAB=1 forces the verbatim copy.
       uint8_t srcxlat[256]; bool srcxlat_on=false;
       if(sdepth<=8 && !getenv("ADNOCBSRCTAB")){
         uint32_t spmx=srcBits;                                 // re-resolve the src PixMap address
@@ -8272,18 +7468,15 @@ int main(int argc, char** argv){
         } else if(getenv("ADFRTABLOG"))
           fprintf(stderr,"    [frtab] mod=%s srcCT=%08X (absent or == g_clut) -> verbatim\n",g_audit_mod,sct);
       }
-      // addm 516: guard CopyBits src/dst baseAddr readability — the SAME uninitialized-MacPixels-field
-      // family the CopyMask block (0xA817) above already documents/guards (a pixmap whose baseAddr is a
-      // garbage fill pattern e.g. 0x00D7D7D7 / 0xD7D7D7D7, not backed by any tracked arena). CopyBits was
-      // the ONLY QuickDraw blit primitive missing this probe, so a garbage baseAddr fell straight into the
-      // unguarded pixel loop below and threw "not within any arena" — aborting the WHOLE draw call.
-      // If the src/dst baseAddr is not arena-backed, skip this ONE blit (QuickDraw with a NIL/garbage
-      // baseAddr draws nothing) so the rest of the frame still renders. Valid pixmaps pass the probe
-      // trivially => behaviour is byte-identical for every blit that previously succeeded (zero regression).
-      // NOTE: this removes Punch Out's D7D7D7D7 CopyBits fault-storm (182->0) but does NOT make it sustain —
-      // Punch Out's real blocker is a SEPARATE downstream module-internal infinite loop @0x00100C3E (a
-      // corrupt key-search on module data) that stalls the draw at frame ~262 with OR without this guard
-      // (the addm-509 snapshot also "stalls stuck inside one draw"). See addm 516.
+      // Guard CopyBits src/dst baseAddr readability — the same uninitialized-MacPixels-field family the
+      // CopyMask block (0xA817) also guards (a pixmap whose baseAddr is a garbage fill pattern, e.g.
+      // 0x00D7D7D7 / 0xD7D7D7D7, not backed by any tracked arena). Such an address falls into the unguarded
+      // pixel loop below and throws "not within any arena", aborting the WHOLE draw call. If the src/dst
+      // baseAddr is not arena-backed, skip this ONE blit (QuickDraw with a NIL/garbage baseAddr draws
+      // nothing) so the rest of the frame still renders; valid pixmaps pass the probe trivially.
+      // NOTE: this removes Punch Out's D7D7D7D7 CopyBits fault storm but does NOT make it sustain — its
+      // real blocker is a separate module-internal infinite loop @0x00100C3E (a corrupt key-search on
+      // module data) that stalls the draw at frame ~262 with or without this guard.
       bool cbBaseOK = (sbase&&dbase&&sw>0&&sh>0&&dw>0&&dh>0);
       if(cbBaseOK){
         // Probe ONLY the baseAddr itself (offset 0) — the exact word the fault hits (Punch Out's src
@@ -8298,92 +7491,53 @@ int main(int argc, char** argv){
         // Clamp the dst pixmap extent for clipping (fall back to rowBytes-derived width if bounds
         // look degenerate). Prevents blits from writing outside the dst buffer (arena faults/corruption).
         int cl=dbl, ct=dbt, crn=(dbr>dbl?dbr:dbl+drb), cbo=(dbb>dbt?dbb:dbt+4096);
-        // addm 559: clip source reads to the source pixmap bounds. Real QuickDraw intersects
-        // srcRect with srcBits.bounds and shifts dstRect proportionally, so source pixels OUTSIDE
-        // the pixmap are never read (the corresponding dst pixels stay untouched). The old loop
-        // mapped every dst pixel to a src pixel unconditionally, so a srcRect whose corner lies
-        // above/left of the pixmap (Bogglins passes s[-20,-20,176,173] against a (0,0,196,196)
-        // sheet — a 20px hotspot inset) computed a NEGATIVE (sy-sbt)/(sx-sbl); cast to uint32_t
-        // it wrapped to a huge address, reading garbage into the sprite's top-20-row / left-20-col
-        // strip (the "garbage strip at top on ground impact" — the strip tracks wherever the sprite
-        // lands). Gate on VALID bounds (sbb>sbt && sbr>sbl) so degenerate-bounds pixmaps keep their
-        // legacy path; for in-bounds blits every sy/sx is inside [sbt,sbb)x[sbl,sbr) so the guard
-        // never fires -> byte-identical. Opt-out ADNOSRCCLIP=1.
-        // Only clip a GENUINE partial blit — one whose srcRect actually OVERLAPS the source pixmap
-        // (some pixels in, some out, e.g. Bogglins' -20 hotspot border).
+        // Clip source reads to the source pixmap bounds. Real QuickDraw intersects srcRect with
+        // srcBits.bounds and shifts dstRect proportionally, so source pixels OUTSIDE the pixmap are never
+        // read (the corresponding dst pixels stay untouched). Without the clip, a srcRect whose corner lies
+        // above/left of the pixmap (Bogglins passes s[-20,-20,176,173] against a (0,0,196,196) sheet — a
+        // 20px hotspot inset) computes a NEGATIVE (sy-sbt)/(sx-sbl) which, cast to uint32_t, wraps to a
+        // huge address and reads garbage into the sprite's top-20-row / left-20-col strip. Gate on VALID
+        // bounds (sbb>sbt && sbr>sbl) so degenerate-bounds pixmaps are left alone; for in-bounds blits
+        // every sy/sx is inside [sbt,sbb)x[sbl,sbr) so the guard never fires. Opt-out ADNOSRCCLIP=1.
+        // Only clip a GENUINE partial blit — one whose srcRect actually OVERLAPS the source pixmap (some
+        // pixels in, some out, e.g. Bogglins' -20 hotspot border).
         int ist=(st>sbt?st:sbt), isl=(sl>sbl?sl:sbl), isb=(sb<sbb?sb:sbb), isr=(sr<sbr?sr:sbr);
         bool srcOverlap = (isb>ist && isr>isl);
-        // addm 762 (name-gate audit, lane A): the addm-561 `srcZeroFill` screen zero-fill carve-out
-        // that lived here is RETIRED. It read: Boris-only, screen source, valid bounds — treat an
-        // off-canvas screen source pixel as background 0 instead of clipping it, because Boris' cat
-        // save-under SAVEd a screen window extending past the 512-wide canvas (rect left/right >= 512)
-        // and the old unclamped read `sbase+sy*512+sx` rolled into the NEXT row, capturing wrapped
-        // garbage that the module re-deposited as it swept (the accumulating white "fan").
-        // WHY IT IS GONE: 561's own comment stated the falsifiable condition — "screen reads that are
-        // fully in-bounds never hit the guard -> byte-identical". Those out-of-bounds screen reads were
-        // a GWorld-bounds-TRACKING defect, and the sibling addm-716 carve-out just below already records
-        // that addm 708 (authentic SetOrigin writes the port's real portRect/PixMap.bounds) "fixed it at
-        // its source, so the carve-out now protects nothing". 708 + 749 (per-port origin) + 753
-        // (PortSize/MovePortTo) + 717b (per-port clip) make the port's real bounds authentic — exactly
-        // the information this term was substituting for — and 561 was never re-examined when they landed.
-        // MEASURED on current main, Boris 600 f: the term ARMED on 1090 blits and forced ZERO pixels,
-        // saved ZERO clipped rows and ZERO srcEmpty skips across all three of its consumers. Boris emits
-        // no out-of-bounds screen reads any more, so it was a provable no-op; the name-free `srcClip`
-        // below does this job. Every other module had it false by construction (g_boris). Boris 600 f
-        // IDENT on both hash axes; 62-module corpus IDENT on both axes, double-run.
-        // ADNOSHADOW loses its last consumer with this and is now an inert name.
         bool srcClip = (sbb>sbt && sbr>sbl) && srcOverlap && !getenv("ADNOSRCCLIP");
-        // *** addm 716: EMPTY srcRect x srcBits.bounds intersection = the blit copies NOTHING. ***
-        // The final third of the addm-559 rule. Real QuickDraw clips srcRect against srcBits.bounds
-        // BEFORE it maps anything to the destination, so all three cases are one statement: fully
-        // inside -> copy all; partially inside -> copy the overlap (559); fully outside -> copy nothing.
-        // 559 implemented the first two and deliberately left the third on the legacy path, because at
-        // the time the only observed producer was Boris addressing a scratch compositing GWorld with
-        // screen-coordinate rects far outside its own bounds — a GWorld-bounds-TRACKING bug that had to
-        // be fixed at its source, not papered over here. addm 708 fixed it at its source (authentic
-        // SetOrigin writes the port's real portRect/PixMap.bounds), so the carve-out now protects
-        // nothing and only leaves the unguarded arithmetic exposed: a fully-outside srcRect fell into
-        // the pixel loop and computed sbase+(sy-sbt)*srb+(sx-sbl) with sy-sbt NEGATIVE, i.e. an address
-        // BELOW the source buffer. Punch Out punches a piece whose rect straddles the top edge of the
-        // screen: it SetOrigin(583,-36)s its piece GWorld to the punch's screen position and CopyBits
-        // s[-35,583,-6,613] out of the screen, giving 0x4000+(-35)*640+583 = 0xFFFFEAC7 -> "not within
-        // any arena", which aborted the whole draw and left the module dereferencing a null piece
-        // pointer on every later frame (the pc=0x00100C40 fault storm, ~1300 faults / 25s).
-        // Off-edge source rects are ordinary for any saver that positions work in screen coordinates
-        // near a screen edge, so this is a general robustness/parity fix, not a Punch Out one; measured
-        // corpus-wide (ADCBGUARD, 61 modules x 300 frames) Punch Out is the only module that reaches it
-        // at all (18 hits) — for the other 60 the branch is unreachable, so they are byte-identical by
-        // construction, not merely by measurement. Boris' screen zero-fill path (561) keeps precedence:
-        // it models a desktop wider than the canvas, where the off-canvas pixels conceptually EXIST and
-        // read as background. Opt-out ADNOSRCCLIP=1 (the 559 lever); ADORGLEGACY=1 also restores the
-        // legacy path so that lever stays a faithful whole-revert of 708 (under the legacy origin model
-        // a GWorld's bounds never track the port, so screen-coordinate rects against it are "fully
-        // outside" by construction — the very situation this rule is only correct to skip once 708
-        // makes the bounds real).
-        // addm 762: the `&& !srcZeroFill` precedence term goes with the 561 carve-out — measured zero
-        // blits where it decided anything (Boris 600 f: 0 srcEmpty skips suppressed).
+        // An EMPTY srcRect x srcBits.bounds intersection means the blit copies NOTHING. Real QuickDraw
+        // clips srcRect against srcBits.bounds BEFORE it maps anything to the destination, so all three
+        // cases are one statement: fully inside -> copy all; partially inside -> copy the overlap; fully
+        // outside -> copy nothing. Without the third case the unguarded arithmetic computes
+        // sbase+(sy-sbt)*srb+(sx-sbl) with sy-sbt NEGATIVE, i.e. an address BELOW the source buffer:
+        // Punch Out punches a piece whose rect straddles the top edge of the screen (SetOrigin(583,-36) on
+        // its piece GWorld, then CopyBits s[-35,583,-6,613] out of the screen), giving
+        // 0x4000+(-35)*640+583 = 0xFFFFEAC7 -> "not within any arena", which aborts the whole draw and
+        // leaves the module dereferencing a null piece pointer on every later frame. Off-edge source rects
+        // are ordinary for any saver that positions work in screen coordinates near a screen edge.
+        // Opt-out ADNOSRCCLIP=1; ADORGLEGACY=1 also restores the legacy path, because under the legacy
+        // origin model a GWorld's bounds never track the port, so screen-coordinate rects against it are
+        // "fully outside" by construction — the situation this rule is only correct to skip once the
+        // authentic SetOrigin makes the bounds real.
         bool srcEmpty = (sbb>sbt && sbr>sbl) && !srcOverlap
                         && !g_orglegacy && !getenv("ADNOSRCCLIP");
         if(srcEmpty && (getenv("ADCBTRACE")||getenv("ADCBGUARD")))
           fprintf(stderr,"    CopyBits SKIP (srcRect entirely outside src bounds) s[%d,%d,%d,%d] sbnd(%d,%d,%d,%d) src=%08X\n",
             st,sl,sb,sr,sbt,sbl,sbb,sbr,sbase);
-        // addm 758: a direct-colour operand has no indexed reading. Copy nothing and say so once,
-        // rather than feeding RGB bytes to the index loop below. Unreachable in the corpus (every
-        // NewGWorld asks for 8bpp), so this cannot move a byte of today's output.
+        // A direct-colour operand has no indexed reading. Copy nothing and warn once rather than feeding
+        // RGB bytes to the index loop below. Unreachable while every NewGWorld asks for 8bpp.
         if(sdepth>8 || ddepth>8){ pm_warn_direct("CopyBits",sdepth,ddepth); srcEmpty=true; }
-        // *** addm 657 S5 COPYBITS maskRgn ***: real QuickDraw restricts the blit to the maskRgn (a RgnHandle).
-        // The host silently dropped it -> region-masked composites (Spotlight's spotlight circles, Down the
-        // Drain/Frost&Fire/Globe/Nocturnes feedback masks) painted the whole rect and inverted/over-wrote.
-        // Honour it: resolve the handle -> region-data ptr -> scan-converted per-pixel mask (rgn_masks, built
-        // by the region ops when masks_enabled). ADDITIVE + ZERO-RISK: if the region has no populated mask
-        // (masks disabled, or a bounds-only region), maskm==null and the blit is byte-identical. Scoped to a
-        // SCREEN destination (dbase==g_fb) where dst-local coords == the mask's screen coords; offscreen dsts
-        // (different origin) keep the legacy path. ADNOCBMASK forces the legacy drop for A/B.
+        // Real QuickDraw restricts the blit to the maskRgn (a RgnHandle); region-masked composites
+        // (Spotlight's spotlight circles, Down the Drain/Frost&Fire/Globe/Nocturnes feedback masks) depend
+        // on it. Resolve the handle -> region-data ptr -> scan-converted per-pixel mask (rgn_masks, built
+        // by the region ops when masks_enabled). If the region has no populated mask (masks disabled, or a
+        // bounds-only region) maskm is null and the blit is unmasked. Scoped to a SCREEN destination
+        // (dbase==g_fb) where dst-local coords == the mask's screen coords; offscreen dsts (a different
+        // origin) are left unmasked. ADNOCBMASK drops the maskRgn entirely, for A/B.
         std::vector<uint8_t>* maskm=nullptr;
         if(maskRgn && !getenv("ADNOCBMASK") && dbase==C.g_fb){
           uint32_t rgd=0; try{ rgd=mem->read_u32b(maskRgn); }catch(...){ rgd=0; }
           if(rgd) maskm=C.rgn_mask(rgd,false);
-          if(maskm) g_rgnc_cbmask++;   // addm 669: CopyBits maskRgn consumer
+          if(maskm) g_rgnc_cbmask++;   // CopyBits maskRgn consumer
         }
         int nzsrc=0;
         for(int y=0; !srcEmpty && y<dh; y++){ int sy=st+(sh*y)/dh; int ddy=dt+y;
@@ -8393,17 +7547,16 @@ int main(int argc, char** argv){
           for(int x=0;x<dw;x++){ int sx=sl+(sw*x)/dw; int ddx=dl+x;
             if(ddx<cl||ddx>=crn) continue;                     // clip horizontally
             if(maskm && ddx>=0 && ddy>=0 && ddx<C.fb_w && ddy<C.fb_h &&
-               !(*maskm)[(size_t)ddy*C.fb_w+ddx]) continue;    // addm 657: outside the maskRgn -> leave dst
+               !(*maskm)[(size_t)ddy*C.fb_w+ddx]) continue;    // outside the maskRgn -> leave dst
             bool sxOut=(sx<sbl||sx>=sbr);
             uint8_t px;
             if(srcClip && (syOut||sxOut)) continue;            // partial/shadow src -> leave dst untouched
             else if(sdepth==1){
-              // addm 707: 1-bit source -> colour destination. QuickDraw expands the mask through
-              // the port's fore/back colours; the boolean transfer modes 0..7 differ only in which
-              // colour each bit takes and whether the other bit is left alone (Inside Macintosh I,
-              // "Transfer Modes"). Nocturnes blits notSrcCopy(4) with a black foreground, so the
-              // eye bits land in the BACK colour and the 32x32 surround in black — eyes glowing on
-              // an unchanged dark screen, which is the module's whole premise.
+              // 1-bit source -> colour destination. QuickDraw expands the mask through the port's
+              // fore/back colours; the boolean transfer modes 0..7 differ only in which colour each bit
+              // takes and whether the other bit is left alone (Inside Macintosh I, "Transfer Modes").
+              // Nocturnes blits notSrcCopy(4) with a black foreground, so the eye bits land in the BACK
+              // colour and the 32x32 surround in black — eyes glowing on an unchanged dark screen.
               uint8_t b=mem->read_u8(sbase+(uint32_t)(sy-sbt)*srb+(uint32_t)((sx-sbl)>>3));
               int bit=(b>>(7-((sx-sbl)&7)))&1;
               int m=tmode&7;
@@ -8418,48 +7571,39 @@ int main(int argc, char** argv){
               if(bit) nzsrc++;
               if(ddepth==1){ int dpx=ddx-dbl; uint32_t da=dbase+(uint32_t)(ddy-dbt)*drb+(uint32_t)(dpx>>3); // 1-bit dst: write a BIT
                 uint8_t dm=(uint8_t)(0x80u>>(dpx&7)),dv=mem->read_u8(da); if(px!=C.qd_bg) dv|=dm; else dv&=(uint8_t)~dm; mem->write_u8(da,dv); }
-              else if(ddepth==2||ddepth==4) pm_put_idx(mem,dbase+(uint32_t)(ddy-dbt)*drb,ddx-dbl,ddepth,px);  // addm 758
+              else if(ddepth==2||ddepth==4) pm_put_idx(mem,dbase+(uint32_t)(ddy-dbt)*drb,ddx-dbl,ddepth,px);  // 2/4bpp dst
               else mem->write_u8(dbase+(uint32_t)(ddy-dbt)*drb+(ddx-dbl), px); continue;
             }
-            else if(sdepth==2||sdepth==4)                       // addm 758: sub-byte indexed source
+            else if(sdepth==2||sdepth==4)                       // sub-byte indexed source
               px=pm_get_idx(mem,sbase+(uint32_t)(sy-sbt)*srb,sx-sbl,sdepth);
             else px=mem->read_u8(sbase+(uint32_t)(sy-sbt)*srb+(sx-sbl));
-            if(srcxlat_on) px=srcxlat[px];                      // addm 777: source-table colour match
+            if(srcxlat_on) px=srcxlat[px];                      // source-table colour match
             if(px) nzsrc++;
             if(skipBG && (px==0 || (skipBGmatte && px==g_white_idx))) continue;  // transparent/srcOr: leave the background/matte
             if(ddepth==1){ int dpx=ddx-dbl; uint32_t da=dbase+(uint32_t)(ddy-dbt)*drb+(uint32_t)(dpx>>3);   // 1-bit dst: 8bpp src -> bit
               uint8_t dm=(uint8_t)(0x80u>>(dpx&7)),dv=mem->read_u8(da); if(px!=C.qd_bg) dv|=dm; else dv&=(uint8_t)~dm; mem->write_u8(da,dv); }
-            else if(ddepth==2||ddepth==4) pm_put_idx(mem,dbase+(uint32_t)(ddy-dbt)*drb,ddx-dbl,ddepth,px);   // addm 758
+            else if(ddepth==2||ddepth==4) pm_put_idx(mem,dbase+(uint32_t)(ddy-dbt)*drb,ddx-dbl,ddepth,px);   // 2/4bpp dst
             else mem->write_u8(dbase+(uint32_t)(ddy-dbt)*drb+(ddx-dbl), px); } }
-        // *** addm 728: moving-present-window TRAIL erase — Boris white specks + GeoBounce strays ***
-        // A class of modules composites a frame in an OFFSCREEN buffer and CopyBits-PRESENTS a window of it
-        // to the screen at a MOVING destination WITHOUT separately erasing the old on-screen position: they
-        // rely on each present covering the previous one. When the present window tracks the drawn object's
-        // CURRENT bounding box, the ~motion-delta-wide TRAILING sliver of the PREVIOUS position (behind the
-        // object's travel) is never repainted, so its orphaned pixels accumulate as a trail. Boris "Out on
-        // the Town" (cat/butterfly on the black night sky — the field-reported white specks; the addm-708b
-        // "module-side, not papered" residual) and GeoBounce (its poly window, offscreen FillRect-erased to
-        // black, presented to a moving screen rect — the ledgered 1-2px FramePoly strays) are the members.
-        // Both walk their object over a static BLACK background (index 0 in every frame before a sprite
-        // reaches it — verified; there is no static town/tank to protect), so the fix tracks each object's
-        // previous present rect by OVERLAP (cat and butterfly stay independent; a non-overlapping present
-        // starts a fresh slot) and clears the vacated region (prevRect \ curRect) to index 0. A static
-        // object has prevRect==curRect so nothing is touched.
+        // Moving-present-window TRAIL erase. A class of modules composites a frame in an OFFSCREEN buffer
+        // and CopyBits-PRESENTS a window of it to the screen at a MOVING destination WITHOUT separately
+        // erasing the old on-screen position: each present is relied on to cover the previous one. When the
+        // present window tracks the drawn object's CURRENT bounding box, the ~motion-delta-wide TRAILING
+        // sliver of the PREVIOUS position (behind the object's travel) is never repainted, so its orphaned
+        // pixels accumulate as a trail. Boris "Out on the Town" (cat/butterfly on the black night sky) and
+        // GeoBounce (its poly window, offscreen FillRect-erased to black, presented to a moving screen rect)
+        // are the members. Both walk their object over a static BLACK background, so the fix tracks each
+        // object's previous present rect by OVERLAP (cat and butterfly stay independent; a non-overlapping
+        // present starts a fresh slot) and clears the vacated region (prevRect \ curRect) to index 0. A
+        // static object has prevRect==curRect, so nothing is touched.
         //
-        // *** WHY NAME-GATED, not structural (proven irreducible, addm-687 held-with-proof bar) ***
-        // A genuine structural discriminator was attempted and MEASURED across six build variants (see
-        // scratchpad/evidence.md). Detecting "offscreen->screen present of a moving window whose surrounding
-        // background is uniform, then refill the vacated region with the detected background colour" is the
-        // right idea and it correctly fixes the LARGE-object cases, but it cannot be made a no-op for the
-        // rest of the corpus because two independent ambiguities are undecidable from a single present's
-        // geometry+colour: (1) a small TRAILING sprite (Boris' butterfly, whose own present window is
-        // object-dominated so the background is not its source mode) is structurally identical to a small
-        // LEGITIMATE composite element (Art Critic's easel, Marbles' marble edges) — the permissive rule
-        // corrupts Fish World/Marbles/Art Critic by 76k-104k px, and every tightening that excludes them
-        // also stops fixing the butterfly; (2) overlap slot-matching cross-assigns in many-object scenes
-        // (Marbles' ~15 marbles) and eats real marble edges. So the class is real but its membership is not
-        // computable here without the module identity. Gated to the two known members (matches addm 474/561
-        // precedent); every other module is byte-identical BY CONSTRUCTION. Opt-out ADNOBORISTRAIL=1.
+        // NAME-GATED rather than structural, and it has to stay that way: two ambiguities are undecidable
+        // from a single present's geometry+colour. (1) A small TRAILING sprite (Boris' butterfly, whose own
+        // present window is object-dominated) is structurally identical to a small LEGITIMATE composite
+        // element (Art Critic's easel, Marbles' marble edges) — a permissive rule corrupts Fish World,
+        // Marbles and Art Critic, and every tightening that excludes them also stops fixing the butterfly.
+        // (2) Overlap slot-matching cross-assigns in many-object scenes (Marbles' ~15 marbles) and eats real
+        // marble edges. Gated to the two known members; every other module is unaffected by construction.
+        // Opt-out ADNOBORISTRAIL=1.
         if((g_boris||g_geobounce) && !g_noboristrail && dbase==C.g_fb && sbase!=C.g_fb && dr>dl && db>dt){
           static struct { bool v; int l,t,r,b; } bt_slot[8] = {};
           int best=-1; long bestov=0;
@@ -8497,12 +7641,8 @@ int main(int argc, char** argv){
       // rect r by (dh,dv); fill the vacated strip with the background colour and accumulate it into
       // updateRgn. Pascal PROCEDURE — args pushed left->right, so r is deepest:
       //   [A7]=updateRgn(4), +4=dv(2), +6=dh(2), +8=r*(4).  Pop 12 (callee-clean).
-      // Was UNHANDLED: it fell to the GetTrapAddress rts-stub that pops NOTHING, so Puzzle's slide-tile
-      // primitive drifted A7 by 12 on every draw -> corrupted the caller's movem-saved regs -> fault
-      // storm (008000xx reads @pc=001013AA) and a frozen frame index at ~1101 (same A7-drift bug class
-      // as Color2Index/OpenPort/AddSearch). Implement against the host software pixmap via qd_getpx/
-      // qd_px (identical port-origin + clip transform), snapshotting r FIRST so an overlapping shift
-      // can't read pixels it has already moved.
+      // Implemented against the host software pixmap via qd_getpx/qd_px (identical port-origin + clip
+      // transform), snapshotting r FIRST so an overlapping shift can't read pixels it has already moved.
       uint32_t updateRgn = mem->read_u32b(r.a[7]);
       int dv = (int16_t)mem->read_u16b(r.a[7]+4);
       int dh = (int16_t)mem->read_u16b(r.a[7]+6);
@@ -8537,16 +7677,13 @@ int main(int argc, char** argv){
           else { mem->write_u16b(rg,10); for(int o=2;o<10;o+=2) mem->write_u16b(rg+o,0); C.rgn_mask_drop(rg); } }
       }
     } else if(opcode==0xA817){ // CopyMask(srcBits,maskBits,dstBits: BitMap*; srcRect,maskRect,dstRect: Rect*)
-      // VERIFIED (ADCMLOG probe against live Rebound calls): all 6 params are POINTERS pushed
-      // left->right, same convention as CopyBits' srcBits/dstBits (a BitMap "value" param doesn't
-      // fit registers, so the trap glue pushes the address of a compiler-made copy). srcBits is
-      // pushed first (deepest), dstRect last (top of stack -> [A7]). Stack top->bottom:
-      // [A7]=dstRect*, +4=maskRect*, +8=srcRect*, +12=dstBits*, +16=maskBits*, +20=srcBits*.
-      // Pop 24. Confirmed empirically: srcBits/dstBits resolve via the SAME "bits-2 == port"
-      // GWorld trick CopyBits' resolveBits uses (dstBits-2 == cur_port, an offscreen canvas;
-      // srcBits-2 matches a tracked C.gworlds entry, a 32x32 or 16x16 sprite pixmap) — the same
-      // A7 offsets that make CopyBits work here make CopyMask's src/dst resolve to sane, real
-      // pixmaps (rowBytes/bounds match the sprite dimensions), confirming the layout.
+      // All 6 params are POINTERS pushed left->right, the same convention as CopyBits' srcBits/dstBits (a
+      // BitMap "value" param doesn't fit registers, so the trap glue pushes the address of a compiler-made
+      // copy). srcBits is pushed first (deepest), dstRect last (top of stack -> [A7]). Stack top->bottom:
+      // [A7]=dstRect*, +4=maskRect*, +8=srcRect*, +12=dstBits*, +16=maskBits*, +20=srcBits*. Pop 24.
+      // srcBits/dstBits resolve via the same "bits-2 == port" GWorld trick CopyBits' resolveBits uses
+      // (dstBits-2 == cur_port, an offscreen canvas; srcBits-2 matches a tracked C.gworlds entry, a 32x32
+      // or 16x16 sprite pixmap), and the rowBytes/bounds that come back match the sprite dimensions.
       uint32_t a7before = r.a[7]; (void)a7before;
       uint32_t dstRectP=mem->read_u32b(r.a[7]+0), maskRectP=mem->read_u32b(r.a[7]+4), srcRectP=mem->read_u32b(r.a[7]+8);
       uint32_t dstBitsP=mem->read_u32b(r.a[7]+12), maskBitsP=mem->read_u32b(r.a[7]+16), srcBitsP=mem->read_u32b(r.a[7]+20);
@@ -8557,13 +7694,12 @@ int main(int argc, char** argv){
       // CopyBits' resolveBits (this host tracks GWorld ports in C.gworlds; a bits-2 match means
       // the arg is &thePort->portBits, so dereference the CGrafPort's PixMapHandle instead of
       // reading the arg address directly as an inline BitMap/PixMap).
-      // addm 715: classify DEPTH here exactly as CopyBits' resolveBits does (addm 707). This arm read
-      // every source one BYTE per pixel, the same assumption 707 disproved for CopyBits: classic
-      // QuickDraw's other source kind is the old-style 1-bit BitMap, and CopyMask takes BitMap* args by
-      // signature. DISCRIMINATOR (identical, structural, name-free): a row too SMALL to hold one byte
-      // per pixel but exactly big enough to hold one BIT per pixel can only be 1-bit. rb >= width is
-      // true for every 8bpp pixmap, so the legacy path is byte-for-byte preserved for them, including
-      // host-synthesized portBits whose rowBytes carries no PixMap flag.
+      // Depth is classified exactly as CopyBits' resolveBits does: CopyMask takes BitMap* args by
+      // signature, and classic QuickDraw's other source kind is the old-style 1-bit BitMap.
+      // DISCRIMINATOR (structural, name-free): a row too SMALL to hold one byte per pixel but exactly big
+      // enough to hold one BIT per pixel can only be 1-bit. rb >= width is true for every 8bpp pixmap, so
+      // they keep the byte-per-pixel path, including host-synthesized portBits whose rowBytes carries no
+      // PixMap flag.
       auto resolveBits=[&](uint32_t bits,uint32_t&base,int&rb,int&bt,int&bl,int&bb,int&br,int&depth){
         uint32_t port = (bits>=2)? bits-2 : 0; bool isPort=(port==C.g_port||port==C.cur_port);
         for(uint32_t gw:C.gworlds) if(port==gw) isPort=true;
@@ -8575,14 +7711,12 @@ int main(int argc, char** argv){
         bb=(int16_t)mem->read_u16b(pmx+10); br=(int16_t)mem->read_u16b(pmx+12);
         int w=br-bl;
         depth = (!(rbRaw&0x8000) && w>0 && rb>0 && rb<w && rb*8>=w) ? 1 : 8;
-        // addm 751: now that NewGWorld honours the requested depth, a HOST-BUILT port's pixmap carries a
-        // truthful pixelSize@0x20 backed by a buffer of that depth, and the rb<width discriminator above
-        // cannot see it (a PixMap always sets the 0x8000 flag). Trust pixelSize for host-built ports only,
-        // never for a guest-supplied inline pixmap whose +0x20 may be uninitialised.
-        // addm 758 closes the gap 751 recorded here: the loops now also read 2 and 4 bits per pixel,
-        // and REFUSE 16/32bpp direct colour instead of misreading it. Only pixelSize values this host
-        // can name are trusted; anything else (0, garbage) keeps the legacy classification, so the
-        // 8bpp corpus is byte-identical by construction.
+        // NewGWorld honours the requested depth, so a HOST-BUILT port's pixmap carries a truthful
+        // pixelSize@0x20 backed by a buffer of that depth, which the rb<width discriminator above cannot
+        // see (a PixMap always sets the 0x8000 flag). Trust pixelSize for host-built ports only, never for
+        // a guest-supplied inline pixmap whose +0x20 may be uninitialised. The loops read 1/2/4/8 bits per
+        // pixel and REFUSE 16/32bpp direct colour rather than misreading it; only pixelSize values this
+        // host can name are trusted, anything else (0, garbage) keeps the default classification.
         if(isPort && !g_no_gwdepth){ int psz=0; try{ psz=(int)mem->read_u16b(pmx+0x20); }catch(...){}
           if(psz==1||psz==2||psz==4||psz==16||psz==32) depth=psz; }
       };
@@ -8591,22 +7725,21 @@ int main(int argc, char** argv){
       uint32_t sbase,mbase,dbase; int srb,mrb,drb, sbt,sbl,sbb,sbr, mbt,mbl,mbb,mbr, dbt,dbl,dbb,dbr;
       int sdepth=8, mdepth=1, ddepth=8;
       resolveBits(srcBitsP,sbase,srb,sbt,sbl,sbb,sbr,sdepth);
-      // maskBits is NOT a GWorld/port (it's a plain BitMap, usually a 1-bit compiled sprite
-      // mask); it never matched the port trick in probing, so read it as an inline BitMap.
-      // Two legitimate "no mask" cases observed live: baseAddr==0 (the documented QuickDraw
-      // ROM behaviour: NIL maskBits.baseAddr -> CopyMask degrades to a plain CopyBits) and a
-      // baseAddr that isn't backed by any tracked arena (an uninitialized MacPixels-class field,
-      // same bug family as addm 352/353) — probed with a guarded read below.
+      // maskBits is NOT a GWorld/port (it's a plain BitMap, usually a 1-bit compiled sprite mask), so it
+      // is read as an inline BitMap. Two legitimate "no mask" cases occur: baseAddr==0 (the documented
+      // QuickDraw ROM behaviour: NIL maskBits.baseAddr -> CopyMask degrades to a plain CopyBits) and a
+      // baseAddr that isn't backed by any tracked arena (an uninitialized MacPixels-class field) — both
+      // probed with a guarded read below.
       if(maskBitsP) resolveBits(maskBitsP,mbase,mrb,mbt,mbl,mbb,mbr,mdepth); else { mbase=0;mrb=0;mbt=mbl=mbb=mbr=0; mdepth=1; }
       resolveBits(dstBitsP,dbase,drb,dbt,dbl,dbb,dbr,ddepth);
       (void)ddepth;   // every destination in the corpus is the 8bpp screen or an 8bpp GWorld
-      if(getenv("ADNO1BITSRC")) { sdepth=8; mdepth=1; }   // A/B revert to the legacy reads (same lever as 707)
+      if(getenv("ADNO1BITSRC")) { sdepth=8; mdepth=1; }   // A/B: force the byte-per-pixel reads
       int st,sl,sb,sr, mt,ml,mb,mr, dt,dl,db,dr;
       rdrect(srcRectP,st,sl,sb,sr); rdrect(maskRectP,mt,ml,mb,mr); rdrect(dstRectP,dt,dl,db,dr);
       int sw=sr-sl, sh=sb-st, dw=dr-dl, dh=db-dt;
-      // addm 715 CENSUS (ADCMCENSUS): one line per DISTINCT source/mask geometry per module — does any
-      // module ever hand CopyMask a 1-bit source (or an 8bpp mask plane)? Prints the raw numbers the
-      // discriminator reads so the classification can be audited, not taken on trust.
+      // ADCMCENSUS: one line per DISTINCT source/mask geometry per module — does any module ever hand
+      // CopyMask a 1-bit source (or an 8bpp mask plane)? Prints the raw numbers the discriminator reads
+      // so the classification can be audited.
       if(getenv("ADCMCENSUS")){
         static std::set<uint64_t> seen;
         uint64_t sig = ((uint64_t)(srb&0xFFFF)<<48) | ((uint64_t)((sbr-sbl)&0xFFFF)<<32)
@@ -8617,7 +7750,7 @@ int main(int argc, char** argv){
             g_audit_mod?g_audit_mod:"?", srb, sbr-sbl, sbb-sbt, sdepth,
             mrb, mbr-mbl, mbb-mbt, mdepth, mbase, drb, dbr-dbl, ddepth);
       }
-      if(getenv("ADQDAUDIT")){ // addm 564 census: CopyMask stretch + src-OOB (the block MISSING the addm-559 clip)
+      if(getenv("ADQDAUDIT")){ // census: CopyMask stretch + src-OOB
         bool stretch = (sw!=dw || sh!=dh);
         bool srcOOB  = (sbb>sbt && sbr>sbl) && (st<sbt||sl<sbl||sb>sbb||sr>sbr);
         fprintf(stderr,"[QDAUDIT] mod=%s op=CopyMask mode=NA stretch=%d srcOOB=%d s[%d,%d,%d,%d](%dx%d) d(%dx%d) sbnd(%d,%d,%d,%d) srcFB=%d\n",
@@ -8636,15 +7769,14 @@ int main(int argc, char** argv){
       }
       if(getenv("ADCMLOG")) fprintf(stderr,"      src[rb%d bt%d bl%d %dx%d]=%08X mask[rb%d bt%d bl%d %dx%d have=%d]=%08X dst[rb%d b(%d,%d,%d,%d)]=%08X s[%d,%d,%d,%d]->d[%d,%d,%d,%d]\n",
         srb,sbt,sbl,sw,sh,sbase, mrb,mbt,mbl,mr-ml,mb-mt,haveMask,mbase, drb,dbt,dbl,dbb,dbr,dbase, st,sl,sb,sr,dt,dl,db,dr);
-      // addm 725: guard the SRC/DST baseAddr the same way CopyBits does (addm 516) — CopyMask only ever
-      // probed its MASK plane, so a src or dst pixmap with a garbage/uninitialized baseAddr (observed live
-      // as 0xFFFFFFFF: Punch Out's LARGE punch reaches a CopyMask whose scratch GWorld baseAddr is unset)
-      // fell into the unguarded pixel loop and threw "not within any arena", aborting the whole draw. A
-      // NIL/unbacked bitmap draws nothing in real QuickDraw; a valid baseAddr passes the offset-0 probe
-      // trivially, so every previously-working CopyMask is byte-identical.
+      // Guard the SRC/DST baseAddr the same way CopyBits does: a src or dst pixmap with a garbage or
+      // uninitialized baseAddr (observed as 0xFFFFFFFF — Punch Out's LARGE punch reaches a CopyMask whose
+      // scratch GWorld baseAddr is unset) otherwise falls into the unguarded pixel loop and throws "not
+      // within any arena", aborting the whole draw. A NIL/unbacked bitmap draws nothing in real QuickDraw;
+      // a valid baseAddr passes the offset-0 probe trivially.
       bool cmBaseOK = (sbase&&dbase&&sw>0&&sh>0&&dw>0&&dh>0);
-      // addm 758 (CopyBits' twin): a direct-colour operand has no indexed reading — copy nothing and
-      // say so once instead of feeding RGB samples to the index loop. No corpus consumer.
+      // CopyBits' twin: a direct-colour operand has no indexed reading — copy nothing and warn once
+      // instead of feeding RGB samples to the index loop.
       if(cmBaseOK && (sdepth>8 || ddepth>8)){ pm_warn_direct("CopyMask",sdepth,ddepth); cmBaseOK=false; }
       if(cmBaseOK && !getenv("ADNOCMBASEGUARD")){ try{ mem->read_u8(sbase); mem->read_u8(dbase); }
         catch(...){ cmBaseOK=false;
@@ -8652,19 +7784,16 @@ int main(int argc, char** argv){
       if(cmBaseOK){
         int cl=dbl, ct=dbt, crn=(dbr>dbl?dbr:dbl+drb), cbo=(dbb>dbt?dbb:dbt+4096);
         int mw=mr-ml, mh=mb-mt; if(mw<=0) mw=sw; if(mh<=0) mh=sh;
-        // addm 564: SOURCE-BOUNDS CLIP — the exact addm-559 CopyBits fix, ported to CopyMask (the sibling
-        // blit loop the 559 wave left untouched). Real QuickDraw intersects srcRect with srcBits.bounds and
-        // never reads source pixels outside the pixmap; the old loop mapped every dst pixel to a src pixel
-        // unconditionally, so a srcRect whose corner lies above/left of the pixmap (the Bogglins-class
-        // hotspot-inset pattern) computed a NEGATIVE (sy-sbt)/(sx-sbl) that, cast to uint32_t, wrapped to a
-        // huge address — reading garbage (or FAULTING, since this read is unguarded, aborting the whole
-        // draw). Gate on VALID source bounds (sbb>sbt && sbr>sbl) AND a GENUINE partial blit (srcRect
-        // actually overlaps the pixmap — some pixels in, some out), mirroring 559 exactly: a fully-inside
-        // blit never trips the guard (byte-identical), and a fully-OUTSIDE rect (the Boris scratch-GWorld
-        // idiom) stays on the legacy path. CENSUS (addm 564): NO corpus module currently passes an
-        // out-of-bounds srcRect to CopyMask (Rebound 680 calls/60 frames, Punch Out, Dominoes, Clocks all
-        // in-bounds), so this is a DEFENSIVE parity fix — byte-identical corpus-wide — that closes the same
-        // latent edge-semantics gap 559 closed for CopyBits. Opt-out ADNOSRCCLIP=1 (same lever as 559).
+        // SOURCE-BOUNDS CLIP — the same rule the CopyBits loop applies. Real QuickDraw intersects srcRect
+        // with srcBits.bounds and never reads source pixels outside the pixmap; without it, a srcRect whose
+        // corner lies above/left of the pixmap (the Bogglins-class hotspot-inset pattern) computes a
+        // NEGATIVE (sy-sbt)/(sx-sbl) that, cast to uint32_t, wraps to a huge address — reading garbage, or
+        // FAULTING (this read is unguarded) and aborting the whole draw. Gate on VALID source bounds
+        // (sbb>sbt && sbr>sbl) AND a GENUINE partial blit (srcRect actually overlaps the pixmap — some
+        // pixels in, some out): a fully-inside blit never trips the guard, and a fully-OUTSIDE rect is left
+        // alone. No corpus module currently passes an out-of-bounds srcRect to CopyMask (Rebound, Punch
+        // Out, Dominoes and Clocks are all in-bounds), so this is a defensive parity fix. Opt-out
+        // ADNOSRCCLIP=1.
         int ist=(st>sbt?st:sbt), isl=(sl>sbl?sl:sbl), isb=(sb<sbb?sb:sbb), isr=(sr<sbr?sr:sbr);
         bool srcClip = (sbb>sbt && sbr>sbl) && (isb>ist && isr>isl) && !getenv("ADNOSRCCLIP");
         int nzsrc=0,nzwrit=0;
@@ -8677,12 +7806,11 @@ int main(int argc, char** argv){
             if(haveMask){
               int my=mt+(mh*y)/dh, mx=ml+(mw*x)/dw;
               uint8_t mbyte;
-              // addm 715: the mask plane is 1-bit BY SIGNATURE (CopyMask takes BitMap*), which is why the
-              // legacy read is a bit-extract and why it stays the DEFAULT here. Colour QuickDraw does also
-              // accept a pixmap mask; a mask whose row is too big to be one bit per pixel cannot be a
-              // bitmap, and byte-indexing it is the only reading that can be right. Threshold (nonzero =
-              // opaque) rather than blend — an indexed 8bpp destination has no meaningful partial mix, and
-              // no corpus module takes this path (see ADCMCENSUS), so it is honest defensive parity.
+              // The mask plane is 1-bit by signature (CopyMask takes a BitMap*), so the bit-extract read is the
+              // default. Colour QuickDraw also accepts a pixmap mask; a mask whose row is too big to be one bit
+              // per pixel cannot be a bitmap, so byte-indexing it is the only reading that can be right.
+              // Threshold (nonzero = opaque) rather than blend: an indexed 8bpp destination has no meaningful
+              // partial mix.
               bool mask8 = (mdepth==8 && mbr>mbl);
               try{ mbyte = mem->read_u8(mbase+(uint32_t)(my-mbt)*mrb
                                         + (uint32_t)(mask8 ? (mx-mbl) : ((mx-mbl)/8))); }
@@ -8692,26 +7820,22 @@ int main(int argc, char** argv){
             }
             uint8_t px;
             if(sdepth==1){
-              // addm 715 (twin of addm 707's CopyBits arm): 1-bit source -> colour destination. QuickDraw
-              // expands the bitmap through the port's fore/back colours. CopyMask has NO transfer-mode
-              // argument — it is srcCopy through the mask — so this is the m==0 case of 707's table and
-              // nothing else: set bit -> foreground, clear bit -> background, both opaque where the mask
-              // permits. Reading the same bitmap one BYTE per pixel (the legacy path) walked eight source
-              // rows per destination row and fed mask bytes in as colour indices — the exact shear 707
-              // diagnosed on Nocturnes' ICON eye-pairs, latent here for any module that passes a BitMap.
+              // 1-bit source -> colour destination: QuickDraw expands the bitmap through the port's fore/back
+              // colours. CopyMask has NO transfer-mode argument — it is srcCopy through the mask — so set bit ->
+              // foreground, clear bit -> background, both opaque where the mask permits. Reading the same bitmap
+              // one BYTE per pixel would walk eight source rows per destination row and feed mask bytes in as
+              // colour indices.
               uint8_t b=mem->read_u8(sbase+(uint32_t)(sy-sbt)*srb+(uint32_t)((sx-sbl)>>3));
               int sbit=(b>>(7-((sx-sbl)&7)))&1;
               px = sbit ? C.qd_fg : C.qd_bg;
             }
-            else if(sdepth==2||sdepth==4)                       // addm 758: sub-byte indexed source
+            else if(sdepth==2||sdepth==4)                       // sub-byte indexed source
               px=pm_get_idx(mem,sbase+(uint32_t)(sy-sbt)*srb,sx-sbl,sdepth);
             else px=mem->read_u8(sbase+(uint32_t)(sy-sbt)*srb+(sx-sbl));
             if(px) nzsrc++;
-            // addm 758: sub-byte DESTINATION, the twin of the addm-725 1-bit-dest raster CopyBits
-            // already carries. Censused unreachable today — ADCMCENSUS over the whole corpus at 200
-            // frames finds exactly three CopyMask callers (Dominoes, Punch Out, Rebound) and dst
-            // depth=8 on every distinct geometry of all three — so this is byte-identical by
-            // construction, and exists so a 1/2/4-bit mask GWorld cannot be silently overrun.
+            // Sub-byte destination, the twin of the 1-bit-dest raster CopyBits already carries. No corpus
+            // module uses it (every CopyMask caller has a depth-8 destination); it exists so a 1/2/4-bit mask
+            // GWorld cannot be silently overrun.
             if(ddepth==1){ int dpx=ddx-dbl; uint32_t da=dbase+(uint32_t)(ddy-dbt)*drb+(uint32_t)(dpx>>3);
               uint8_t dm=(uint8_t)(0x80u>>(dpx&7)),dv=mem->read_u8(da);
               if(px!=C.qd_bg) dv|=dm; else dv&=(uint8_t)~dm; mem->write_u8(da,dv); }
@@ -8724,18 +7848,16 @@ int main(int argc, char** argv){
     } else if(opcode==0xAA15){ // RGBBackColor(RGBColor*) — mirror of RGBForeColor. pop 4, set qd_bg.
       uint32_t cp=mem->read_u32b(r.a[7]); r.a[7]+=4;
       uint16_t R=mem->read_u16b(cp),G=mem->read_u16b(cp+2),B=mem->read_u16b(cp+4);
-      { uint32_t pos=0;                                 // addm 720: same resolution as the foreground
+      { uint32_t pos=0;                                 // same resolution as the foreground
         if(color_search_proc(R,G,B,pos)) C.qd_bg=(uint8_t)(pos>255?255:pos);
-        else if(g_search_active && !g_no_searchidx) C.qd_bg=(uint8_t)(R>0xFF ? (R>>8) : R); // legacy addm-627
-        else C.qd_bg = bg_to_index(R,G,B); }            // addm 708c: background is force-immune
-      g_bg_rgb[0]=R; g_bg_rgb[1]=G; g_bg_rgb[2]=B;      // addm 782: exact value, for GetBackColor
+        else if(g_search_active && !g_no_searchidx) C.qd_bg=(uint8_t)(R>0xFF ? (R>>8) : R); // legacy search-index fallback
+        else C.qd_bg = bg_to_index(R,G,B); }            // background is force-immune
+      g_bg_rgb[0]=R; g_bg_rgb[1]=G; g_bg_rgb[2]=B;      // exact value, for GetBackColor
     } else if(opcode==0xA860){ // WaitNextEvent(eventMask:Integer; VAR theEvent:EventRecord; sleep:LongInt;
       // mouseRgn:RgnHandle): Boolean — Pascal fn. Caller reserves a 2-byte result BELOW the args, then pushes
       // eventMask(2)+&theEvent(4)+sleep(4)+mouseRgn(4). Stack: [A7]=mouseRgn,+4=sleep,+8=&event,+12=eventMask,
-      // +14=result slot. Was UNHANDLED -> the 14 arg bytes LEAKED per call; Bugs (dll#) polls it in a draw
-      // loop -> A7 marched to the stack floor (0x27FFFC) -> fault. Fill *theEvent with a clean nullEvent (like
-      // the GetOSEvent anim path: what=0, when=live TickCount, where=0), pop the 14 args, and return FALSE so
-      // the module's animate loop keeps running instead of quitting.
+      // +14=result slot. Fill *theEvent with a clean nullEvent (what=0, when=live TickCount, where=0),
+      // pop the 14 args, and return FALSE so the module's animate loop keeps running instead of quitting.
       uint32_t erp = mem->read_u32b(r.a[7]+8);        // &theEvent
       uint32_t nowt = mem->read_u32b(0x16A);
       // ADWNEUPDATE: periodically return an updateEvt (what=6, message=frontWindow) instead of nullEvent, in
@@ -8745,21 +7867,19 @@ int main(int argc, char** argv){
       if(erp){ mem->write_u16b(erp,upd?6:0); mem->write_u32b(erp+2, upd?mem->read_u32b(0x9DE):0);  // what; message=WindowList head
                mem->write_u32b(erp+6,nowt); mem->write_u32b(erp+10,0); mem->write_u16b(erp+14,0); }
       r.a[7]+=14;                                     // pop the 4 args -> A7 on the reserved result slot
-      // addm 590 (Boolean-slot audit): Boolean in the HIGH byte. Default upd=0 -> 0x0000 either way
-      // (byte-identical); only the ADWNEUPDATE probe sets TRUE. ADNOBOOLFIX reverts to the low-byte write.
+      // Boolean result goes in the HIGH byte. ADNOBOOLFIX reverts to the low-byte write.
       if(g_nobool) mem->write_u16b(r.a[7], upd?1:0);
       else         mem->write_u16b(r.a[7], upd?0x0100:0);
       r.d[0].u=upd?1:0;
     } else if(opcode==0xAB1D){ // QDExtensions — Color-QD extension dispatcher. D0 = (paramByteCount<<16)|selector.
-      // Was UNHANDLED -> its stack params LEAKED -> Clocks' (dll#) list-processing fn 0x01007FAA over-popped, its
-      // epilogue movem restored garbage regs -> [A2+0x44] fault. The routine has a reserved result slot below the
-      // params and returns a Boolean (caller reads it via move.b (A7)+). Pop the params (count from D0 high word,
-      // as the AD3 Canvas/Coord libs encode it) so A7 lands on the result slot; write FALSE (0). ADQDEXTPOP=hex
-      // overrides the pop byte count for A/B.
+      // The routine has a reserved result slot below the params and returns a Boolean (the caller reads
+      // it via move.b (A7)+). Pop the params (count from D0's high word, as the AD3 Canvas/Coord libs
+      // encode it) so A7 lands on the result slot; write FALSE (0). ADQDEXTPOP=hex overrides the pop
+      // byte count.
       uint16_t qdSel = (uint16_t)(r.d[0].u & 0xFFFF);
       uint32_t pbytes = getenv("ADQDEXTPOP") ? (uint32_t)strtoul(getenv("ADQDEXTPOP"),0,16) : ((r.d[0].u>>16)&0xFFFF);
       if(pbytes>64) pbytes=8;                             // sanity clamp
-      // addm 633 INVENTORY (ADGWCOUNT): count Get/SetGWorld (sel 5/6) calls per module, gate-independent.
+      // ADGWCOUNT inventory: count Get/SetGWorld (sel 5/6) calls per module, gate-independent.
       // First-call lines are SIGKILL-safe (census kills with -s KILL); milestone lines estimate volume.
       if((qdSel==5 || qdSel==6) && getenv("ADGWCOUNT")){
         static long gwc5=0, gwc6=0; long &c = (qdSel==6)?gwc6:gwc5;
@@ -8771,18 +7891,18 @@ int main(int argc, char** argv){
       // QDExtensions selector 0 = NewGWorld(GWorldPtr* out, short depth, const Rect* bounds, CTabHandle,
       // GDHandle, GWorldFlags). The LIB510 dll# two-stage modules (Guernsey Madness, Life & All, ...) build
       // an offscreen GWorld during construction and store its GWorldPtr at obj+0x20; if it stays NULL the ctor
-      // Throw(0x101)s (unpublished object -> inert msg=3 draw). The generic stub below never populated the out
-      // ptr. Create a real offscreen CGrafPort+PixMap with its OWN 8bpp backing buffer, register it so CopyBits
-      // resolveBits recognises it, and write the GWorldPtr to *out + QDErr noErr. Pascal args, first arg (out)
-      // deepest: out=[A7+pbytes-4], depth=[A7+pbytes-6](word), bounds=[A7+pbytes-10]. Only fires for this
-      // library's NewGWorld shape (pbytes>=10); classic callers never hit selector 0 with this layout.
+      // Throw(0x101)s (unpublished object -> inert msg=3 draw). Create a real offscreen CGrafPort+PixMap
+      // with its OWN backing buffer, register it so CopyBits resolveBits recognises it, and write the
+      // GWorldPtr to *out + QDErr noErr. Pascal args, first arg (out) deepest: out=[A7+pbytes-4],
+      // depth=[A7+pbytes-6](word), bounds=[A7+pbytes-10]. Only fires for this library's NewGWorld shape
+      // (pbytes>=10); classic callers never hit selector 0 with this layout.
       if(qdSel==0 && pbytes>=10){
         uint32_t outPP  = mem->read_u32b(r.a[7]+pbytes-4);   // GWorldPtr* (where to store the new GWorld)
         int16_t  depth  = (int16_t)mem->read_u16b(r.a[7]+pbytes-6);
         uint32_t bndP   = mem->read_u32b(r.a[7]+pbytes-10);
-        // *** addm 751 ***: the remaining Pascal args, deeper = earlier: cTable at [A7+pbytes-14],
-        // aGDevice at [A7+pbytes-18], flags at [A7+pbytes-22]. The full call is 22 param bytes; read
-        // each only when the caller actually pushed that far so the 10-byte shape stays served.
+        // The remaining Pascal args, deeper = earlier: cTable at [A7+pbytes-14], aGDevice at
+        // [A7+pbytes-18], flags at [A7+pbytes-22]. The full call is 22 param bytes; read each only when
+        // the caller actually pushed that far so the 10-byte shape stays served.
         uint32_t ctabH  = (pbytes>=14) ? mem->read_u32b(r.a[7]+pbytes-14) : 0;
         uint32_t gdevH  = (pbytes>=18) ? mem->read_u32b(r.a[7]+pbytes-18) : 0;
         uint32_t gwflag = (pbytes>=22) ? mem->read_u32b(r.a[7]+pbytes-22) : 0;
@@ -8796,8 +7916,7 @@ int main(int argc, char** argv){
         int dep = (depth>0) ? (int)depth : 8;
         if(dep!=1 && dep!=2 && dep!=4 && dep!=8 && dep!=16 && dep!=32) dep=8;   // reject nonsense
         if(g_no_gwdepth) dep=8;                              // legacy: always an 8bpp buffer
-        // Color QuickDraw rounds rowBytes up to a 4-byte (32-bit) multiple. At dep==8 this is exactly
-        // the legacy (gw+3)&~3, so every 8bpp GWorld keeps its byte-identical geometry.
+        // Color QuickDraw rounds rowBytes up to a 4-byte (32-bit) multiple.
         uint32_t rowb=(uint32_t)((((uint32_t)gw*(uint32_t)dep + 31u)/32u)*4u);
         uint32_t buf=mem->allocate(rowb*(uint32_t)gh); mem->memset(buf,0,rowb*(uint32_t)gh);
         uint32_t port=mem->allocate(0x6C); mem->memset(port,0,0x6C);
@@ -8807,30 +7926,26 @@ int main(int argc, char** argv){
         mem->write_u16b(ppm+0x04, (uint16_t)(0x8000|(rowb&0x3FFF)));  // rowBytes (pixmap flag + value)
         mem->write_u16b(ppm+0x06, (uint16_t)t); mem->write_u16b(ppm+0x08, (uint16_t)l);
         mem->write_u16b(ppm+0x0A, (uint16_t)b); mem->write_u16b(ppm+0x0C, (uint16_t)rr);  // bounds
-        // *** addm 751 gap (i) ***: the depth was written to +0x1C. PixMap pixelSize lives at +0x20;
-        // +0x1C is the low half of vRes AND — because the clone above copies the screen pixmap whole —
-        // the high half of the legacy pmTable LONG that ad_toolbox.hh:450 deliberately writes at 0x1C.
-        // So the write both failed to set the depth and corrupted every GWorld's legacy colour-table
-        // pointer to 0x0008xxxx. Write the pixel-format block at the Inside Macintosh offsets:
-        // pixelType@0x1E, pixelSize@0x20, cmpCount@0x22, cmpSize@0x24, plus the 0x13 legacy alias.
+        // Write the pixel-format block at the Inside Macintosh offsets: pixelType@0x1E, pixelSize@0x20,
+        // cmpCount@0x22, cmpSize@0x24, plus the 0x13 legacy alias. +0x1C is NOT the depth field — it is
+        // the low half of vRes and, because the clone above copies the screen pixmap whole, the high half
+        // of the legacy pmTable LONG written at 0x1C.
         // ADNOGWDEPTH restores the +0x1C write (and pins the buffer at 8bpp).
         if(!g_no_gwdepth){
           bool direct = (dep>8);                             // 16/32bpp = RGBDirect, else indexed
           mem->write_u16b(ppm+0x1E, direct?16:0);            // pixelType
-          mem->write_u16b(ppm+0x20, (uint16_t)dep);          // pixelSize  <- the field that was missed
+          mem->write_u16b(ppm+0x20, (uint16_t)dep);          // pixelSize
           mem->write_u16b(ppm+0x22, direct?3:1);             // cmpCount
           mem->write_u16b(ppm+0x24, (uint16_t)(direct?(dep==16?5:8):dep));  // cmpSize
-          if(g_pm_legacy) mem->write_u16b(ppm+0x13, (uint16_t)dep);  // addm 758: alias retired with ad_toolbox's
+          if(g_pm_legacy) mem->write_u16b(ppm+0x13, (uint16_t)dep);  // legacy depth alias
         } else if(depth>0){
-          mem->write_u16b(ppm+0x1C, (uint16_t)depth);        // the legacy (wrong-offset) write
+          mem->write_u16b(ppm+0x1C, (uint16_t)depth);        // the legacy +0x1C write
         }
-        // *** addm 751 gap (ii) ***: NewGWorld gives the new GWorld its OWN COPY of the caller's colour
-        // table; the host ignored the arg entirely, so every GWorld aliased the screen CLUT handle
-        // cloned from g_pm (why Super Guy's FigureColor scans 256 entries and not its own 234). Copy the
-        // table — a copy, not the caller's handle, because the caller is free to dispose or edit its own
-        // table afterwards. A NULL cTable keeps the clone (that IS the right answer for NULL: real
-        // NewGWorld then uses the default table for the depth, and this host's default IS the screen's).
-        // Indexed depths only; a direct-colour GWorld has no meaningful pmTable. ADNOGWCTAB reverts.
+        // NewGWorld gives the new GWorld its OWN COPY of the caller's colour table — a copy, not the
+        // caller's handle, because the caller is free to dispose or edit its own table afterwards. A NULL
+        // cTable keeps the clone of the screen pixmap's table: real NewGWorld then uses the default table
+        // for the depth, and this host's default IS the screen's. Indexed depths only; a direct-colour
+        // GWorld has no meaningful pmTable. ADNOGWCTAB reverts.
         if(!g_no_gwctab && ctabH && dep<=8){
           uint32_t newCth=0;
           try{
@@ -8848,63 +7963,43 @@ int main(int argc, char** argv){
           }catch(...){ newCth=0; }
           if(newCth) mem->write_u32b(ppm+0x2A,newCth);
         }
-        // The legacy pmTable alias was a LONG at 0x1C OVERLAPPING pixelType@0x1E, so the two could not
-        // both survive; addm 751 had to resolve the collision the same way ad_toolbox.hh did (alias
-        // last, pixelType the casualty) to keep a GWorld structurally identical to the screen pixmap
-        // it clones. *** addm 758 retires the alias at its source ***, so there is nothing left to
-        // mirror and the clone is structurally identical WITH a correct pixelType. Under ADPMLEGACY
-        // the screen keeps the alias, and so must its clones — the write-order contract still holds
-        // whenever the alias exists. Indexed only: a direct-colour pixmap has no table to alias.
+        // The legacy pmTable alias is a LONG at 0x1C that overlaps pixelType@0x1E, so only one of the two
+        // can survive; the alias is written last, matching ad_toolbox. Under ADPMLEGACY the screen keeps
+        // the alias, and so must its clones. Indexed only: a direct-colour pixmap has no table to alias.
         if(g_pm_legacy && !g_no_gwdepth && dep<=8) mem->write_u32b(ppm+0x1C, mem->read_u32b(ppm+0x2A));
         uint32_t ppmh=mem->allocate(4); mem->write_u32b(ppmh, ppm);
         mem->write_u32b(port+0x02, ppmh);                    // portPixMap
         mem->write_u16b(port+0x06, 0xC000);                  // colour port
-        // addm 779: portRect lives at +0x10 in a CGrafPort, not +0x08. This arm builds a
-        // COLOUR port (portVersion 0xC000 two lines up, portPixMap at +0x02), whose layout is
-        // device(0) portPixMap(2) portVersion(6) grafVars(8) chExtra(C) pnLocHack(E) portRect(10)
-        // visRgn(18) — the +0x18 visRgn write below is already on that layout. Writing the bounds at
-        // +0x08 put them in grafVars/chExtra/pnLocHack and left the real portRect all zeros, so every
-        // GWorld this host makes reported an EMPTY rect to anything that asks a port how big it is.
-        // The classic-GrafPort builder at OpenPort DOES have its bounds at +0x08 — but that is
-        // portBits.bounds of an inline BitMap, a different field of a different structure; the host's
-        // own colour-port builder (OpenCPort) and both portRect editors (PortSize/MovePortTo, addm 753)
-        // all use +0x10, and port_bounds_tl's colour/classic discriminator reads a colour port's
-        // geometry from the PixMap and only a classic port's from +0x08 — so nothing host-side ever
-        // read what this wrote. The PPC host's NewGWorld has always written +0x10, which is why its
-        // twin renders the play field this one lost. ADNOGWPORTRECT=1 restores the old offsets.
+        // portRect lives at +0x10 in a CGrafPort, not +0x08. This arm builds a COLOUR port (portVersion
+        // 0xC000 two lines up, portPixMap at +0x02), whose layout is device(0) portPixMap(2)
+        // portVersion(6) grafVars(8) chExtra(C) pnLocHack(E) portRect(10) visRgn(18) — the +0x18 visRgn
+        // write below is already on that layout. The classic-GrafPort builder at OpenPort does have its
+        // bounds at +0x08, but that is portBits.bounds of an inline BitMap, a different field of a
+        // different structure; OpenCPort and both portRect editors (PortSize/MovePortTo) all use +0x10.
+        // ADNOGWPORTRECT=1 writes the bounds at +0x08 instead.
         if(g_no_gwportrect){ mem->write_u16b(port+0x08,(uint16_t)t); mem->write_u16b(port+0x0A,(uint16_t)l);
                              mem->write_u16b(port+0x0C,(uint16_t)b); mem->write_u16b(port+0x0E,(uint16_t)rr); }
         else { mem->write_u16b(port+0x10,(uint16_t)t); mem->write_u16b(port+0x12,(uint16_t)l);
                mem->write_u16b(port+0x14,(uint16_t)b); mem->write_u16b(port+0x16,(uint16_t)rr); }   // portRect
-        // *** addm 790 ***: a new GWorld's TWO REGIONS. Inside Macintosh (Imaging With
-        // QuickDraw, NewGWorld) gives the offscreen graphics port a portRect, a visRgn and a clipRgn
-        // all equal to the boundsRect, each its own region; the PPC twin does exactly that
-        // (adhost.cc:1249-1261 builds rg1/vh and rg2/ch, two independent 10-byte rectangular regions,
-        // written to +0x18 and +0x1C). This arm built NEITHER: it left clipRgn(+0x1C) NULL and aliased
-        // visRgn(+0x18) to C.g_visrgn — the ONE screen region record (ad_toolbox.hh:457) shared by the
-        // screen port, every OpenCPort port and every GWorld. QuickDraw's own invariant says a port
-        // always owns both: SetClip/ClipRect copy a shape INTO the port's existing clipRgn rather than
-        // storing the caller's handle, which is only definable if the field is never NULL.
+        // A new GWorld gets TWO REGIONS. Inside Macintosh (Imaging With QuickDraw, NewGWorld) gives the
+        // offscreen graphics port a portRect, a visRgn and a clipRgn all equal to the boundsRect, each its
+        // own region. QuickDraw's own invariant says a port always owns both: SetClip/ClipRect copy a
+        // shape INTO the port's existing clipRgn rather than storing the caller's handle, which is only
+        // definable if the field is never NULL.
         // BOTH fields are read by GUEST code — they are not decorative:
         //   * clipRgn: SetPenOrigin__9MacCanvasFPC3XPt (LIB510_Canvas @0x0100E4E6) fetches the canvas'
         //     port through [[this+0x44]]->vtbl+0x6C, reads clipRgn at +0x1C, and OffsetRgns it
         //     (@0x0100E53E) to keep the clip over the same pixels across the SetOrigin two instructions
         //     later — the authentic "SetOrigin does not move the clipRgn" idiom. With the field NULL the
-        //     host's OffsetRgn takes its `rg = h ? read(h) : 0` guard and silently does nothing (low
-        //     memory is mapped, so there is no fault — the call is permissive, not fatal). Measured
-        //     live: 115 such reads in Magic Turtle, 108 in Rodger Dodger, 11 in Fish World, one per
-        //     GWorld, every one of them at that single instruction.
+        //     host's OffsetRgn takes its `rg = h ? read(h) : 0` guard and silently does nothing.
         //   * visRgn: modules RectRgn the handle they read at +0x18 while configuring a hand-built
-        //     offscreen port (Bogglins @0x00100E72 x10, Boris @0x0004A4A8 x27), which under the alias
-        //     REWRITES THE SCREEN PORT'S visRgn record. The library reads it too
-        //     (GetClipRegion__9MacCanvasFP7XRegion @0x0100E2DA SectRgns [port+0x18] into the canvas'
-        //     clip region).
-        // Nothing HOST-side reads either field — the host's clip is ToolboxCanvas' qd_clip_* rect plus
-        // the addm-717b per-port store, and g_visrgn is written into ports and never read back — so
-        // this is a structural repair of the port record and not a change to what is drawn; the corpus
-        // is IDENT on both hash axes and gated as such. It removes a NULL handle that guest code hands
-        // to a region trap, and it removes cross-port region aliasing whose only reason for being
-        // harmless today is that the host ignores the field the guest is corrupting.
+        //     offscreen port (Bogglins @0x00100E72, Boris @0x0004A4A8), so sharing one region record
+        //     across ports would let a module rewrite the screen port's visRgn. The library reads it too
+        //     (GetClipRegion__9MacCanvasFP7XRegion @0x0100E2DA SectRgns [port+0x18] into the canvas' clip
+        //     region).
+        // Nothing host-side reads either field — the host's clip is ToolboxCanvas' qd_clip_* rect plus the
+        // per-port store, and g_visrgn is written into ports and never read back — so this is a structural
+        // repair of the port record, not a change to what is drawn.
         // ADNOGWCLIPRGN=1 restores the NULL clipRgn; ADNOGWVISRGN=1 restores the shared visRgn alias.
         if(g_no_gwvisrgn) mem->write_u32b(port+0x18, C.g_visrgn);
         else {
@@ -8937,17 +8032,15 @@ int main(int argc, char** argv){
             mem->read_u16b(ppm+0x1E),mem->read_u16b(ppm+0x20),mem->read_u32b(ppm+0x2A),mem->read_u32b(ppm+0x1C));
         }
       } else if(qdSel==23 && pbytes>=4 && !g_no_gwpixmap){
-        // *** addm 743 ***: selector 23 = GetGWorldPixMap(GWorldPtr): PixMapHandle. It is a FUNCTION whose
-        // result is FOUR bytes — the only handle by which a caller reaches the pixels of a GWorld the
-        // NewGWorld arm above handed it. The generic stub below popped the arg and wrote a 16-bit FALSE into
-        // a slot the caller reads with `move.l (A7)+,D0`, so the caller got (0<<16)|<the stale low word of
-        // its own reserved slot> — a wild small address that happens to be stable per module.
-        // LIB510's MacOffScreenPixels::LockPixels (0x0101049C in the AD4 library) is exactly that shape:
+        // Selector 23 = GetGWorldPixMap(GWorldPtr): PixMapHandle. It is a FUNCTION whose result is FOUR
+        // bytes — the only handle by which a caller reaches the pixels of a GWorld the NewGWorld arm above
+        // handed it, and the generic tail below would write only a 16-bit FALSE into a slot the caller
+        // reads with `move.l (A7)+,D0`. LIB510's MacOffScreenPixels::LockPixels (0x0101049C in the AD4
+        // library) is exactly that shape:
         //   subq.w #4,A7 / move.l (0x20,A0),-(A7) / move.l #0x00040017,D0 / _QDExtensions / move.l (A7)+,D0
-        // Serve the port's real portPixMap handle (port+0x02), which the screen port (ad_toolbox.hh sets
-        // g_port+0x02 = g_pmh) and every host-created GWorld already carry, and leave the result 0 for a
-        // pointer this host does not recognise as a port — the same "draws nothing" outcome the stub had.
-        // Opt-out ADNOGWPIXMAP=1.
+        // Serve the port's real portPixMap handle (port+0x02), which the screen port and every
+        // host-created GWorld already carry, and leave the result 0 for a pointer this host does not
+        // recognise as a port, so it draws nothing. Opt-out ADNOGWPIXMAP=1.
         uint32_t gwp = mem->read_u32b(r.a[7]+pbytes-4);
         uint32_t pmh = 0;
         bool known = (gwp!=0) && (gwp==C.g_port || gwp==C.cur_port);
@@ -8959,21 +8052,19 @@ int main(int argc, char** argv){
         if(!pmh) ADSTUB("AB1D_GetGWorldPixMap_unknownGWorld");
         if(getenv("ADGWLOG")) fprintf(stderr,"      GetGWorldPixMap(%08X) -> %08X\n",gwp,pmh);
       } else if(qdSel==15 && pbytes>=4 && !g_no_pixbase){
-        // *** addm 781 ***: selector 15 = GetPixBaseAddr(PixMapHandle): Ptr — the SIBLING of the
-        // addm-743 selector-23 defect, and the same shape: a FUNCTION whose result is FOUR bytes, left to
-        // the generic tail below which pops the arg and writes a SIXTEEN-bit FALSE into a slot the caller
-        // reads with `move.l (A7)+,D0`. The caller then gets (0<<16)|<the stale low word of its own
-        // reserved slot> — a wild small address, stable per module. addm 743 fixed 23 and left 15 unserved.
+        // Selector 15 = GetPixBaseAddr(PixMapHandle): Ptr — the sibling of selector 23 above and the same
+        // shape: a FUNCTION whose result is FOUR bytes, which the generic tail below would fill with only
+        // a SIXTEEN-bit FALSE in a slot the caller reads with `move.l (A7)+,D0`.
         //   LIB510's GetBaseAddr__18MacOffScreenPixels (0x01010406 in the AD4 library) is exactly that shape:
         //   subq.w #4,A7 / move.l (A6+8),-(A7) / jsr [[this]+0x68] / move.l D0,-(A7)
         //   / move.l #0x0004000F,D0 / _QDExtensions / move.l (A7)+,D0
         // Its caller BeginDirectPixels__7XCanvas (0x01014A08) stores that as the direct-pixel base address,
-        // so every module that rasterises through XCanvas::BeginDirectPixels draws into low memory instead
-        // of its own offscreen canvas, and the CopyBits that presents the canvas blits an untouched buffer.
-        // Serve the handle's real PixMap baseAddr. Structurally validated (handle dereferences to a PixMap:
-        // nonzero master pointer, rowBytes flag bit 0x8000 set, 0 < rowBytes <= 0x3FFF, nonzero baseAddr) so
-        // an unrecognised argument keeps the previous "draws nothing" outcome rather than inventing a
-        // pointer. Opt-out ADNOPIXBASE=1.
+        // so a module that rasterises through XCanvas::BeginDirectPixels would otherwise draw into low
+        // memory instead of its own offscreen canvas, and the CopyBits that presents the canvas would blit
+        // an untouched buffer. Serve the handle's real PixMap baseAddr. Structurally validated (the handle
+        // dereferences to a PixMap: nonzero master pointer, rowBytes flag bit 0x8000 set,
+        // 0 < rowBytes <= 0x3FFF, nonzero baseAddr) so an unrecognised argument draws nothing rather than
+        // inventing a pointer. Opt-out ADNOPIXBASE=1.
         uint32_t pmh = mem->read_u32b(r.a[7]+pbytes-4);
         uint32_t base = 0;
         if(pmh){ try{ uint32_t pm = mem->read_u32b(pmh);
@@ -8988,17 +8079,12 @@ int main(int argc, char** argv){
       // QDExtensions selectors 5 (GetGWorld) and 6 (SetGWorld) are VOID procedures — the caller reserves NO
       // result slot, so writing a Boolean result at A7 AFTER popping pbytes clobbers a LIVE caller stack word.
       // In MacOffScreenPixels::OpenPixels (0x0101054E, reached via the offscreen canvas's XCanvas::Open
-      // object-tree walk @0x01013FC8) the clobbered word is that function's saved A2 (0x005A9480): its high
-      // word is zeroed -> A2 comes back 0x00009480 -> the caller Open's next virtual call
-      // `jsr [[[A2+0x44]]+8]` dereferences unmapped low memory (A0=0) -> the "garbage vtable / null virtual
-      // call" fault @0x0103DE04 shared by the single-A5 4.0 modules Guernsey Madness / Life & All / Time Flies.
-      // Root cause is THIS stub over-writing the stack (addm 386), NOT the unresolved 0xE7E
-      // IOffScreenCanvasPalette import addm 385 blamed — that import's sole call site (0x0103AD22, gated on a
-      // depth==8 branch) is never reached at runtime, and the canvases already carry non-null palettes with
-      // real vtable methods. For void selectors just pop the params; function selectors (0 NewGWorld handled
-      // above, 1 LockPixels Boolean, 3 UpdateGWorld, ...) keep the result write so Clocks-style callers still
-      // read their Boolean via `move.b (A7)+`. ADQDEXTRESULT=1 restores the old always-write behaviour for A/B.
-      // addm 596: Get/SetGWorld port tracking (Fish World white-cell fix, name-gated g_gwtrack).
+      // object-tree walk @0x01013FC8) that word is the function's saved A2, and corrupting it derails the
+      // next virtual call through a garbage vtable. For void selectors just pop the params; function
+      // selectors (0 NewGWorld handled above, 1 LockPixels Boolean, 3 UpdateGWorld, ...) keep the result
+      // write so Clocks-style callers still read their Boolean via `move.b (A7)+`. ADQDEXTRESULT=1
+      // restores the always-write behaviour.
+      // Get/SetGWorld port tracking (g_gwtrack).
       // sel 5 GetGWorld(VAR port; VAR gdh): write the current port so the module can restore it.
       // sel 6 SetGWorld(port: GWorldPtr; gdh: GDHandle): redirect cur_port to the target GWorld so
       // subsequent EraseRect/draw hit the offscreen sprite buffer instead of the screen framebuffer.
@@ -9011,18 +8097,17 @@ int main(int argc, char** argv){
         // Accept the screen port or a known offscreen GWorld; a bogus ptr would make cur_pm return false
         // (fill safely skipped) rather than corrupt, but validate against g_port + registered gworlds.
         bool ok=(tgt==C.g_port); if(!ok) for(uint32_t g:C.gworlds) if(g==tgt){ ok=true; break; }
-        if(ok){ adpq_save(C); C.cur_port=tgt; adpc_load(C); adpq_load(C); }   // addm 717b/742: port switch -> own clip + colours
+        if(ok){ adpq_save(C); C.cur_port=tgt; adpc_load(C); adpq_load(C); }   // port switch -> own clip + colours
         if(getenv("ADGWLOG")) fprintf(stderr,"      SetGWorld cur_port -> %08X (ok=%d)\n",tgt,ok?1:0);
       }
       r.a[7]+=pbytes;                                     // pop the params
       if(g_qdextsel_log){ static std::map<uint16_t,long> selhist; if(++selhist[qdSel]<=3 || (selhist[qdSel]%50000)==0)
         fprintf(stderr,"    [qdext] sel=%u pbytes=%u count=%ld pc=%08X\n",qdSel,pbytes,selhist[qdSel],r.pc); }
       bool voidSel = (qdSel==5 || qdSel==6) && !getenv("ADQDEXTRESULT");
-      // addm 543 item 1: sel 1 = LockPixels, a Boolean FUNCTION. Real Color QuickDraw returns TRUE when the
-      // pixels are available (never purged in our host), so return TRUE (0x0100 -> the caller's `move.b (A7)+`
-      // reads 0x01) instead of FALSE. This is the heaviest per-frame stub in the corpus (568k hits/19 mods,
-      // LockPixels class). Other function selectors keep FALSE/noErr (0); void selectors 5/6 stay pop-only.
-      // ADNOQDEXTTRUE reverts sel 1 to FALSE; ADQDEXTRESULT restores the always-write behaviour for A/B.
+      // Selector 1 = LockPixels, a Boolean FUNCTION. Real Color QuickDraw returns TRUE when the pixels
+      // are available (never purged in this host), so return TRUE (0x0100 -> the caller's `move.b (A7)+`
+      // reads 0x01). Other function selectors return FALSE/noErr (0); void selectors 5/6 stay pop-only.
+      // ADNOQDEXTTRUE reverts sel 1 to FALSE; ADQDEXTRESULT restores the always-write behaviour.
       if(!voidSel){
         uint16_t rv = (qdSel==1 && !g_no_qdexttrue) ? 0x0100 : 0x0000;   // LockPixels -> TRUE, else FALSE/noErr
         if(rv) { /*implemented*/ } else ADSTUB("AB1D_QDExtensions_falseResult");
@@ -9032,27 +8117,25 @@ int main(int argc, char** argv){
       }
     } else if(opcode==0xA9AB){ ADSTUB("A9AB_AddResource_noop"); // AddResource(theData:Handle; theType:ResType; theID:Integer; name:Str255)
       // Pascal PROCEDURE, 4 args pushed L->R (theData deepest): [A7]=name-ptr(4), +4=theID(2), +6=theType(4),
-      // +10=theData(4). Total 14 bytes, no result. Was UNHANDLED -> the 14 args LEAKED -> the caller's rts
-      // popped garbage and derailed into a Pascal error string ("...Did not..."). Bugs (dll#) hits this in its
-      // draw when saving a scratch resource. We don't persist added resources (not needed to render); just
-      // pop the 14 bytes to balance the stack. ResError (called right after) already returns noErr.
+      // +10=theData(4). Total 14 bytes, no result. Added resources are not persisted (not needed to
+      // render); just pop the 14 bytes to balance the stack. ResError (called right after) returns noErr.
       r.a[7]+=14;
     } else if(opcode==0xA8A6){ // EqualRect(r1,r2: Rect*): Boolean. Args (r1 deepest): [A7]=r2(4),
       // +4=r1(4), +8=result(2). true iff all 4 fields equal. pop 8, leave Boolean in result slot.
       uint32_t r2=mem->read_u32b(r.a[7]), r1=mem->read_u32b(r.a[7]+4);
       uint8_t eq=1; for(int o=0;o<8;o+=2) if(mem->read_u16b(r1+o)!=mem->read_u16b(r2+o)){ eq=0; break; }
       r.a[7]+=8;
-      // addm 590 (Boolean-slot audit): was low-byte (move.b reader saw high byte 0=FALSE forever). Serve
-      // truth in the HIGH byte; tst.w readers unchanged. ADNOBOOLFIX reverts.
+      // Serve the Boolean in the HIGH byte, where a move.b reader finds it; tst.w readers are unaffected.
+      // ADNOBOOLFIX reverts to the low-byte write.
       if(g_nobool) mem->write_u16b(r.a[7], eq);
       else         mem->write_u16b(r.a[7], eq?0x0100:0);
     } else if(opcode==0xAA1A||opcode==0xAA19){ // GetBackColor/GetForeColor(VAR RGBColor) — write
       // the current bg/fg colour's RGB into the caller's struct. One ptr arg, pop 4.
       uint32_t cp=mem->read_u32b(r.a[7]); r.a[7]+=4;
-      // addm 782 (promoted from nr's ADNVRESFCFIX, default ON): serve the IM-correct value —
-      // the exact RGBColor last given to RGBForeColor/RGBBackColor on THIS port — instead of the
-      // lossy CLUT[index] round trip (which even answers BLACK for an untouched default background,
-      // where a real CGrafPort answers WHITE). ADNOFCEXACT=1 restores the CLUT round trip exactly.
+      // Serve the Inside Macintosh-correct value: the exact RGBColor last given to RGBForeColor/
+      // RGBBackColor on THIS port, rather than a lossy CLUT[index] round trip (which answers BLACK for
+      // an untouched default background where a real CGrafPort answers WHITE). ADNOFCEXACT=1 restores
+      // the CLUT round trip.
       if(cp && !g_no_fcexact){
         const uint16_t* s=(opcode==0xAA1A)?g_bg_rgb:g_fg_rgb;
         mem->write_u16b(cp,s[0]); mem->write_u16b(cp+2,s[1]); mem->write_u16b(cp+4,s[2]);
@@ -9063,9 +8146,8 @@ int main(int argc, char** argv){
         mem->write_u16b(cp+2, mem->read_u16b(e+4));
         mem->write_u16b(cp+4, mem->read_u16b(e+6));
       }
-      // addm 782 DIAGNOSTIC (env-gated; no behaviour change): log the exact value alongside what
-      // the retired CLUT[index] round trip would have answered, so liveness/loss can be verified on a
-      // live corpus member instead of asserted from the nr lane's prior measurement.
+      // ADFCEXACTLOG diagnostic (no behaviour change): log the exact value alongside what the
+      // CLUT[index] round trip would answer, so the difference can be verified on a live module.
       if(getenv("ADFCEXACTLOG")){
         uint8_t ix = (opcode==0xAA1A)?C.qd_bg:C.qd_fg;
         uint32_t e=C.g_clut+8+(uint32_t)ix*8;
@@ -9084,13 +8166,9 @@ int main(int argc, char** argv){
       int b=std::max(rt(s1,4),rt(s2,4)), rr=std::max(rt(s1,6),rt(s2,6));
       if(dst){ mem->write_u16b(dst,(uint16_t)t); mem->write_u16b(dst+2,(uint16_t)l);
                mem->write_u16b(dst+4,(uint16_t)b); mem->write_u16b(dst+6,(uint16_t)rr); }
-    } else if(opcode==0xA8FA){ // MapRect(VAR theRect; fromRect,toRect: Rect) — agent-found (addm 358).
-      // Rebound's blit path calls this; it was UNHANDLED, so the generic stub left MapRect's 12 pushed
-      // bytes on the stack -> the caller's callee-clean epilogue read 12 bytes off -> corrupted CopyTo's
-      // saved A3 (good object 0x02013DF4 -> stack junk 0x002FFEFA whose [.]=0x00010000) -> the post-CopyBits
-      // cleanup virtual call jsr'd through a garbage vtable -> derail. Same bug class as the addm-321/327
-      // unhandled-Pascal-arg-trap A7 drift. This library passes all three Rects as POINTERS (SectRect/
-      // UnionRect convention): [A7+8]=theRect*, [A7+4]=fromRect*, [A7]=toRect*. Pop 12; real MapRect rescale.
+    } else if(opcode==0xA8FA){ // MapRect(VAR theRect; fromRect,toRect: Rect) — Rebound's blit path calls
+      // this. The library passes all three Rects as POINTERS (SectRect/UnionRect convention):
+      // [A7+8]=theRect*, [A7+4]=fromRect*, [A7]=toRect*. Pop 12 and do the real MapRect rescale.
       uint32_t theRectP=mem->read_u32b(r.a[7]+8), fromP=mem->read_u32b(r.a[7]+4), toP=mem->read_u32b(r.a[7]);
       r.a[7]+=12;
       if(theRectP && fromP && toP){
@@ -9130,20 +8208,16 @@ int main(int argc, char** argv){
       // pixmap, not the clip, not the local coordinate system (IM I-165: "this does not affect the
       // screen; it merely changes the size of the port rectangle"). Toolbox proc, two word args
       // (width pushed first): [A7]=height(2), [A7+2]=width(2).
-      // WHY IT MATTERS despite the host rendering into a fixed framebuffer, and why it stayed a
-      // pop-only stub until now: the host's rasterisers take their geometry from the PixMap, so nothing
-      // HOST-side reads portRect. The consumer is the MODULE. The AD sprite library's hand-built
-      // offscreen builder is PortSize(w,h) ; NewHandle ; <fill the pixmap> ; SetOrigin ; ClipRect —
-      // and its horizontal-cel FLIPPER (Boris @0x000491C0, the routine between the FLIPVERT and
-      // FLIPHORI name strings) later reads portRect.right-portRect.left back as "how wide is this
-      // sheet", masks it against the 32-bit row-alignment unit for the pixmap's depth, and shifts the
-      // port right by the padding so the mirrored pixels — which the flip writes into the PADDED row —
-      // still line up. With the portRect stuck at the screen's 512 (a multiple of 4) the mask was
-      // always 0 and that whole branch never executed.
-      // addm 749 measured the naive fix as "collapses Boris 56 distinct frames -> 14" and reverted it.
-      // That measurement was real but the attribution was not: the branch it unblocked runs MovePortTo,
-      // which was an UNHANDLED trap — no effect AND no arg pop, so every call leaked 4 bytes of the
-      // caller's stack. PortSize was masking MovePortTo. Both are implemented here; see 0xA877.
+      // WHY IT MATTERS despite the host rendering into a fixed framebuffer: the host's rasterisers take
+      // their geometry from the PixMap, so nothing HOST-side reads portRect. The consumer is the MODULE.
+      // The AD sprite library's hand-built offscreen builder is PortSize(w,h) ; NewHandle ; <fill the
+      // pixmap> ; SetOrigin ; ClipRect — and its horizontal-cel FLIPPER (Boris @0x000491C0, the routine
+      // between the FLIPVERT and FLIPHORI name strings) later reads portRect.right-portRect.left back as
+      // "how wide is this sheet", masks it against the 32-bit row-alignment unit for the pixmap's depth,
+      // and shifts the port right by the padding so the mirrored pixels — which the flip writes into the
+      // PADDED row — still line up. With the portRect stuck at the screen's 512 (a multiple of 4) the
+      // mask is always 0 and that whole branch never runs. The branch it unblocks calls MovePortTo, so
+      // both traps must be implemented together; see 0xA877.
       if(!g_noportsize){
         int16_t hh=(int16_t)mem->read_u16b(r.a[7]), ww=(int16_t)mem->read_u16b(r.a[7]+2);
         uint32_t p0=C.cur_port?C.cur_port:C.g_port;
@@ -9163,11 +8237,9 @@ int main(int argc, char** argv){
       // twin of PortSize above). The arguments are GLOBAL coordinates, so the new LOCAL top left is
       // portBits.bounds.topLeft + (topGlobal,leftGlobal) — the same local/global relation LocalToGlobal
       // uses. Two word args, leftGlobal pushed first: [A7]=topGlobal(2), [A7+2]=leftGlobal(2).
-      // Was UNHANDLED, which is the defect PortSize's stub was hiding: an unhandled trap falls to the
-      // rts-stub that pops NOTHING, so each call leaked its 4 argument bytes onto the caller's frame —
-      // the derail the addm-749 measurement recorded as "PortSize collapses Boris". Its only caller in
-      // the corpus is the cel flipper described at 0xA876, which uses it to slide the sheet's portRect
-      // right by the row padding so the mirrored image is addressed where the flip actually wrote it.
+      // Its only caller in the corpus is the cel flipper described at 0xA876, which uses it to slide the
+      // sheet's portRect right by the row padding so the mirrored image is addressed where the flip
+      // actually wrote it.
       if(!g_noportsize){
         int16_t tg=(int16_t)mem->read_u16b(r.a[7]), lg=(int16_t)mem->read_u16b(r.a[7]+2);
         uint32_t p0=C.cur_port?C.cur_port:C.g_port;
@@ -9218,33 +8290,32 @@ int main(int argc, char** argv){
       // own name string in low memory as a pointer — the ".Bog"/".Glo" faults). Returning a real
       // handle lets init succeed. DrawPicture (above) already dereferences the handle and
       // interprets the PICT (try/catch-guarded), so a real handle renders instead of crashing.
-      // ADNULLPICT restores the old NULL-returning behaviour for A/B testing.
+      // ADNULLPICT returns NULL instead.
       uint32_t picH = getenv("ADNULLPICT") ? 0 : get_res(FOURCC("PICT"),(int16_t)picID);
-      set_res_err(picH);                        // addm 543: ResError tracks GetPicture too
+      set_res_err(picH);                        // ResError tracks GetPicture too
       mem->write_u32b(r.a[7], picH);            // result slot = PicHandle
       if(getenv("ADUNHANDLED")||getenv("ADPICTLOG")) fprintf(stderr,"      GetPicture(%d) -> %08X\n",(int16_t)picID,picH);
     } else if(opcode==0xA9AF){ // ResError():Integer — error of the last Resource Manager call.
-      // No args; a 2-byte result slot sits on top of the stack. addm 543: return the REAL tracked
-      // error (res_err), set 0/noErr by each successful RM load and -192/resNotFound when a load
-      // returned NULL. ADNORESERR forces the old always-noErr behaviour for A/B.
+      // No args; a 2-byte result slot sits on top of the stack. Return the tracked error (res_err), set
+      // to 0/noErr by each successful Resource Manager load and -192/resNotFound when a load returned
+      // NULL. ADNORESERR forces always-noErr.
       if(g_no_reserr){ ADSTUB("A9AF_ResError_noErr"); mem->write_u16b(r.a[7], 0); }
       else mem->write_u16b(r.a[7], (uint16_t)res_err);
     } else if(opcode==0xA8E0){ // OffsetRgn(rgn; dh,dv) — the TRUE OffsetRgn trap (0xA8E9 above is
-      // a mislabelled RectInRgn path). [A7]=dv(w),[A7+2]=dh(w),[A7+4]=rgnH; pop 8. Unhandled ->
-      // 7 modules (incl. Mandelbrot) leaked 8 bytes. Shift bbox + shape mask, mirroring 0xA8E9.
+      // a mislabelled RectInRgn path). [A7]=dv(w),[A7+2]=dh(w),[A7+4]=rgnH; pop 8. Shift bbox + shape
+      // mask, mirroring 0xA8E9.
       int16_t dv=(int16_t)mem->read_u16b(r.a[7]), dh=(int16_t)mem->read_u16b(r.a[7]+2);
       uint32_t h=mem->read_u32b(r.a[7]+4); r.a[7]+=8; uint32_t rg=h?mem->read_u32b(h):0;
       if(rg){
-        // addm 741: capture the PRE-move bbox so a remembered shape can be validated against it (the
-        // addm-543 registry discipline — a shape whose bbox no longer matches the region was replaced
-        // by some other op and must not be trusted).
+        // Capture the PRE-move bbox so a remembered shape can be validated against it: a shape whose bbox
+        // no longer matches the region was replaced by some other op and must not be trusted.
         int16_t pt=(int16_t)mem->read_u16b(rg+2), pl=(int16_t)mem->read_u16b(rg+4);
         int16_t pb=(int16_t)mem->read_u16b(rg+6), pr=(int16_t)mem->read_u16b(rg+8);
         mem->write_u16b(rg+2,(uint16_t)(pt+dv)); mem->write_u16b(rg+4,(uint16_t)(pl+dh));
         mem->write_u16b(rg+6,(uint16_t)(pb+dv)); mem->write_u16b(rg+8,(uint16_t)(pr+dh));
-        // Re-scan-convert from the SHAPE at its new position instead of shifting the raster (see the
-        // addm-741 block by rgn_poly). Only when the region actually carries a mask: a bounds-only
-        // region has nothing to rasterize and stays on the bbox path.
+        // Re-scan-convert from the SHAPE at its new position instead of shifting the raster. Only when the
+        // region actually carries a mask: a bounds-only region has nothing to rasterize and stays on the
+        // bbox path.
         bool rerast=false;
         if(!g_no_rgn_rerast && C.rgn_mask(rg,false)){
           auto ov=rgn_oval->find(rg);
@@ -9263,28 +8334,26 @@ int main(int argc, char** argv){
         if(getenv("ADRGNLOG")) fprintf(stderr,"      OffsetRgn rg=%08X d(%d,%d) bbox[t%d l%d b%d r%d] rerast=%d\n",
           rg,dh,dv,pt+dv,pl+dh,pb+dv,pr+dh,rerast?1:0); }
     } else if(opcode==0xA87A){ // GetClip(rgnH) — copy the current clip rect into the region.
-      // One arg, pop 4. Unhandled -> the 4 bytes leaked (5 modules incl. Down the Drain). Store
-      // the port clip as the region bbox so a save/ClipRect(restore) round-trip works; an unset
-      // clip (degenerate rect) falls back to full screen.
+      // One arg, pop 4. Store the port clip as the region bbox so a save/ClipRect(restore) round-trip
+      // works; an unset clip (degenerate rect) falls back to full screen.
       uint32_t h=mem->read_u32b(r.a[7]); r.a[7]+=4; uint32_t rg=h?mem->read_u32b(h):0;
       if(rg){ int16_t t=C.qd_clip_t,l=C.qd_clip_l,b=C.qd_clip_b,rr=C.qd_clip_r;
         if(b<=t||rr<=l){ t=0;l=0;b=(int16_t)C.fb_h;rr=(int16_t)C.fb_w; }
         mem->write_u16b(rg,10); mem->write_u16b(rg+2,(uint16_t)t); mem->write_u16b(rg+4,(uint16_t)l);
         mem->write_u16b(rg+6,(uint16_t)b); mem->write_u16b(rg+8,(uint16_t)rr); }
     } else if(opcode==0xA8E3){ // EqualRgn(rgnA,rgnB):Boolean — bbox compare. [A7]=rgnB(4),
-      // [A7+4]=rgnA(4),[A7+8]=result; pop 8, leave Boolean in the byte at [A7]. 5 modules leaked.
+      // [A7+4]=rgnA(4),[A7+8]=result; pop 8, leave Boolean in the byte at [A7].
       uint32_t hb=mem->read_u32b(r.a[7]), ha=mem->read_u32b(r.a[7]+4);
       uint32_t ra=ha?mem->read_u32b(ha):0, rb=hb?mem->read_u32b(hb):0; uint8_t eq;
       if(ra&&rb){ eq=1; for(int o=2;o<10;o+=2) if(mem->read_u16b(ra+o)!=mem->read_u16b(rb+o)){eq=0;break;} }
       else eq = (ra==rb)?1:0;
       r.a[7]+=8;
-      // addm 590 (Boolean-slot audit): full-word high-byte Boolean + cleared low (was write_u8 hi-only).
+      // Full-word Boolean: truth in the high byte, low byte cleared.
       if(g_nobool) mem->write_u8(r.a[7], eq);
       else         mem->write_u16b(r.a[7], eq?0x0100:0);
     } else if(base==0x024){ // SetHandleSize(h:Handle A0; newSize:Size D0) — grow/shrink a handle.
       // The arena can't grow in place; on growth, allocate a new block, copy min(old,new), repoint
-      // *h, retrack the size. Unhandled -> the handle kept its smaller block and callers that grew
-      // then wrote past it corrupted the arena / faulted (Mandelbrot, Bugs, Gravity, Messages).
+      // *h, retrack the size.
       uint32_t h=r.a[0], nsz=r.d[0].u;
       if(h){ uint32_t oldp=mem->read_u32b(h); auto it=blk_size->find(oldp);
         uint32_t osz=(it!=blk_size->end())?it->second:0;
@@ -9294,20 +8363,16 @@ int main(int argc, char** argv){
         else (*blk_size)[oldp]=nsz; }
       r.d[0].u=0;
     } else if(opcode==0xA8DA){ // OpenRgn — begin region recording. No args.
-      // addm 543 item 7: the addm-432 Meadow-gated pen-path bbox capture is GENERALIZED to all modules
-      // (ADNORGNCAP reverts to Meadow-only). Drawing between Open/CloseRgn still paints (bounds-only
-      // host, deliberate divergence from real QD's hidden recording — it is what renders the Pearls
-      // class); the capture ALSO accumulates the pen path + framed-shape rects (rgn_ext calls in the
-      // Rect/Oval handlers) so CloseRgn stores a real rgnBBox instead of an always-empty region.
+      // Drawing between Open/CloseRgn still paints — a deliberate divergence from real QuickDraw's
+      // hidden recording, and what renders the Pearls class. The capture accumulates the pen path plus
+      // framed-shape rects (rgn_ext calls in the Rect/Oval handlers) so CloseRgn stores a real rgnBBox
+      // instead of an always-empty region. ADNORGNCAP disables the capture.
       if(getenv("ADFORCEREC") || (!g_no_rgncap && !no_rgncap_mod)){ rgn_rec=true; rgn_any=false; rgn_rec_ovals=0; rgn_rec_others=0;
         rgn_subs->clear(); rgn_edges->clear(); *rgn_pen_moved=false; }
       else ADSTUB("A8DA_OpenRgn_noCapture");
     } else if(opcode==0xA8DB){ // CloseRgn(dstRgn) — end recording, store the region. [A7]=rgnH;
-      // pop 4. Unhandled -> the 4-byte arg leaked (8 modules incl. Down the Drain). addm 543 item 7:
-      // store the captured pen-path/shape bounding box (generalized from the Meadow gate). NOTE the
-      // addm-537 note "a full-screen fallback regressed Pearls" was about a FULL-SCREEN region; the
-      // captured bbox here is the RECORDED SHAPE's own extent, verified non-regressing on the Pearls/
-      // Sunburst/Meadow canary set (see addendum 543 A/B).
+      // pop 4. Store the captured pen-path/shape bounding box — the RECORDED SHAPE's own extent, not a
+      // full-screen fallback (a full-screen region regresses the Pearls class).
       uint32_t h=mem->read_u32b(r.a[7]); r.a[7]+=4; uint32_t rg=h?mem->read_u32b(h):0;
       if((!g_no_rgncap && !no_rgncap_mod) && rgn_rec && rg && rgn_any){
         // Store the captured pen-path bounding box as a rectangular region (size 10, rgnBBox only).
@@ -9315,43 +8380,34 @@ int main(int argc, char** argv){
         mem->write_u16b(rg+2,(uint16_t)rgn_minv); mem->write_u16b(rg+4,(uint16_t)rgn_minh);   // top,left
         mem->write_u16b(rg+6,(uint16_t)rgn_maxv); mem->write_u16b(rg+8,(uint16_t)rgn_maxh);   // bottom,right
         rgn_rec=false;
-        // S2 (addm 638): CORRECT recording->shape scan-conversion. The recorded pen sub-paths
-        // (rgn_subs: MoveTo starts a sub-path, LineTo/Line append an edge — Inside Macintosh region
-        // recording, where pen MOVES emit no edge and Line/LineTo/Frame define the outline) are
-        // rasterized (even-odd) into the region's real shape mask, so PtInRgn/RectInRgn/FillRgn all
-        // hit-test and render the true polygon instead of its bbox. OPT-IN (ADRGNPATHMASK) — it CANNOT
-        // default: see the Meadow note below (its recorded outline is genuinely garbage upstream, so a
-        // faithful raster tightens PtInRgn onto a bad shape and regresses it). When the upstream
-        // silhouette generator is fixed this becomes the default. rgn_mask_from_subpaths no-ops unless
-        // masks_enabled (ADRGNMASK), so ADRGNPATHMASK implies enabling masks.
+        // Recording -> shape scan-conversion. The recorded pen sub-paths (rgn_subs: MoveTo starts a
+        // sub-path, LineTo/Line append an edge — Inside Macintosh region recording, where pen MOVES emit
+        // no edge and Line/LineTo/Frame define the outline) are rasterized (even-odd) into the region's
+        // real shape mask, so PtInRgn/RectInRgn/FillRgn all hit-test and render the true polygon instead
+        // of its bbox. The rasterizer no-ops unless masks_enabled (ADRGNMASK), so ADRGNPATHMASK implies
+        // enabling masks.
         bool built=false;
-        // addm 668: Meadow's fractal-terrain silhouette is REAL now (the addm-664 FixMath-authentic
-        // default flip fixed the fixed-point generator fn0x0010035C — see the corrected S2 note above),
-        // so honour its recorded shape by DEFAULT instead of the full-screen bbox hack. Structural
-        // discriminator (no module name): a recorded region whose pen path is a large CLOSED POLYGON
-        // (>=12 vertices) and is NOT a single oval. Meadow records a 24-vertex MoveTo/LineTo terrain
-        // silhouette per hill; nothing else in the corpus produces that signature (Punch Out's region is
-        // a 4-vertex quad; Pearls' ovals are excluded from recording; Down the Drain/Spotlight record an
-        // empty pen path) — verified byte-identical for the whole non-Meadow corpus. Scan-conversion then
-        // lets Meadow place its grass/flower roots against the true terrain shape (mask-aware RectInRgn/
-        // SetClip) rather than a full-screen bbox. ADRGNPATHMASK still forces it globally (A/B); ADNOTERRAINMASK opts out.
+        // Terrain-silhouette discriminator (no module name): a recorded region whose pen path is a large
+        // CLOSED POLYGON (>=12 vertices) and is NOT a single oval. Meadow records a 24-vertex
+        // MoveTo/LineTo terrain silhouette per hill; nothing else in the corpus produces that signature
+        // (Punch Out's region is a 4-vertex quad, Pearls' ovals are excluded from recording, Down the
+        // Drain/Spotlight record an empty pen path). Scan-converting it lets Meadow place its grass/flower
+        // roots against the true terrain shape (mask-aware RectInRgn/SetClip) rather than a full-screen
+        // bbox. ADRGNPATHMASK forces it globally; ADNOTERRAINMASK opts out.
         size_t rgn_totv=0; for(auto&s:*rgn_subs) rgn_totv+=s.size();
         bool terrain_poly = !getenv("ADNOTERRAINMASK") && rgn_totv>=12 && rgn_rec_ovals!=1;
-        // region-exact: a recorded OPEN/CLOSE pen path defines the region's TRUE shape.
-        // Scan-convert ANY real polygon path (>=3 recorded vertices, not a single oval)
-        // into the exact mask by DEFAULT so PtInRgn/RectInRgn/FillRgn/SetClip honour the
-        // real figure, never its bbox. This dissolves the addm-668 >=12-vertex terrain
-        // heuristic (kept as a force lever) and the ADRGNPATHMASK opt-in: a rectangular
-        // recorded path scan-converts to a rect mask which is then DROPPED (bbox exact),
-        // so pure-rect recordings stay byte-identical; only genuinely non-rect figures
-        // gain a shape mask. ADNORGNMASK (masks_enabled=false) reverts to bbox-only.
+        // Region-exact: a recorded OPEN/CLOSE pen path defines the region's TRUE shape. Scan-convert ANY
+        // real polygon path (>=3 recorded vertices, not a single oval) into the exact mask so
+        // PtInRgn/RectInRgn/FillRgn/SetClip honour the real figure, never its bbox. A rectangular recorded
+        // path scan-converts to a rect mask which is then DROPPED (the bbox is already exact), so only
+        // genuinely non-rect figures gain a shape mask. ADNORGNMASK (masks_enabled=false) reverts to
+        // bbox-only.
         bool has_poly = C.masks_enabled && rgn_totv>=3 && rgn_rec_ovals==0;
         if(getenv("ADRGNPATHMASK") || terrain_poly || has_poly){ C.masks_enabled=true;
-          // Inline even-odd scan-conversion of the recorded sub-paths into the region's shape mask
-          // (ad_toolbox.hh is not modified; we fill the vector rgn_mask(rg,true) hands back). Each
-          // sub-path is auto-closed to its first vertex. Empty/degenerate input clears the mask.
-          // addm 741: the scan-converter moved into the shared rgn_rast_poly lambda (identical code)
-          // so OffsetRgn can re-derive this raster after translating the recorded vertices.
+          // Even-odd scan-conversion of the recorded sub-paths into the region's shape mask (the vector
+          // rgn_mask(rg,true) hands back). Each sub-path is auto-closed to its first vertex;
+          // empty/degenerate input clears the mask. The scan-converter lives in the shared rgn_rast_poly
+          // lambda so OffsetRgn can re-derive this raster after translating the recorded vertices.
           if(rgn_rast_poly(rg,*rgn_subs)==2){ built=true; g_rgnc_polymask++;
             (*rgn_poly)[rg] = { {(int16_t)rgn_minv,(int16_t)rgn_minh,(int16_t)rgn_maxv,(int16_t)rgn_maxh}, *rgn_subs }; }
           else rgn_poly->erase(rg);
@@ -9362,11 +8418,10 @@ int main(int argc, char** argv){
            rgn_ov[0]==(int16_t)rgn_minv && rgn_ov[1]==(int16_t)rgn_minh &&
            rgn_ov[2]==(int16_t)rgn_maxv && rgn_ov[3]==(int16_t)rgn_maxh){
           (*rgn_oval)[rg] = {rgn_ov[0],rgn_ov[1],rgn_ov[2],rgn_ov[3]};
-          // addm 657: when masks are on, ALSO rasterize the single oval into the region's per-pixel mask so
+          // When masks are on, ALSO rasterize the single oval into the region's per-pixel mask so
           // OffsetRgn/DiffRgn/CopyRgn can combine it and CopyBits can honour it as a maskRgn (Spotlight's
-          // spotlight circles are OpenRgn/FrameOval/CloseRgn ovals). No-op unless masks_enabled (byte-identical
-          // default) — the rgn_oval fill-time path above is unchanged for the FillRgn case.
-          // addm 741: same rasterizer, now shared with the OffsetRgn re-scan-convert.
+          // spotlight circles are OpenRgn/FrameOval/CloseRgn ovals). No-op unless masks_enabled; the
+          // rgn_oval fill-time path above is unchanged for the FillRgn case.
           if(C.masks_enabled) rgn_rast_oval(rg,rgn_minv,rgn_minh,rgn_maxv,rgn_maxh);
           rgn_poly->erase(rg);
         }
@@ -9385,25 +8440,12 @@ int main(int argc, char** argv){
       // install colour-table entries into the device CLUT. Pascal args (start deepest): [A7]=aTable(4),
       // [A7+4]=count(2),[A7+6]=start(2); pop 8. Each ColorSpec = {value:Integer; rgb:RGBColor}=8B,
       // indices 0..count; start<0 -> match by value field. We ALWAYS pop (stack safety).
-      // addm 543 item 6: the CLUT install is now DEFAULT-ON (23 modules were rendering with the wrong,
-      // grayscale-ramp palette). ADNOSETENTRIES forces the old no-op for A/B. rgb_to_index is computed live
-      // per call (no cache to rebuild), so a CLUT write takes effect immediately.
-      // *** addm 722 MANDELBROT COLORS GATE RETIRED ***: Mandelbrot's whole "Colors" dropdown (control 1,
-      // mVal id 1001, 5 menu options) was DEAD — all 5 rendered byte-identical — because addm 543 name-gated
-      // its SetEntries install OUT. RE of the gate's premise ("installing its palette collapses the host's
-      // pre-seeded ramp, 87 distinct -> 44"): Mandelbrot ships NO 'clut' resource, so the host installs the
-      // generic Mac System 7 palette at init (that is the "87-distinct" ramp — a system default UNRELATED to
-      // the module's design). The module then computes its OWN 256-entry palette per Colors option and installs
-      // it via SetEntries(start=0,count=255). The 5 options build 5 DISTINCT tables (tblhash differs; each 254-
-      // 255 nonblack entries — NOT degenerate). Installing PURELY RECOLORS: the fractal index-plane is byte-
-      // identical with the install on/off AND across all 5 options (proven: ADFBHASH identical). The gate
-      // author read the module's real palette as a "collapse" because option 3 (the default) is the classic
-      // interior-is-BLACK Mandelbrot scheme (only e255 fully black), whereas the generic Sys7 palette happened
-      // to paint the set interior cream — pretty but inauthentic. Honoring SetEntries is correct; the gate
-      // forced every Colors choice to show the same wrong system palette. Fix = drop the is_mandelbrot term so
-      // Mandelbrot uses the same install path as every other SetEntries consumer (the change is provably scoped
-      // to Mandelbrot: is_mandelbrot is false for all other modules, so their doInstall is unchanged). Revert
-      // lever ADMBGATE543 restores the old gated-off behavior for A/B.
+      // The CLUT install is default-on; ADNOSETENTRIES forces a no-op. rgb_to_index is computed live per
+      // call (no cache to rebuild), so a CLUT write takes effect immediately.
+      // ADMBGATE543 restores a name-gate that suppressed the install for Mandelbrot. Honouring
+      // SetEntries is correct: Mandelbrot ships no 'clut' resource, computes its own 256-entry palette
+      // per "Colors" menu option and installs it with SetEntries(start=0,count=255), so suppressing the
+      // install makes all five options render identically in the host's generic System 7 palette.
       uint32_t tbl=mem->read_u32b(r.a[7]);
       int16_t count=(int16_t)mem->read_u16b(r.a[7]+4), start=(int16_t)mem->read_u16b(r.a[7]+6);
       r.a[7]+=8;
@@ -9413,41 +8455,41 @@ int main(int argc, char** argv){
           start,count,tbl,
           (int16_t)mem->read_u16b(f),mem->read_u16b(f+2),mem->read_u16b(f+4),mem->read_u16b(f+6),
           (int16_t)mem->read_u16b(l),mem->read_u16b(l+2),mem->read_u16b(l+4),mem->read_u16b(l+6)); }
-      bool mb_gate = is_mandelbrot && getenv("ADMBGATE543");   // addm 722: old name-gate, A/B revert only
+      bool mb_gate = is_mandelbrot && getenv("ADMBGATE543");   // name-gate revert lever only
       bool doInstall = g_setentries && !mb_gate && tbl && count>=0;
       if(doInstall) for(int i=0;i<=count;i++){
         int idx = (start<0)? (int16_t)mem->read_u16b(tbl+i*8) : start+i;
         if(idx<0||idx>255) continue; uint32_t src=tbl+(uint32_t)i*8+2, dst=C.g_clut+8+(uint32_t)idx*8;
         mem->write_u16b(dst+2, mem->read_u16b(src)); mem->write_u16b(dst+4, mem->read_u16b(src+2));
         mem->write_u16b(dst+6, mem->read_u16b(src+4)); }
-      // addm 553 START-BLANK STICKY, retired addm 750 (default off; ADSTARTBLANKLEGACY=1 re-arms it — see the
-      // start-blank block for why the premise dissolved). Re-blackening an index the module just installed
-      // repainted Satori's live field cells black; the entry belongs to the module.
+      // Start-blank sticky black index (default off; ADSTARTBLANKLEGACY=1 re-arms it). Re-blackening an
+      // index the module just installed repaints Satori's live field cells black; the entry belongs to
+      // the module.
       if(g_sticky_black_idx>=0){ uint32_t d=C.g_clut+8+(uint32_t)g_sticky_black_idx*8;
         mem->write_u16b(d+2,0); mem->write_u16b(d+4,0); mem->write_u16b(d+6,0); }
       if(!doInstall) ADSTUB("AA3F_SetEntries_noInstall");
     } else if(opcode==0xA8AD){ // PtInRect(pt:Point; r:Rect*):Boolean — [A7]=r(4),[A7+4]=pt(4),
-      // [A7+8]=result; pop 8, Boolean byte at [A7]. Mowin' Man / Nonsense leaked 8 bytes.
+      // [A7+8]=result; pop 8, Boolean byte at [A7].
       uint32_t rp=mem->read_u32b(r.a[7]); uint32_t ptL=mem->read_u32b(r.a[7]+4);
       int16_t pv=(int16_t)(ptL>>16), ph=(int16_t)(ptL&0xFFFF); uint8_t inside=0;
       if(rp){ int16_t t=(int16_t)mem->read_u16b(rp),l=(int16_t)mem->read_u16b(rp+2),
               b=(int16_t)mem->read_u16b(rp+4),rr=(int16_t)mem->read_u16b(rp+6);
         if(ph>=l&&ph<rr&&pv>=t&&pv<b) inside=1; }
       r.a[7]+=8;
-      // addm 590 (Boolean-slot audit): full-word high-byte Boolean + cleared low (was write_u8 hi-only).
+      // Full-word Boolean: truth in the high byte, low byte cleared.
       if(g_nobool) mem->write_u8(r.a[7], inside);
       else         mem->write_u16b(r.a[7], inside?0x0100:0);
     } else if(opcode==0xA880){ // SetPt(VAR pt:Point; h,v:Integer) — [A7]=v(2),[A7+2]=h(2),
-      // [A7+4]=ptPtr(4); pop 8. Sunburst leaked 8 bytes. Point = {v(2),h(2)}.
+      // [A7+4]=ptPtr(4); pop 8. Point = {v(2),h(2)}.
       int16_t v=(int16_t)mem->read_u16b(r.a[7]), h=(int16_t)mem->read_u16b(r.a[7]+2);
       uint32_t pp=mem->read_u32b(r.a[7]+4); r.a[7]+=8;
       if(pp){ mem->write_u16b(pp,(uint16_t)v); mem->write_u16b(pp+2,(uint16_t)h); }
     } else if(opcode==0xA888){ ADSTUB("A888_TextFace_noop"); // TextFace(face:StyleField) — one word arg, pop 2. We render plain
-      // text only; consume the arg to keep the stack balanced (Lunatic Fringe, Messages leaked 2).
+      // text only; consume the arg to keep the stack balanced.
       r.a[7]+=2;
     } else if(opcode==0xA896||opcode==0xA897){ // HidePen(A896)/ShowPen(A897) — pen-visibility nesting, no args.
-      // addm 543 item 7: real Toolbox pnVis counter. pnVis starts 0 (visible); HidePen decrements, ShowPen
-      // increments; the pen draws only while pnVis>=0. qd_penpx/qd_penstamp/qd_penfill honour pen_vis<0.
+      // Toolbox pnVis counter. pnVis starts 0 (visible); HidePen decrements, ShowPen increments; the pen
+      // draws only while pnVis>=0. qd_penpx/qd_penstamp/qd_penfill honour pen_vis<0.
       // NOTE: we deliberately do NOT couple OpenRgn->HidePen (real QD does): our bounds-only region model
       // renders the Pearls class by PAINTING during OpenRgn recording, so auto-hiding there would blank them.
       // This handler affects ONLY explicit Hide/ShowPen callers (Sunburst). ADNOHIDEPEN reverts to the no-op.
@@ -9455,44 +8497,36 @@ int main(int argc, char** argv){
       else { if(opcode==0xA896) C.pen_vis--; else C.pen_vis++; }
     } else if(opcode==0xA8BB){ // FillOval(r:Rect*; pat:Pattern*) — [A7]=pat(4),[A7+4]=r(4); pop 8.
       // Fill the oval's bounding box with the pattern's dominant/fg colour (bbox approximation,
-      // matching the Frame/Paint/EraseOval handlers). Down the Drain leaked 8 bytes.
+      // matching the Frame/Paint/EraseOval handlers).
       uint32_t rp=mem->read_u32b(r.a[7]+4); r.a[7]+=8;
       if(rp){ int t=(int16_t)mem->read_u16b(rp),l=(int16_t)mem->read_u16b(rp+2),
               b=(int16_t)mem->read_u16b(rp+4),rr=(int16_t)mem->read_u16b(rp+6);
         C.qd_fillrect(t,l,b,rr,C.qd_fg); }
     } else if(opcode==0xA8B0){ // FrameRoundRect(r:Rect*; ovalWidth,ovalHeight:Integer) — [A7]=ovH(2),
-      // [A7+2]=ovW(2),[A7+4]=r(4); pop 8. Frame the rect (ignore corner rounding). Tunnel leaked 8.
+      // [A7+2]=ovW(2),[A7+4]=r(4); pop 8. Frame the rect (ignore corner rounding).
       uint32_t rp=mem->read_u32b(r.a[7]+4); r.a[7]+=8;
       if(rp){ int t=(int16_t)mem->read_u16b(rp),l=(int16_t)mem->read_u16b(rp+2),
               b=(int16_t)mem->read_u16b(rp+4),rr=(int16_t)mem->read_u16b(rp+6);
-        // NOTE (addm 596 Tunnel RE): FrameRoundRect deliberately does NOT feed the OpenRgn recorder
-        // (rgn_ext). Tunnel builds each ring's region via `OpenRgn; FrameRoundRect(r); CloseRgn(ringRgn)`
-        // then `DiffRgn(outerRing,innerRing,band); PaintRgn(band)` to fill the colored wall between two
-        // nested rings. Making FrameRoundRect record the shape DOES populate the regions, but our DiffRgn
-        // approximates the band as srcA's FULL bbox (not the true annulus) so PaintRgn fills solid rects and
-        // the largest ring floods the screen solid blue — WORSE than the recognizable nested-outline render.
-        // (Also all 35 gradient blues R=2..36 collapse to one index 243 via rgb_to_index, so even a correct
-        // annulus would be uniform.) A faithful fill needs real annulus region shapes AND per-ring color
-        // preservation — out of proportion for a genuinely single-shot saver whose outline already reads as a
-        // tunnel. Left as pen-lines only (the pre-existing, better-looking behavior). See addendum 596.
+        // NOTE: FrameRoundRect deliberately does NOT feed the OpenRgn recorder (rgn_ext). Tunnel builds
+        // each ring's region via `OpenRgn; FrameRoundRect(r); CloseRgn(ringRgn)` then
+        // `DiffRgn(outerRing,innerRing,band); PaintRgn(band)` to fill the coloured wall between two nested
+        // rings. Making FrameRoundRect record the shape does populate the regions, but DiffRgn here
+        // approximates the band as srcA's FULL bbox (not the true annulus), so PaintRgn fills solid rects
+        // and the largest ring floods the screen solid blue — worse than the recognizable nested-outline
+        // render. (All 35 gradient blues R=2..36 also collapse to one index 243 via rgb_to_index, so even a
+        // correct annulus would be uniform.) Left as pen lines only.
         C.qd_penline(l,t,rr-1,t); C.qd_penline(l,b-1,rr-1,b-1);
         C.qd_penline(l,t,l,b-1); C.qd_penline(rr-1,t,rr-1,b-1); }             // FrameRoundRect (pen)
     } else if(opcode==0xA8B1||opcode==0xA8B2||opcode==0xA8B3||opcode==0xA8B4){
-      // *** addm 715 ROUNDRECT PAINT FAMILY ***: Paint/Erase/Invert/FillRoundRect (0xA8B1-0xA8B4) were
-      // UNHANDLED — they fell to the do-nothing tail that pops NOTHING, so the call drew nothing AND
-      // leaked its Pascal args (8 bytes, 12 for FillRoundRect) off A7 on every call. FrameRoundRect
-      // (0xA8B0, above) was the only member of the family the host ever implemented.
-      //   This is the whole of Modern Art's Rothko composition. RE (ADgm disasm 0x4746-0x47F6, the loop
-      // the ADCENSUSDIS probe pointed at): Rothko lays out THREE stacked band rects (SetRect at 0x4662/
-      // 0x46A0/0x46D8, frame slots A6-0x32/-0x3A/-0x42) and then runs a ramp loop — per step it picks the
-      // band's next colour (per-band ramp bases at [A3]+0x92A/0x92C/0x92E plus the step, through the
-      // colour helper at A4+0x6B32), calls PaintRoundRect with the band's corner radius, then InsetRect
-      // (1,1) and repeats until the step counter reaches [A3]+0x930. That is exactly how you paint a
-      // Rothko: concentric rounded rectangles one pixel apart, each one ramp entry along, so the band
-      // edges come out soft. Every one of those 192 paints was a silent no-op, leaving only the backdrop
-      // PaintRect at 0x473A on screen — the "full-screen flat wash" the field report describes. The
-      // module's colour animation was real all along (addm 707 fixed the HSV2RGB that feeds it); it had
-      // nothing to land on.
+      // ROUNDRECT PAINT FAMILY: Paint/Erase/Invert/FillRoundRect (0xA8B1-0xA8B4). Pascal args are 8
+      // bytes, 12 for FillRoundRect.
+      //   Modern Art's Rothko composition is built entirely from this family (ADgm disasm 0x4746-0x47F6):
+      // it lays out THREE stacked band rects (SetRect at 0x4662/0x46A0/0x46D8, frame slots A6-0x32/
+      // -0x3A/-0x42) and runs a ramp loop — per step it picks the band's next colour (per-band ramp bases
+      // at [A3]+0x92A/0x92C/0x92E plus the step, through the colour helper at A4+0x6B32), calls
+      // PaintRoundRect with the band's corner radius, then InsetRect(1,1), repeating until the step
+      // counter reaches [A3]+0x930: concentric rounded rectangles one pixel apart, each one ramp entry
+      // along, so the band edges come out soft.
       //   ROUNDING: a point is inside a round rect when its offset PAST the corner-ellipse centres
       // satisfies the ellipse equation — the standard reading of QuickDraw's ovalWidth/ovalHeight, and
       // the same ellipse model the oval traps (0xA8B7+) already use. Radii clamp to half the rect, so
@@ -9544,8 +8578,7 @@ int main(int argc, char** argv){
         draw_ops++;
       }
     } else if(opcode==0xA8CB){ // OpenPoly():PolyHandle — begin polygon recording. No args; a 4B
-      // result slot sits on top. MoveTo/LineTo now append vertices (guarded above) instead of
-      // drawing. Shapes/Sunburst leaked their poly args when this was unhandled -> blank.
+      // result slot sits on top. MoveTo/LineTo append vertices (guarded above) instead of drawing.
       uint32_t pb=mem->allocate(0x0A); mem->memset(pb,0,0x0A); mem->write_u16b(pb,10);
       uint32_t h=mem->allocate(4); mem->write_u32b(h,pb); (*blk_size)[h]=4; (*blk_size)[pb]=0x0A;
       poly_cur=h; poly_rec=true; (*poly_pts)[h].clear();
@@ -9563,7 +8596,7 @@ int main(int argc, char** argv){
       uint32_t h=mem->read_u32b(r.a[7]); r.a[7]+=4; if(h) poly_pts->erase(h);
     } else if(opcode==0xA8C6||opcode==0xA8C7){ // FramePoly/PaintPoly(poly) — [A7]=polyH; pop 4.
       // FramePoly outlines the captured vertices with the pen colour; PaintPoly does an even-odd
-      // scanline fill. Turns Shapes/Sunburst from blank into rendered geometry.
+      // scanline fill.
       uint32_t h=mem->read_u32b(r.a[7]); r.a[7]+=4;
       auto it=poly_pts->find(h);
       if(it!=poly_pts->end() && it->second.size()>=2){ auto& v=it->second;
@@ -9579,13 +8612,11 @@ int main(int argc, char** argv){
             for(size_t i=0;i+1<xs.size();i+=2) for(int x=xs[i];x<=xs[i+1];x++) C.qd_penpx(x,y); } }  // PaintPoly (pen pattern/mode)
         draw_ops++; }
     // ===================================================================================
-    // BULK TOOLBOX TRAP FILL (census 2026-07-31, addm 408). Each was UNHANDLED -> the no-pop
-    // rts-stub leaked the Pascal args (callee-clean convention) -> A7 drift. All conventions
-    // below were VERIFIED against a live call-site disassembly (ADCENSUSDIS window: reserved
-    // result slot(s) + pushed args + NO caller-side post-pop => callee-clean Pascal). Minimal-
-    // correct semantics; the load-bearing part is the exact arg-byte pop.
-    } else if(opcode==0xA865){ // GetPixel(h,v:Integer):Boolean — Punch Out (92 calls).
-      // Verified (Punch Out @0x1014F0): clr.w -(A7)[result] ; move.w D0,-(A7)[h] ; move.w D1,-(A7)[v] ;
+    // BULK TOOLBOX TRAP FILL. All conventions below are verified against a live call-site
+    // disassembly (reserved result slot(s) + pushed args + NO caller-side post-pop => callee-clean
+    // Pascal). Minimal-correct semantics; the load-bearing part is the exact arg-byte pop.
+    } else if(opcode==0xA865){ // GetPixel(h,v:Integer):Boolean.
+      // Call site (Punch Out @0x1014F0): clr.w -(A7)[result] ; move.w D0,-(A7)[h] ; move.w D1,-(A7)[v] ;
       // _GetPixel ; move.b (A7)+,D0. Stack @trap: [A7]=v(2),[A7+2]=h(2),[A7+4]=result word. Pop 4 (h,v),
       // leave the result word. The caller reads the Boolean from the HIGH byte (move.b (A7)+), so write
       // it there. Return TRUE iff the screen pixel is non-background (drawn) — mirrors classic GetPixel.
@@ -9593,29 +8624,28 @@ int main(int argc, char** argv){
       uint8_t px=C.qd_getpx(h,v); uint8_t b = (px!=C.qd_bg)?1:0;
       r.a[7]+=4; mem->write_u16b(r.a[7], (uint16_t)(b<<8));   // Boolean in high byte of the result word
       if(getenv("ADGETPIXLOG")) fprintf(stderr,"    GetPixel(%d,%d)=idx%u -> %u\n",h,v,px,b);
-    } else if(opcode==0xA976){ ADSTUB("A976_GetKeys_zero"); // GetKeys(VAR theKeys:KeyMap) — Nirvana(8), You Bet Your Head(1).
+    } else if(opcode==0xA976){ ADSTUB("A976_GetKeys_zero"); // GetKeys(VAR theKeys:KeyMap).
       // Verified (Nirvana @0x1034D88 / YBYH @0x1034E90): pea <keymap> ; _GetKeys ; (no post-pop). One
       // 4-byte VAR pointer, callee-clean. KeyMap is 16 bytes; zero it (screensaver: no keys down).
       uint32_t km=mem->read_u32b(r.a[7]); r.a[7]+=4;
       if(getenv("ADINPUTLOG")){ static long n=0; if(++n<=60) fprintf(stderr,"    [input] GetKeys km=%08X pc=%08X\n", km, r.pc); }
-      // addm 574: copy the live KeyMap (g_km is all-zero until the app sends input,
-      // so byte-identical to the old constant-zero fill for every input-less run).
+      // Copy the live KeyMap (g_km is all-zero until the app sends input).
       if(km) for(int i=0;i<16;i++) try{ mem->write_u8(km+i,g_km[i]);}catch(...){}
-    } else if(opcode==0xA972){ ADSTUB("A972_GetMouse_zero"); // GetMouse(VAR mouseLoc:Point) — Slide Show(1).
+    } else if(opcode==0xA972){ ADSTUB("A972_GetMouse_zero"); // GetMouse(VAR mouseLoc:Point).
       // Verified (Slide Show @0x10317E): pea (A3+0x4C) ; _GetMouse ; clr.b -(A7) (no arg pop). One 4-byte
       // VAR Point pointer, callee-clean. Report a stable cursor (0,0) in local coords (no user input).
       uint32_t pt=mem->read_u32b(r.a[7]); r.a[7]+=4;
       if(getenv("ADINPUTLOG")){ static long n=0; if(++n<=60) fprintf(stderr,"    [input] GetMouse pt=%08X pc=%08X\n", pt, r.pc); }
-      // addm 574: Point is (v,h) = (y,x). Default (0,0) -> byte-identical to the old stub.
+      // Point is (v,h) = (y,x); the default is (0,0).
       if(pt){ try{ mem->write_u16b(pt,(uint16_t)g_msy); mem->write_u16b(pt+2,(uint16_t)g_msx);}catch(...){} }
-    } else if(opcode==0xA88C){ ADSTUB("A88C_StringWidth_len_x6"); // StringWidth(s:Str255):Integer — Lunatic Fringe(1).
+    } else if(opcode==0xA88C){ ADSTUB("A88C_StringWidth_len_x6"); // StringWidth(s:Str255):Integer.
       // Verified (Lunatic Fringe @0x101C50): clr.w -(A7)[result] ; move.l (A6+8),-(A7)[strptr] ;
       // _StringWidth ; move.w (A7)+,D0. Pop 4 (the Str255 ptr), leave result word. No font metrics in
       // this host; approximate width = length * 6 (our bitmap font advances ~6px/char).
       uint32_t sp=mem->read_u32b(r.a[7]); r.a[7]+=4;
       int len=0; if(sp) try{ len=mem->read_u8(sp);}catch(...){ len=0; }
       mem->write_u16b(r.a[7], (uint16_t)(len*6));
-    } else if(opcode==0xA885){ // DrawText(textBuf:Ptr; firstByte,byteCount:Integer) — Life & All(2).
+    } else if(opcode==0xA885){ // DrawText(textBuf:Ptr; firstByte,byteCount:Integer).
       // Verified (Life & All @0x10416AE): pea <buf> ; clr.w -(A7)[firstByte=0] ; move.w <cnt>,-(A7) ;
       // _DrawText ; (no post-pop). Stack @trap: [A7]=byteCount(2),[A7+2]=firstByte(2),[A7+4]=buf(4).
       // Pop 8. Render the raw bytes with the bitmap font at the pen (best-effort; no result).
@@ -9623,32 +8653,31 @@ int main(int argc, char** argv){
       uint32_t buf=mem->read_u32b(r.a[7]+4); r.a[7]+=8;
       if(buf && cnt>0){ for(int k=0;k<cnt;k++){ uint8_t c=0; try{c=mem->read_u8(buf+first+k);}catch(...){}
         C.qd_char(c, C.pen_h, C.pen_v, C.qd_fg); C.pen_h+=6; } draw_ops++; }
-    } else if(opcode==0xA886 && !getenv("ADNOTEXTWIDTH")){ // addm 724: TextWidth(textBuf:Ptr; firstByte,byteCount:Integer):Integer — Marbles!(1).
+    } else if(opcode==0xA886 && !getenv("ADNOTEXTWIDTH")){ // TextWidth(textBuf:Ptr; firstByte,byteCount:Integer):Integer.
       // Pascal FUNCTION, same 3 args as DrawText (A885) but returns the run's pixel width. Caller pushes
       // the 2-byte result slot FIRST, then the args: clr.w -(A7)[result] ; pea <buf> ; move.w #first,-(A7) ;
       // move.w <cnt>,-(A7) ; _TextWidth ; move.w (A7)+,D0. Stack @trap: [A7]=byteCount(2),[A7+2]=firstByte(2),
       // [A7+4]=buf(4),[A7+8]=result(2). Pop the 8 arg bytes, then leave the width word on top (StringWidth A88C
-      // idiom). Unhandled, the no-pop rts left the 8 args on A7 AND garbage in the result slot; Marbles!/Custom 4
-      // uses that garbage as a loop bound -> the measured 200x slowdown (10f/180s vs 12f/1s for its 8 siblings).
-      // Width is self-consistent with the host's bitmap font: DrawText/DrawChar advance 6px/char, StringWidth
-      // returns len*6 -> a TextWidth of cnt*6 measures exactly what DrawText would advance. firstByte/buf unread
-      // (fixed-width metric ignores glyph identity, like StringWidth).
+      // idiom). Marbles!/Custom 4 uses the returned width as a loop bound, so a garbage result slot costs
+      // it a 200x slowdown. Width is self-consistent with the host's bitmap font: DrawText/DrawChar
+      // advance 6px/char and StringWidth returns len*6, so a TextWidth of cnt*6 measures exactly what
+      // DrawText would advance. firstByte/buf unread (a fixed-width metric ignores glyph identity, like
+      // StringWidth).
       int16_t cnt=(int16_t)mem->read_u16b(r.a[7]); r.a[7]+=8;
       mem->write_u16b(r.a[7], (uint16_t)(cnt>0 ? cnt*6 : 0));
-    } else if(opcode==0xABFF){ ADSTUB("ABFF_DebugStr_noop"); // DebugStr(aStr:Str255) — Frost & Fire(9).
+    } else if(opcode==0xABFF){ ADSTUB("ABFF_DebugStr_noop"); // DebugStr(aStr:Str255).
       // Verified (Frost & Fire @0x101056): pea <str> ; _DebugStr ; tst.l D7 (no arg pop). One 4-byte
       // ptr, callee-clean. No debugger here — just balance the stack (pop 4).
       r.a[7]+=4;
-    } else if(opcode==0xA820){ // Get1NamedResource(type:ResType; name:Str255):Handle — Marbles(3.0).
+    } else if(opcode==0xA820){ // Get1NamedResource(type:ResType; name:Str255):Handle.
       // Stack (top=last pushed): [A7]=name Str255 ptr, [A7+4]=type ResType. Pop 8, leave result long.
-      // addm 534: RESOLVE BY NAME (was hardcoded 0). The old stub returned NULL "names not indexed", which
-      // is a HOST-SERVED FAILURE that drove Marbles into its resource-missing FALLBACK: on a NULL return
-      // its per-frame setup (fn@0x68EF8) branches `beq 0x68FF4` and points its 40x40 composite PixMap's
-      // baseAddr at A5-0x546 (inside its own A5 globals), so the compositing CopyBits scribbles the live
-      // pointer at A5-0x53A and a later deref faults every draw (the addm-516/519/529/532 "module-internal"
-      // symptom). The named PICTs ("marbles","mmarble") DO exist in Marbles' fork; resolving them lets the
-      // NORMAL path run (it keeps the real NewPtr offscreen buffer as baseAddr). Names are matched
-      // case-insensitively, mirroring the Resource Manager. General, opcode-gated; NULL only if truly absent.
+      // Resolve by name. A NULL return drives Marbles into its resource-missing FALLBACK: its per-frame
+      // setup (fn@0x68EF8) branches `beq 0x68FF4` and points its 40x40 composite PixMap's baseAddr at
+      // A5-0x546 (inside its own A5 globals), so the compositing CopyBits scribbles the live pointer at
+      // A5-0x53A and a later deref faults every draw. The named PICTs ("marbles","mmarble") do exist in
+      // Marbles' fork; resolving them keeps it on the normal path with a real NewPtr offscreen buffer as
+      // baseAddr. Names are matched case-insensitively, mirroring the Resource Manager; NULL only if the
+      // resource is truly absent.
       uint32_t namep=mem->read_u32b(r.a[7]); uint32_t typ=mem->read_u32b(r.a[7]+4); r.a[7]+=8;
       string nm; { uint8_t len=0; try{ len=mem->read_u8(namep); }catch(...){}
         for(uint8_t i=0;i<len;i++){ uint8_t c=0; try{ c=mem->read_u8(namep+1+i); }catch(...){} nm+=(char)c; } }
@@ -9659,19 +8688,19 @@ int main(int argc, char** argv){
       mem->write_u32b(r.a[7], h); r.a[0]=h;
       if(getenv("ADNAMEDRESLOG")) fprintf(stderr,"    Get1NamedResource('%c%c%c%c',\"%s\") -> %08X\n",
         (char)(typ>>24),(char)(typ>>16),(char)(typ>>8),(char)typ, nm.c_str(), h);
-    } else if(opcode==0xAA07){ // NewPixPat():PixPatHandle — GeoBounce(1).
+    } else if(opcode==0xAA07){ // NewPixPat():PixPatHandle.
       // Verified (GeoBounce @0x100ABE): subq #4,A7[result] ; _NewPixPat ; move.l (A7)+,<dst>. NO args
       // (pop 0); the caller pops the result. Return a real (zeroed) PixPat handle so a later deref
       // (BackPixPat/PenPixPat) sees a non-null block instead of a stack-garbage pointer.
       uint32_t pp=mem->allocate(0x1C); mem->memset(pp,0,0x1C);
       uint32_t h=mem->allocate(4); mem->write_u32b(h,pp); (*blk_size)[h]=4; (*blk_size)[pp]=0x1C;
       mem->write_u32b(r.a[7], h); r.a[0]=h;
-    } else if(opcode==0xAA0C){ // GetPixPat(patID:Integer):PixPatHandle — Spin Brush(1).
+    } else if(opcode==0xAA0C){ // GetPixPat(patID:Integer):PixPatHandle.
       // Verified (Spin Brush @0x100864): subq #4,A7[result] ; move.w <id>,-(A7) ; _GetPixPat ;
       // move.l (A7)+,(A3+0x352). Pop 2 (patID), leave result long.
-      // addm 718b: the returned handle is still the zeroed PixPat block a later deref expects, but the
-      // real 'ppat' resource is now decoded and remembered against it, so BackPixPat + EraseRgn can
-      // paint the module's actual background pattern.
+      // The returned handle is the zeroed PixPat block a later deref expects; the real 'ppat' resource
+      // is also decoded and remembered against it, so BackPixPat + EraseRgn can paint the module's
+      // actual background pattern.
       uint16_t patID=mem->read_u16b(r.a[7]); r.a[7]+=2;
       uint32_t pp=mem->allocate(0x1C); mem->memset(pp,0,0x1C);
       uint32_t h=mem->allocate(4); mem->write_u32b(h,pp); (*blk_size)[h]=4; (*blk_size)[pp]=0x1C;
@@ -9683,21 +8712,21 @@ int main(int argc, char** argv){
         else fprintf(stderr,"[adhost68k] GetPixPat %d: 'ppat' present but not decodable -> flat background\n",(int16_t)patID);
       } else if(pit==rez.end()) ADSTUB("AA0C_GetPixPat_noresource");
       mem->write_u32b(r.a[7], h); r.a[0]=h;
-    } else if(opcode==0xAA0B){ // BackPixPat(pp:PixPatHandle) — Spin Brush(1).
+    } else if(opcode==0xAA0B){ // BackPixPat(pp:PixPatHandle).
       // Verified (Spin Brush @0x100872): move.l (A3+0x352),-(A7) ; _BackPixPat ; bra (no arg pop). One
-      // 4-byte handle arg, callee-clean. addm 718b: install it as the port's background pattern (a handle
-      // with no decoded tile — GeoBounce's NewPixPat — clears it, keeping the old flat-fill behaviour).
+      // 4-byte handle arg, callee-clean. Install it as the port's background pattern; a handle with no
+      // decoded tile (GeoBounce's NewPixPat) clears it, leaving the flat fill.
       uint32_t pph=mem->read_u32b(r.a[7]); r.a[7]+=4;
       auto ppit=g_pixpats.find(pph);
       g_bg_pixpat = (ppit!=g_pixpats.end()) ? &ppit->second : nullptr;
       if(!g_bg_pixpat) ADSTUB("AA0B_BackPixPat_notile");
       else fprintf(stderr,"[adhost68k] BackPixPat: background is now the %dx%d colour pattern\n",g_bg_pixpat->w,g_bg_pixpat->h);
-    } else if(opcode==0xAA18){ // GetCTable(ctID:Integer):CTabHandle — GeoBounce(1).
+    } else if(opcode==0xAA18){ // GetCTable(ctID:Integer):CTabHandle.
       // Verified (GeoBounce @0x10018E): subq #4,A7[result] ; move.w D0,-(A7)[ctID] ; _GetCTable ;
-      // move.l (A7)+,(A6-0xA). Pop 2 (ctID), leave result long. addm 543 item 9: return a REAL CTab that
-      // is a CLONE of the device CLUT (g_clut is itself a ColorTable: ctSeed@0, ctFlags@4, ctSize@6,
-      // ColorSpec[]@8). Standard-CLUT semantics: the module gets the live 256-entry table it can index.
-      // ADNOGETCTABLE keeps the old zeroed 0x10-byte stub for A/B.
+      // move.l (A7)+,(A6-0xA). Pop 2 (ctID), leave result long. Return a REAL CTab that is a CLONE of
+      // the device CLUT (g_clut is itself a ColorTable: ctSeed@0, ctFlags@4, ctSize@6, ColorSpec[]@8).
+      // Standard-CLUT semantics: the module gets the live 256-entry table it can index. ADNOGETCTABLE
+      // keeps the zeroed 0x10-byte stub.
       uint16_t ctID=mem->read_u16b(r.a[7]); (void)ctID; r.a[7]+=2;
       uint32_t h;
       if(getenv("ADNOGETCTABLE")){ ADSTUB("AA18_GetCTable_zeroed");
@@ -9709,7 +8738,7 @@ int main(int argc, char** argv){
         h=mem->allocate(4); mem->write_u32b(h,ct); (*blk_size)[h]=4; (*blk_size)[ct]=sz;
       }
       mem->write_u32b(r.a[7], h); r.a[0]=h;
-    } else if(opcode==0xAA4E){ ADSTUB("AA4E_SetStdCProcs_zeroed"); // SetStdCProcs(VAR procs:CQDProcs) — Globe(1).
+    } else if(opcode==0xAA4E){ ADSTUB("AA4E_SetStdCProcs_zeroed"); // SetStdCProcs(VAR procs:CQDProcs).
       // Verified (Globe @0x1043C6): pea (A6-0x54) ; _SetStdCProcs ; (no arg pop). One 4-byte VAR ptr,
       // callee-clean. The real trap fills the record with the std bottleneck ProcPtrs; we zero it (the
       // module installs its own custom procs into the fields it cares about). Pop 4.
@@ -9717,17 +8746,13 @@ int main(int argc, char** argv){
       if(p) for(int i=0;i<0x34;i+=2) try{ mem->write_u16b(p+i,0);}catch(...){}
     } else if((opcode==0xA807||opcode==0xA801||opcode==0xA803||opcode==0xA804||opcode==0xA805||opcode==0xA806)
               && lib510.loaded && lib510.moduleMain && !getenv("ADNOSNDTRAPS")){ ADSTUB("A807_SoundMgr_noErr_family");
-      // ---- Sound Manager Pascal traps (addm 391) — Art Critic init gate. These were UNHANDLED, so the
-      // unknown-trap fallthrough left every Pascal arg byte + the result slot on the stack. Inside
-      // XNoiseMaker::INoiseMaker (lib 0x0100C01A) the per-channel _SndNewChannel call (14 arg bytes +
-      // word result) therefore skewed A7 by 16 within the frame; the epilogue `movem.l (A7)+` then
-      // restored D3/A2/A3 from the WRONG slots (runtime-proven: D3=82900000 A2=00130000 A3=00010000
-      // after return) -> module_main pushed [A2]=0 as the XNoiseMaker `this` -> LoadNoiseIDs(NULL,
-      // garbage-count, ids) -> derailed id fetch -> GetResource('snd ',0)=NULL -> Throw(0x104) ->
-      // top-catch ABORTS init. NOT a channel over-build and NOT an allocator failure (new(0x4FC)
-      // succeeds; AllocMem never returns 0 — both runtime-proven). Implement the family with correct
-      // Pascal callee-clean semantics + noErr results; no audio is rendered (host has no sound output).
-      // Gated on the dll# LIB510 runtime (large 4.0 modules only) + ADNOSNDTRAPS opt-out.
+      // ---- Sound Manager Pascal traps. Implemented with correct Pascal callee-clean semantics + noErr
+      // results; no audio is rendered (the host has no sound output). The arg-byte pop is the
+      // load-bearing part: XNoiseMaker::INoiseMaker (lib 0x0100C01A) calls _SndNewChannel per channel
+      // (14 arg bytes + word result), and any A7 skew makes its `movem.l (A7)+` epilogue restore D3/A2/A3
+      // from the wrong slots, so module_main passes a null XNoiseMaker `this` and Art Critic's init
+      // aborts through Throw(0x104). Gated on the dll# LIB510 runtime (large 4.0 modules only) +
+      // ADNOSNDTRAPS opt-out.
       { uint32_t sp=r.a[7]; int argBytes=0; bool hasResult=true;
         switch(opcode){
           case 0xA807: argBytes=14; break;   // SndNewChannel(^SndChannelPtr, synth:w, init:l, userRoutine:l)
@@ -9778,23 +8803,21 @@ int main(int argc, char** argv){
     if(traps>TRAP_BUDGET) throw runtime_error("trap budget exhausted");
   });
 
-  // Enter the module. AD 68K modules are called with a selector; provisional
-  // convention (to be confirmed by tracing): entry at CODE_BASE+0x10, selector
-  // and params passed on the stack. We just start at the entry and observe.
+  // Enter the module. AD 68K modules are called with a selector: entry at CODE_BASE+0x10, with the
+  // selector and params passed on the stack.
   auto& r = emu.registers();
   r.a[7] = STACK_TOP;
-  // [pf] The sentinel is host-owned memory (this host allocates it and pushes it as the return address;
-  // no module or library owns or reads it). Writing an A-line trap here instead of the RTS lets the EXISTING
-  // trap path detect "module returned" without a per-instruction pc compare. ADPFNOSENTTRAP restores the RTS
-  // + in-hook compare for A/B.
+  // The sentinel is host-owned memory (this host allocates it and pushes it as the return address;
+  // no module or library owns or reads it). Writing an A-line trap here instead of an RTS lets the
+  // existing trap path detect "module returned" without a per-instruction pc compare.
+  // ADPFNOSENTTRAP restores the RTS + in-hook compare.
   uint32_t RET_SENT = 0x00000FF0;
   const bool pf_sent_trap = (getenv("ADPFNOSENTTRAP")==nullptr);
   mem->write_u16b(RET_SENT, pf_sent_trap ? PF_SENT_TRAP : 0x4E75);
   int selector = argc>=3 ? atoi(argv[2]) : 0;
   // After Dark 68K module main is Pascal with 4 args (RE'd from the prologue at
   // ADgm+0x5A6: link A6,-0x12; A3=[A6+8].l, D6=[A6+C].w, A2=[A6+E].l, A4=[A6+12].l).
-  // Provisionally: a params block, the message/selector (word), the GrafPort, and a
-  // globals/frame block. Exact roles get confirmed by tracing what each is used for.
+  // The args are a params block, the message/selector (word), the GrafPort, and a globals/frame block.
   uint32_t params = mem->allocate(0x400); mem->memset(params,0,0x400);
   uint32_t glob   = mem->allocate(0x400); mem->memset(glob,0,0x400);
   // Synthesize the After Dark 68K parameter block that the module reads (the analog
@@ -9826,9 +8849,7 @@ int main(int argc, char** argv){
     // resource TYPE encodes the widget kind, and FOUR types tile the four slots (RE'd across all 88
     // Deluxe modules): 'sVal'=slider(0-100), 'mVal'=popup-menu(1-based), 'xVal'=checkbox(0/1),
     // 'bVal'=radio/palette-enum(8-11). A fifth type 'µVal' (0xB5"Val") is AUXILIARY — it SHARES an
-    // id with a primary slot (a slider max / 2nd param) and must NOT be written into a controlValues
-    // slot. (Old code read only sVal+µVal and mis-seeded µVal into slots, e.g. Nonsense[2]=3 instead
-    // of the real xVal 1, and never read mVal/xVal/bVal at all → [3] fell back to the wrong guess.)
+    // id with a primary slot (a slider max / 2nd param) and must NOT be written into a controlValues slot.
     for(uint32_t ty : {FOURCC("sVal"),FOURCC("mVal"),FOURCC("xVal"),FOURCC("bVal")})
       for(int16_t id : rez_ids[ty]){
         int ci = id - 1000; if(ci<0||ci>3||cvset[ci]) continue;
@@ -9860,10 +8881,9 @@ int main(int argc, char** argv){
   // Bit 14 (0x4000) reads as a required capability; set it (plus bit 0 for Satori). Override
   // with ADSYSCONFIG=hex to probe other bits.
   //
-  // NOCTURNES BUCKET (name-gated): Nocturnes, Einstein blank-to-black then build no content.
-  // *** addm 773 CORRECTS THE MECHANISM RECORDED HERE. *** The original note read [obj+0x306] as a
-  // "creature sub-object" and systemConfig bit 15 as its "construction path". Disassembly of the
-  // Nocturnes ADgm says both are sound:
+  // Bit 15 (0x8000) is the engine's SOUND-ENABLED flag — After Dark 4.0 exposes it as the single
+  // "Mute sound" preference (DITL 5000 / STR# 5000 item 4), opt-in muting, so un-muted is the
+  // shipping default. Nocturnes reads it and builds its whole scene inside the has-sound branch:
   //   @0x100540  D0 = [params+0x0E] & 0x8000 ; sne/neg/ext ; [obj+0x304] = D0
   //   @0x10055C  tst.b [obj+0x304] ; beq 0x1006B0     <- bit-15-clear skips the whole block below
   //   @0x100564  GetResource('snd ',0x80) -> [obj+0x30A] ; nil => fatal, return -1
@@ -9871,345 +8891,138 @@ int main(int argc, char** argv){
   //   @0x10061E  jsr 0x1013D8 ("MAIN", the 'ADSd' SOUND-object ctor) -> [obj+0x306]
   //   @0x10064A  jsr 0x1014AE ("PLAYSOUND")([obj+0x306], [obj+0x30A]) -> [obj+0x31A]
   //   @0x100676  jsr 0x1014AE ("PLAYSOUND")([obj+0x306], [obj+0x30E]) -> [obj+0x326]
-  // So systemConfig bit 15 is the module's SOUND-ENABLED flag, [obj+0x306] is its sound object, and
-  // 0x1013D8 is the shared Object-Pascal sound-unit constructor (see the 'ADSd' block below for the
-  // full identification). Nothing here constructs a creature or a sprite.
-  // Bit 15 keeps its key on the separate grounds recorded in (3) below; the ADSd allocator does NOT
-  // (addm 773 — it retires to the structural lib510.loaded test; the "real" allocator was rendering
-  // Nocturnes as corruption, see the frames cited at that site).
-  //   NOTE — sibling modules: Zot! DOES call the ADSd allocator (addm 170: lookup @0x440,
-  //   `jsr [ADSd+2]` @0x472); the older "Zot! never calls ADSd" claim that once sat here was wrong,
-  //   and lane D's static-predicate experiment (b) was built on it. Zot!'s blank has a separate,
-  //   later gate (its draw @0x100D12 early-exits on a state byte no ADSd result sets). Rose faults at
-  //   a pre-existing, unrelated blocker (msg=3 stack corruption, pc=0x000000F4, a7 clobbered with the
-  //   module-name string) identically with or without this gate. Both stay OUT of the bit-15 key.
-  //
-  // NAME-GATE RETIREMENT (lane D). The RE above is CONFIRMED and unchanged — what is retired is the
-  // NAME LIST that decided who got to benefit from it. Three findings, all measured at 200 f on both
-  // hash axes:
-  //   (1) EINSTEIN WAS A FREE RIDER. Einstein is byte-identical with the bucket fully off
-  //       (ADNONOCTBUCKET=1) and with bit 15 cleared (ADSYSCONFIG=4001): 155 distinct frames, same
-  //       stream, every way. It never needed the gate; it was listed on a family resemblance to
-  //       Nocturnes, not on a measurement.
-  //   (2) NOCTURNES GENUINELY NEEDS IT, and the RE's own mechanism is what it needs. With bit 15
-  //       clear the module drops to the @0x1006B0 black-background path exactly as documented —
-  //       rendered frames go from ~193 colours / ~190 K non-black pixels to 3-9 colours / a few
-  //       hundred pixels of sprite on black. With the synchFlag (below) clear it collapses to a
-  //       single static frame. Both halves are load-bearing; the "un-implemented ADSd sprite draw /
-  //       stays black" caveat further down this file is STALE — Nocturnes now renders a full scene.
-  //   (3) THE "DO NOT SET BIT 15 GLOBALLY" WARNING IS NOW MEASURED, AND IT IS WRONG. Setting bit 15
-  //       for every module is byte-identical to the shipping default for 60 of the 61 corpus modules
-  //       on both axes. The exception is exactly one module: FRACTAL FOREST — a real bit-15 consumer,
-  //       reproducibly, and NOT a break: distinct counts unchanged (132 gray / 131 rgb both ways),
-  //       un-collapse/collapse symmetric (28 frames each way, 129 contents replaced by 129 others).
-  //       Lane D held the flip because the MEANING of bit 15 was unknown; addm 773 identified it as
-  //       SOUND-ENABLED and addm 774 finishes the adjudication on both sides:
-  //         WHY FF PHASE-SHIFTS. `tweet` (fn@0x102446, name blob "tweet" @0x10259E) opens with
-  //           movea.l A0,[A4+0x2EA8] ; tst.b [A0+0xE] ; bpl -> return
-  //         (A4+0x2EA8 is the GMParamBlock saved by DoInitialize @0x101800), so with bit 15 clear it
-  //         is a no-op. With bit 15 set it calls RandSpan (fn@0x1015CC, name blob @0x101604) — a
-  //         wrapper over the QuickDraw `Random` trap (A861) — twice per chirp, then
-  //         Get1Resource('snd ') and PLAYSOUND. Every stochastic element of the forest (branches,
-  //         leaves, flakes, bird motion, colour variation) draws from that same shared randSeed, so
-  //         enabling the bird chirps RE-PHASES the whole animation. It is not a different forest; it
-  //         is the forest a Mac with sound draws. Frames rendered both ways at 200 f: healthy,
-  //         well-formed autumn/summer trees with full canopies in both, colour counts 1-10 and
-  //         non-black budgets 0..~21 K in both (means 6212 vs 7471). Pure phase shift of authentic
-  //         code = the addm-753 sign-off class.
-  //         WHY SET IS THE AUTHENTIC VALUE. Bit 15 is the engine's "the user has not muted me": the
-  //         shipping After Dark 4.0 application (resource fork = ad9_engine/AD40_engine.rsrc) exposes
-  //         it as ONE global preference, the DITL 5000 / STR# 5000 item 4 checkbox "Mute sound" —
-  //         opt-in muting, so un-muted is the shipping default. It is not machine-dependent: every
-  //         Mac that could run After Dark had sound. And 0x4001 was the one place this host claimed
-  //         the Mac cannot make sound, contradicting the rest of it — it publishes an 'ADSd' record
-  //         to every module, and since addm 391 answers the whole Sound Manager trap family with
-  //         noErr (silently) precisely because a FAILING sound path made Art Critic abort init.
-  //         Nocturnes is the clincher: it builds its scene INSIDE the has-sound branch, so a
-  //         mute-by-default engine would have shipped it visibly broken. Same authentic-value
-  //         recovery as the synchFlag below — the old gate told Nocturnes the truth and 60 modules
-  //         a lie. RETIRED: unconditional, key gone.
-  // So the three consumers are adjudicated SEPARATELY rather than as one name-keyed bucket, and they
-  // do not all land the same way:
-  //   * monitor synchFlag     -> RETIRED, unconditional, as an authentic-value recovery.
-  //   * bit 15 (systemConfig) -> HELD, key shrunk from {Nocturnes, Einstein} to {Nocturnes}.
-  //     Sole corpus consumer found: Fractal Forest (see (3)).
-  //   * 'ADSd' allocator      -> RETIRED (addm 773). Lane D held this after failing to push the key
-  //     OUTWARD; the RE shows the key had to come INWARD instead — no classic module should get the
-  //     host's "real" allocator, because the host has no ADSd engine behind it and the object it
-  //     hands out has no method table. The gate is now the structural `lib510.loaded` alone.
-  //     Full argument, mechanism and rendered evidence at the adsd_fn site below.
-  // addm 774: the bit-15 HOLD is RETIRED too (see (3) above and the publisher line below), which
-  // removes the LAST reader of the Nocturnes name. `noct_adsd_path`, the strstr, and the
-  // ADNOCTBUCKET/ADNONOCTBUCKET levers are therefore DELETED rather than left dormant — a
-  // zero-reader name gate is one default-flip away from silently reactivating (the hardening the
-  // audit asked for after TICKTIED / g_no_searchidx). Einstein left the key either way: it is
-  // byte-identical with every arm of the old bucket off (155/155 distinct, same stream).
-  // The bit-15 A/B is now ADSYSCONFIG=4001 (clear) vs the 0xC001 default; ADNONCLAYER / ADNODLLADSD
-  // are unchanged. THE NOCT[] BUCKET IS GONE: no name-keyed behaviour remains in this block.
-  // ================= S4: AUTHENTIC ENGINE PER-FRAME DRIVE (Addendum 636) =================
+  // So [obj+0x306] is Nocturnes' sound object and 0x1013D8 the shared Object-Pascal sound-unit
+  // constructor (see the 'ADSd' block below). With bit 15 clear Nocturnes drops to the @0x1006B0
+  // black-background path and renders a few hundred pixels of sprite on black instead of a scene.
+  // The other corpus consumer is Fractal Forest: `tweet` (fn@0x102446) returns immediately with bit
+  // 15 clear, and with it set calls RandSpan (fn@0x1015CC, a wrapper over the QuickDraw Random trap)
+  // twice per chirp. Every stochastic element of the forest draws from that same shared randSeed, so
+  // enabling the chirps re-phases the whole animation — it is the forest a Mac with sound draws.
+  // The bit-15 A/B is ADSYSCONFIG=4001 (clear) against the 0xC001 default.
+  // ================= S4: AUTHENTIC ENGINE PER-FRAME DRIVE =================
   // The real After Dark engine had NO per-module host code. It (1) constructed the module, (2) sent
   // DoBlankScreen, (3) ran DoDrawFrame at the display rate for the whole window, and (4) reconstructed
-  // the "shot" whenever a CompoundSequence module self-disposed. Our host grew per-module workarounds
-  // that hand-step pieces of that general loop: the name-gated substep multipliers (Dominoes/Bugs/
-  // Daredevil/Slow Burn/Boris), the Super Guy fixed-PC dispose-suppression, and the Mowin' Man blank-
-  // selector name-gate. This subsystem recovers the GENERAL contract and makes it the DEFAULT drive:
+  // the "shot" whenever a CompoundSequence module self-disposed. This subsystem is that contract:
   //   * CADENCE — one authentic DoDrawFrame per display frame for EVERY module, run for the whole
   //     window. In the 62 s soak that is tens of thousands of draws, so delayed-visual modules (Dominoes
   //     composites its board at draw #127; Bugs' cels crawl in) reach their animated phase naturally and
-  //     the addm-600 cycle timer sustains them. The per-name "substep" multipliers were a compression
-  //     hack for the 8-frame STRICT-ANIMATE census window (proven: Dominoes std ADNODOMSUBSTEP=1 → MOTION
-  //     d34, better than the substep default's d22). Under the general drive their auto-defaults are 0.
+  //     the cycle timer sustains them.
   //   * INTER-SHOT REBUILD — when a module self-disposes its singleton (Super Guy: D4=1 "shot finished" →
   //     module_main nulls [A5-0x2320]) the next draw faults through the nulled object. The engine rebuilds
-  //     the next shot; reproduce GENERALLY by re-sending init(+blank) on a draw fault that follows a clean
-  //     draw. PC-/name-agnostic; replaces the Super Guy fixed-PC D4 clobber.
+  //     the next shot; reproduce it GENERALLY by re-sending init(+blank) on a draw fault that follows a
+  //     clean draw. PC- and name-agnostic.
   //   * BLANK SELECTOR — if the blank (msg 2) issued ZERO drawing ops AND the screen is still the
   //     uninitialised white matte, the module erases elsewhere (Mowin' Man erases in msg 1); send msg 1.
-  //     Fires ONLY on the exact Mowin' symptom, so Confetti/Mandelbrot/Bugs (msg 2 leaves a black fb) are
-  //     never sent msg 1 — replacing the Mowin'-Man name-gate.
-  // S4 authentic engine drive is the general path (default-ON since addm 636). (legacy-cleanup addm 679:
-  // the ADLEGACYDRIVE A/B revert to the old per-module gated drive — substeps + the Super Guy D4 clobber
-  // hook + the Mowin' name-gated blank-message fallback — is retired; those paths are deleted below, not
-  // just made dead, since they can never execute without the retired lever.)
+  //     Fires ONLY on that exact symptom, so Confetti/Mandelbrot/Bugs (msg 2 leaves a black fb) are
+  //     never sent msg 1.
   const bool g_s4log = getenv("ADS4LOG")!=nullptr;
   fprintf(stderr,"[adhost68k] S4 authentic engine drive ACTIVE\n");
-  // (lane D: the noct_bucket_rgn assignment is deleted with the name list. It was already a DEAD
-  // WRITE — its only reader went away when the exact empty-region algebra dissolved gate #18, as the
-  // note at the NewRgn site records. Nothing observes it, so removing it is a no-op.)
-  g_exact_rgn = !getenv("ADNOEINRGN"); // exact QuickDraw empty-region algebra (unconditional default; ADNOEINRGN reverts to legacy bbox min/max)
-  g_boris = (strstr(argv[1],"Boris")!=nullptr) && !getenv("ADNOBORISFIX");   // addm 474 EmptyRect high-byte + empty demoRect
-  g_geobounce = (strstr(argv[1],"GeoBounce")!=nullptr) && !getenv("ADNOBORISTRAIL");  // addm 728 moving-present trail erase (poly on black)
+  g_exact_rgn = !getenv("ADNOEINRGN"); // exact QuickDraw empty-region algebra (ADNOEINRGN reverts to legacy bbox min/max)
+  g_boris = (strstr(argv[1],"Boris")!=nullptr) && !getenv("ADNOBORISFIX");   // EmptyRect high-byte + empty demoRect
+  g_geobounce = (strstr(argv[1],"GeoBounce")!=nullptr) && !getenv("ADNOBORISTRAIL");  // moving-present trail erase (poly on black)
   g_bortitle = getenv("ADBORTITLE")!=nullptr;   // trace Boris title DrawString/EraseRect ordering
-  // addm 596: Fish World's white "paper" cell = sprite save-under scratch EraseRects (bg=255 white, 96x191)
-  // mis-landing on the FRAMEBUFFER top-left, because the module redirects drawing to its offscreen sprite
-  // GWorld via QDExtensions SetGWorld (selector 6) which our host treated as a no-op void (cur_port never
-  // updated -> fills resolved to the stale FB port). Track GetGWorld/SetGWorld so those erases (and the
-  // sprite composite draws) target the offscreen GWorld, not the screen. Name-gated (Boris pattern): proper
-  // SetGWorld is correct QD but switching the port for the whole 19-module QDExtensions corpus is risky;
-  // scope to Fish World for zero regression. ADGWTRACK forces it on for any module (test); ADNOGWTRACK off.
-  // addm 630: Slow Burn (l40 dll#/AD4) exhibits the SAME white-cell class — a ~224-wide WHITE (idx 255)
-  // rectangle on the LEFT of the screen. Root cause identical to Fish World: it redirects a scratch/save-
-  // under erase to an offscreen GWorld via SetGWorld (AB1D sel 6, 12 calls/run) which the untracked host
-  // left resolving to the screen port, so the white erase landed on the framebuffer. Enabling GWorld
-  // tracking routes it offscreen: idx-255 white 50176 -> 0 px, the purple/blue fire content byte-unchanged.
-  // Same name-gated scope as Fish World (general SetGWorld across the 19-module QDExtensions corpus is risky).
-  // addm 633: FLIP THE DEFAULT. SetGWorld switching the current port is unambiguous real-Mac QD semantics;
-  // the "risky corpus-wide" claim was a never-verified presumption. Track by default for ALL modules.
-  //   ADNOGWTRACK       — global opt-out (revert to old ignore-SetGWorld behaviour)
-  //   ADGWTRACK         — force-on (redundant now, kept for compat)
-  // addm 648 S5: the addm-633 {Guernsey Madness, Marbles!} exclusions are DISSOLVED. They regressed under
-  // tracking only because their OFFSCREEN compose-canvas backdrop is NEAR-white (Guernsey idx-245 rgb238,238,238;
-  // Marbles! idx-1 rgb247,250,247), below the addm-551 pure-white (bg>=0xFF00) substitution guard, so the
-  // near-white backdrop reached the screen via the engine's direct compose->screen copy. That was NOT a
-  // SetGWorld defect but a compositing gap — now fixed at its root: the S5 EraseRect compose-backdrop rule
-  // (~line 5569) makes the canvas backdrop DISPLAY black regardless of colour (the engine composites the canvas
-  // over AD's black blank with the background colour transparent). With that rule tracking is truly universal;
-  // no per-module gate remains (Rodger Dodger, which the palette churn had also pushed into this near-white
-  // flood since addm-633, is now generically fixed too). ADGWTRACKALL is retired (it was only the exclusion
-  // escape hatch). The other levers stand: ADNOGWTRACK global opt-out; ADGWTRACK compat force-on.
-  // (legacy-cleanup addm 679: the ADGWTRACKLEGACY A/B revert to the old addm-596/630 {Fish World, Slow
-  // Burn} name-gate is retired — dead by default in main.)
+  // SetGWorld (QDExtensions selector 6) switching the current port is real Mac QuickDraw semantics,
+  // and it is tracked for every module. Untracked, a module that redirects a scratch/save-under erase
+  // to an offscreen GWorld (Fish World's 96x191 white "paper" cell, Slow Burn's ~224-wide white
+  // rectangle) has that erase land on the framebuffer instead.
+  //   ADNOGWTRACK       — global opt-out (revert to ignoring SetGWorld)
+  //   ADGWTRACK         — force-on (accepted; tracking is already the default)
   g_gwtrack = !getenv("ADNOGWTRACK");   // track-by-default, corpus-wide (no exclusions)
-  g_noportclip = getenv("ADNOPORTCLIP")!=nullptr;   // addm 717b revert lever (single global clip)
-  g_noportcolor = getenv("ADNOPORTCOLOR")!=nullptr; // addm 742 revert lever (single global fg/bg)
-  g_no_fcexact = getenv("ADNOFCEXACT")!=nullptr;    // addm 782 revert lever (CLUT[index] round trip)
-  // addm 633: the PerformBlank fb-clear (init-title cleanup) was gated on g_gwtrack, formerly the Fish
-  // World/Slow Burn name-gate. addm 680 DISSOLVES that name-gate: the PerformBlank DARKEN is now driven by a
-  // STRUCTURAL post-blank runtime condition (sparse non-black init residue) at the memset site (~line 9922),
-  // which reproduces {Slow Burn} exactly and no-ops on {Fish World} (its own Blank composites the black water
-  // over the title, so nb==0). g_gwblank survives ONLY as the ADC2BLANKLEGACY A/B fallback for that site.
+  g_noportclip = getenv("ADNOPORTCLIP")!=nullptr;   // revert lever (single global clip)
+  g_noportcolor = getenv("ADNOPORTCOLOR")!=nullptr; // revert lever (single global fg/bg)
+  g_no_fcexact = getenv("ADNOFCEXACT")!=nullptr;    // revert lever (CLUT[index] round trip)
+  // The PerformBlank darken is driven by a structural post-blank runtime condition (sparse non-black
+  // init residue) at the memset site. g_gwblank survives only as the ADC2BLANKLEGACY fallback there.
   g_gwblank = ((strstr(argv[1],"Fish World")!=nullptr) || (strstr(argv[1],"Slow Burn")!=nullptr)) && !getenv("ADNOGWTRACK");
-  if(argc>1){ // addm 564 QD-audit: module name = the path segment before "/..namedfork" (or basename)
+  if(argc>1){ // module name = the path segment before "/..namedfork" (or basename)
     static std::string amn; std::string p=argv[1]; size_t nf=p.find("/..namedfork");
     if(nf!=std::string::npos) p=p.substr(0,nf); size_t sl=p.find_last_of('/');
     amn = (sl!=std::string::npos)? p.substr(sl+1) : p; g_audit_mod=amn.c_str(); }
-  // DOMINOES bucket (addm 457): Dominoes builds its full domino chain incrementally — ~1 domino/draw-call,
-  // ENTIRELY in its data model, issuing ZERO drawing traps — and only begins compositing the board to the
-  // screen (CopyBits) once the layout completes at ~draw call #127. The strict-animate check drives only 8
-  // draw frames, deep inside the silent layout phase, so it captures solid felt (blank, colors=1). This is a
-  // layout-completion COUNTER gate, not a permanently-skipped composite: given ~130+ draw calls the composite
-  // (15 CopyBits) fires and the chain renders + topples (verified colors=117). The host fix is purely a
-  // driving-rate lever (like ADTICKRATE): run extra draw sub-steps per captured frame so the layout completes
-  // and the topple animation is visible within the 8 captured frames. Name-gated to Dominoes ONLY -> every
-  // other module's per-frame draw count is unchanged (byte-identical).
-  // S4: the general drive reaches Dominoes' board composite via the natural soak cadence, so the old
-  // legacy-only auto-default (24) is retired (legacy-cleanup addm 679). Explicit ADDOMSUBSTEP still honored.
+  // Dominoes builds its full domino chain incrementally — ~1 domino per draw call, entirely in its
+  // data model, issuing ZERO drawing traps — and only begins compositing the board to the screen
+  // (CopyBits) once the layout completes at ~draw call #127. The general drive reaches that point via
+  // the natural soak cadence; ADDOMSUBSTEP runs extra draw sub-steps per captured frame for a short
+  // capture window.
   int dom_substep = getenv("ADDOMSUBSTEP") ? atoi(getenv("ADDOMSUBSTEP")) : 0;
-  // addm 463 (Bugs): Bugs' module_main reads its AD-globals from the [A6+0x0E] arg (= blankRgn), a bare
-  // RgnHandle whose AD-globals fields are garbage: the systemConfig flag (+0xE) is unset, the
+  // Bugs' module_main reads its AD-globals from the [A6+0x0E] arg (= blankRgn), a bare RgnHandle
+  // whose AD-globals fields are garbage: the systemConfig flag (+0xE) is unset, the
   // qdGlobalsCopy/pattern pointer (+0x10) aliases version data (0x03000300), and the extension list
   // (+0x28) is null. So the LIB510 'ADdl' scanner @0x0100C30E walks a null list, never finds 'ADdl',
-  // returns 0, and module_main Throws CW 0x504 -> catch -> the per-message dispatch never runs -> blank.
-  // ADBUGSEXT stamps those three fields from the host GMParamBlock (params). Opt-in / default-OFF.
-  bool bugs_bucket = strstr(argv[1],"Bugs")!=nullptr && !getenv("ADNOBUGSEXT");  // addm487: default-on by name (opt-out) so Bugs renders in the sweep
-  // Boris (addm 474): once DoInitialize builds the actor graph, the town scene composites INCREMENTALLY over
-  // ~15+ draw(msg=3) calls (like Dominoes' silent layout, addm 457) — the 8-frame strict window otherwise
-  // captures only the "Boris is napping" load/reveal phase (colors=2). Run extra draw sub-steps per captured
-  // frame so the colourful town scene + Boris animation land inside the 8 frames. boris_substep==0 for every
-  // non-Boris module -> byte-identical. ADBORSUBSTEP overrides; ADNOBORISFIX disables the whole Boris gate.
-  // addm 562: default substep lowered 12->0 — the 8-frame-capture accelerator predates the addm-561
-  // save-under fix and now only amplifies a residual mode-0 window-margin streak; with compositing
-  // working, Boris animates fine unaccelerated and the accumulating white fan disappears.
+  // returns 0, and module_main Throws CW 0x504 -> catch -> the per-message dispatch never runs ->
+  // blank. The host stamps those three fields from the GMParamBlock (params); ADNOBUGSEXT opts out.
+  bool bugs_bucket = strstr(argv[1],"Bugs")!=nullptr && !getenv("ADNOBUGSEXT");  // default-on by name (opt-out) so Bugs renders in the sweep
+  // Boris: once DoInitialize builds the actor graph, the town scene composites INCREMENTALLY over
+  // ~15+ draw(msg=3) calls, so a short capture window sees only the "Boris is napping" load/reveal
+  // phase. ADBORSUBSTEP runs extra draw sub-steps per captured frame; the default is 0 (with
+  // compositing working Boris animates fine unaccelerated, and accelerating it only amplifies a
+  // residual mode-0 window-margin streak). ADNOBORISFIX disables the whole Boris gate.
   int boris_substep = g_boris ? (getenv("ADBORSUBSTEP")?atoi(getenv("ADBORSUBSTEP")):0) : 0;
-  // ==== addm 613: TICK-TIED ambient savers — optional watchability boost ====
-  // Field report: Boris "unusually slowly", Can of Worms "VERY slowly", Clocks "pauses every ~1s".
-  // ROOT CAUSE (disasm + APP-FAITHFUL shm-GO measurement): these modules gate their animation on the Mac
-  // Ticks clock. Can of Worms' DoDrawFrame (ADgm 129, disasm @0xEAA-0xEB4) reads TickCount and does
+  // ==== TICK-TIED ambient savers — optional watchability boost ====
+  // Boris, Can of Worms and Clocks gate their animation on the Mac Ticks clock. Can of Worms'
+  // DoDrawFrame (ADgm 129, disasm @0xEAA-0xEB4) reads TickCount and does
   //   D0 = TickCount - lastFrameTick[A4+0xE20];  if(D0-1 < 0) skip the whole worm-redraw
-  // (the worm loop redraws ALL worms with a Random wiggle once per passing frame; a separate ~random(0-20)-
-  // tick timer flips worm direction). Boris & Clocks gate through the ADgm engine the same way. At literal
-  // real-time (addm-573 wall-clock, matching a real Mac's 60 Hz TickCount) their per-tick pixel motion is
-  // SUB-PIXEL, so most redraws are pixel-identical and only ~2-4 DISTINCT frames/s appear.
-  // MEASURED via a faithful shm-GO driver at 60 fps (scratchpad/shmdrive613.c — the ONLY correct harness;
-  // headless stream/throttle mode does NOT preserve real wall-time between the module's TickCount reads):
-  //   module        MAIN(60fps)  ADTICKTIEDMULT=3   =6
-  //   Boris          2.1 /s        5.6               10.5   distinct frames/s
-  //   Can of Worms   3.5 /s       10.1               19.2
-  //   Clocks(+RC)    3.9 /s        5.8                5.6   (saturates: its face is 1-Hz real-clock gated)
-  // Making them NON-PACEABLE (my first hypothesis, and addm-573's stated Boris intent) does NOT help — in the
-  // faithful shm-GO path it is identical-or-slightly-worse (Boris 2.1->1.6, CoW 3.5->3.5, Clocks 3.9->2.3),
-  // because the limiter is the tick-gate + sub-pixel motion, not the draw rate. The ONLY lever that restores
-  // a watchable cadence is running these modules' Tick clock faster than 1x real-time. (The pre-573 host ran
-  // ~120x, which looked smooth but moved them ~120x too fast — the "too fast" addm 573 fixed.)
-  // DEFAULT IS UNCHANGED: g_ttmul defaults to 1.0 => byte-identical to main (the honest baseline is the
-  // authentic real-time cadence; I will not guess the "true" authored speed). ADTICKTIEDMULT=<x> is an opt-in
-  // watchability knob (a moderate 3-4x brings Boris/CoW into the ~10-20 fps band of the sibling savers, close
-  // to what the user saw pre-573, without the 120x frenzy). ADNOTICKTIED removes the class (no scaling at all).
-  // gate-e-lane hardening (addm-613 dormancy was ARITHMETIC, not structural: g_ttmul's default of
-  // 1.0 makes `g_ticktied ? 60.14985*g_ttmul : 60.14985` compute the identical double either way, so
-  // a future change to g_ttmul's default -- or a second consumer of g_ticktied -- could silently
-  // reactivate this name gate without anyone touching this block. Requiring ADTICKTIEDMULT to also be
-  // set before g_ticktied can become true makes the dormancy structural, matching the #11 cleanup this
-  // audit applied to g_no_searchidx. PROVABLY ZERO BEHAVIOR: when ADTICKTIEDMULT is unset, g_ttmul is
-  // exactly 1.0 and hz's value was already identical for g_ticktied true/false (double*1.0 is exact,
-  // no rounding), so forcing g_ticktied false in that case changes no computed value. When
-  // ADTICKTIEDMULT IS set, this added condition is true and behavior is byte-for-byte unchanged.
+  // (the worm loop redraws ALL worms with a Random wiggle once per passing frame; a separate
+  // ~random(0-20)-tick timer flips worm direction). Boris and Clocks gate through the ADgm engine the
+  // same way. At literal real time — matching a real Mac's 60 Hz TickCount — their per-tick pixel
+  // motion is SUB-PIXEL, so most redraws are pixel-identical and only ~2-4 distinct frames/s appear.
+  // Running their Tick clock faster than 1x real time is the only lever that restores a watchable
+  // cadence; making them non-paceable does not help, because the limiter is the tick gate plus the
+  // sub-pixel motion, not the draw rate. ADTICKTIEDMULT=<x> is that opt-in knob (a moderate 3-4x
+  // brings Boris/Can of Worms into the ~10-20 fps band of the sibling savers); ADNOTICKTIED removes
+  // the class entirely. The default of 1.0 is byte-identical to no scaling, and requiring
+  // ADTICKTIEDMULT before g_ticktied can become true keeps this name gate structurally dormant
+  // rather than only arithmetically dormant.
   bool g_ticktied = false;
   if(argc>1 && getenv("ADTICKTIEDMULT") && !getenv("ADNOTICKTIED")){
     static const char* TICKTIED[] = {"Boris","Can of Worms","Clocks"};
     for(const char* nm : TICKTIED) if(strstr(argv[1],nm)){ g_ticktied=true; break; }
   }
   static const double g_ttmul = getenv("ADTICKTIEDMULT") ? atof(getenv("ADTICKTIEDMULT")) : 1.0;
-  // Bugs (addm 487): with gates 1-8 fixed the draw builds the MultiSequence/LadybugSprite graph, then the 9
-  // bug cels DECODE + BLIT (native AD3_RLE) and crawl in from the screen edges over MANY draw(msg=3) calls —
-  // the SAME "render gated behind a warmup counter" class as Dominoes (addm 457) / Boris (addm 474). The first
-  // ~12 draws are construction/warmup (framebuffer still the uniform desktop); the ladybug sprites only start
-  // appearing ~draw 14+ and build up (48 draws -> colors=17, ~10900 non-bg px, distinct animated bugs). The
-  // 8-frame strict window at 1 draw/frame captures ONLY the warmup -> degenerate. Run extra draw sub-steps per
-  // captured frame (advancing Ticks) so the 8 captured frames land inside the animated phase. bugs_substep==0
-  // for every non-Bugs run -> byte-identical. ADBUGSUBSTEP overrides; ADNOBUGSUBSTEP disables (A/B).
-  // S4: general drive reaches Bugs' crawl-in via the soak cadence, so the old legacy-only auto-default
-  // (16) is retired (legacy-cleanup addm 679). Explicit ADBUGSUBSTEP still honored.
+  // Bugs' draw builds the MultiSequence/LadybugSprite graph, then the 9 bug cels decode + blit
+  // (native AD3_RLE) and crawl in from the screen edges over MANY draw(msg=3) calls — the same
+  // "render gated behind a warmup counter" class as Dominoes and Boris. The first ~12 draws are
+  // construction/warmup (framebuffer still the uniform desktop); the ladybug sprites appear from
+  // ~draw 14 and build up. The general drive reaches that phase via the soak cadence; ADBUGSUBSTEP
+  // runs extra draw sub-steps per captured frame (advancing Ticks), ADNOBUGSUBSTEP disables it.
   int bugs_substep = getenv("ADBUGSUBSTEP") ? atoi(getenv("ADBUGSUBSTEP")) : 0;
-  // Slow Burn Gate B (addm 481): host-side CLUT reflection of the module's live palette. Default OFF
-  // (opt-in ADSBPALREFLECT) + name-scoped -> zero regression by construction. See the reflection block
-  // in the frame loop. Does NOT flip alone (Gate A: the board never rasterises to g_fb).
+  // Slow Burn: host-side CLUT reflection of the module's live palette. Default off (opt-in
+  // ADSBPALREFLECT) and name-scoped. See the reflection block in the frame loop; it does not flip
+  // alone (the board never rasterises to g_fb).
   bool g_slowburn_reflect = (strstr(argv[1],"Slow Burn")!=nullptr) && getenv("ADSBPALREFLECT")!=nullptr;
-  // Slow Burn Gate A probe (addm 490): drive extra draw sub-steps like Bugs/Dominoes to test whether
+  // Slow Burn probe: drive extra draw sub-steps like Bugs/Dominoes to test whether
   // DisplayPop8/UpdateScreen is warmup/drive-gated. Default 0 (opt-in ADSBSUBSTEP), name-scoped.
   bool g_slowburn = (strstr(argv[1],"Slow Burn")!=nullptr);
   int slowburn_substep = (g_slowburn && getenv("ADSBSUBSTEP")) ? atoi(getenv("ADSBSUBSTEP")) : 0;
-  // addm 688: sb_qfix DELETED. The addm-491/494 host shim (fold consecutive ADDQ/SUBQ.W #n,An in the debug
-  // hook, doing the correct full-32-bit An update and skipping the emulator's truncated exec_5) is now
-  // REDUNDANT: the emulator's own ADDQ/SUBQ An-destination handling was fixed upstream (resource_dasm commit
-  // f633a6c "M68KEmulator: fix ADDQ/SUBQ with An destination (full 32-bit, CCR unaffected)", exec_5 M==1
-  // branch, present in the built lib). Verified: with the shim removed, Slow Burn is BYTE-IDENTICAL to the
-  // shim (fbhash census, 24 distinct frames both ways) and its CA genuinely commits (UpdateBoard accPostUB
-  // nz=0, board nz grows 24->5414) — the >64KB backward board walk now traverses fully under the emulator
-  // alone. Unlike the retained fctiwz shim (whose removal reproducibly CHANGES output), this shim's removal
-  // is a no-op, so it is deleted rather than held. The former sb_qfix name-gate reduces to g_slowburn for the
-  // opt-in diagnostic probes (ADSBUBW/ADSBCC/ADSBRNG) and the sim-gate obj capture below.
-  // addm 491: Slow Burn sim-gate driver (opt-in test lever ADSBGATE). The PaletteMusher draw only runs the
-  // CA (jsr[A5+0x7550]=EachFrame) when its dirty queue is non-empty (@0x0103ED44 beq). Force it to run each
-  // draw (with the captured BogSim obj) so substep packs many generations/captured-frame.
-  // addm 781: that gate is NOT what starved the render — measured, EachFrame already runs once per
-  // captured frame on the default path. This lever remains only as a generations-per-frame accelerator.
+  // Slow Burn sim-gate driver (opt-in test lever ADSBGATE). The PaletteMusher draw only runs the CA
+  // (jsr[A5+0x7550]=EachFrame) when its dirty queue is non-empty (@0x0103ED44 beq); ADSBGATE forces it
+  // to run on each draw with the captured BogSim obj, so substep packs many generations per captured
+  // frame. EachFrame already runs once per captured frame on the default path, so this lever is only a
+  // generations-per-frame accelerator.
   bool sb_gate = g_slowburn && (getenv("ADSBGATE")!=nullptr);
-  // addm 781: the addm-494 Slow Burn FLIP is DELETED (and with it its ADNOSBFLIP opt-out). It existed
-  // because "the module seeds + rasterises only inside its palette-crossfade-scheduler EachFrame coroutine,
-  // which is inert/faults headless", so per captured frame the host injected seeds into the module's own
-  // accumulator, hand-drove DoInfect/UpdateBoard, and presented the board itself. That premise was WRONG,
-  // and the real root is now fixed upstream in this host — the same shape as the addm-688 sb_qfix retirement:
-  //   * EachFrame is NOT inert. Measured (ADSBHITS, flip off, 200 f): EachFrame / DisplayPop8 / UpdateScreen
-  //     run once per captured frame and DoInfect / UpdateBoard once per frame, and the module's own CA fully
-  //     develops unaided — board nonzero 2 -> ~9000-12900 of 50176 cells, heat saturating its own dim (20),
-  //     5000-9000 cells in the cooling/negative phase. The module seeds itself and burns by itself.
-  //   * What was broken was the PRESENT, host-side. XCanvas::BeginDirectPixels (LIB510_Canvas @0x01014A08)
-  //     reaches MacOffScreenPixels::GetBaseAddr (@0x01010406), which asks _QDExtensions for GetPixBaseAddr
-  //     (selector 15) and reads the result with `move.l (A7)+,D0`. That selector had no case, so the generic
-  //     tail wrote a SIXTEEN-bit FALSE into the four-byte result slot and the caller got
-  //     (0<<16)|<stale low word> = 0x00004050 — so the module rasterised its 672x224 fire into LOW MEMORY
-  //     every frame while UpdateScreen's CopyBits correctly blitted the untouched real canvas to g_fb.
-  //     That is verbatim the addm-743 selector-23 defect, one selector over; 743 fixed 23 and left 15
-  //     unserved. Serving selector 15 (see the QDExtensions dispatcher) makes the module render itself:
-  //     200 f / 199 distinct, full 640x480 coverage, its own radial burn fronts from its own seeds under
-  //     its own PaletteMusher crossfade — visibly MORE authentic than the flip, whose host bottom-edge seed
-  //     line produced horizontal wave-fronts in a centred 224-px box with black side margins.
-  // g_slowburn survives for the opt-in diagnostics (ADSBCA/ADSBPRESENT/ADSBEFN/ADSBHITS/ADSBUBW/ADSBCC/
-  // ADSBRNG) and the sim-gate object capture, exactly as g_slowburn survived addm 688.
-  // Daredevil Dan FLIP (addm 492 — OVERTURNS addm-489's "degenerate 1-transition" verdict): the bike sprite
-  // RENDERS (colors=201) and its stunt scene ANIMATES — but the animation is TICK/DRAW-driven (the same warmup
-  // class as Dominoes addm-457 / Boris addm-474 / Bugs addm-487). addm-489 concluded the substep lever gave
-  // only a degenerate distinct=2, but that was UNDER-DRIVING: it used ADDDSUBSTEP=8/30. Driving ~400 extra
-  // draws per captured frame plays the full stunt through the 8 frames (distinct=7, colors=210) — the bike/
-  // ramp scene evolves, an ambulance arrives, a crashed bike appears (the real "Daredevil Dan" crash gag),
-  // verified by rendering the frames. NOT the section-array construction (that is a red herring: host-
-  // reconstructing the flat section array — ADDDSECFIX — changes the static render but does NOT animate and
-  // even suppresses the transition). Default-ON by name (opt-out ADNODDSUBSTEP/ADNODDFLIP), gated on the DD
-  // linked de-alias path (g_ddWalkFix) so std / non-linked / non-Daredevil runs are byte-identical.
-  // S4: per addm 489 the DD substep only ever produced a DEGENERATE distinct=2 (one obstacle pops in, bike
-  // static — NOT a genuine flip; DD's real gate is a cross-fragment construction defect, out of S4 scope),
-  // so the general drive does not regress a real render by dropping the old legacy-only auto-default (400)
-  // (legacy-cleanup addm 679). Explicit ADDDSUBSTEP still honored.
+  // g_slowburn drives the opt-in Slow Burn diagnostics (ADSBCA/ADSBPRESENT/ADSBEFN/ADSBHITS/ADSBUBW/
+  // ADSBCC/ADSBRNG) and the sim-gate object capture below.
+  // Daredevil Dan: the bike sprite renders (colors=201) and its stunt scene animates, but the animation
+  // is TICK/DRAW-driven. Driving ~400 extra draws per captured frame plays the full stunt through the 8
+  // captured frames (the bike/ramp scene evolves, an ambulance arrives, a crashed bike appears — the
+  // real "Daredevil Dan" crash gag). Host-reconstructing the flat section array (ADDDSECFIX) is a red
+  // herring: it changes the static render but does not animate, and even suppresses the transition.
+  // There is no auto-default; an explicit ADDDSUBSTEP is honoured.
   int dd_substep = getenv("ADDDSUBSTEP") ? atoi(getenv("ADDDSUBSTEP")) : 0;
   // systemConfig = 0xC001: bit 15 SOUND AVAILABLE + bit 14 EXTENSIONS PRESENT + bit 0 (Satori).
-  // Bit 15 was name-keyed to Nocturnes until addm 774 retired it as an authentic-value recovery: it
-  // is the engine's "Mute sound" preference in the un-muted (shipping-default) state, and this host
-  // models a Mac whose Sound Manager is present and succeeds silently. ADSYSCONFIG=4001 clears it.
+  // Bit 15 is the engine's "Mute sound" preference in the un-muted (shipping-default) state, and this
+  // host models a Mac whose Sound Manager is present and succeeds silently. ADSYSCONFIG=4001 clears it.
   { uint16_t sc = getenv("ADSYSCONFIG") ? (uint16_t)strtoul(getenv("ADSYSCONFIG"),0,16) : 0xC001;
     mem->write_u16b(params+0x0E, sc); }
   mem->write_u16b(params+0x14, getenv("ADBRIGHT")?(uint16_t)strtoul(getenv("ADBRIGHT"),0,0):0x6464); // brightness; Puzzle reads the BYTE @0x14 and DIVIDES by it -> both bytes nonzero
   // demoRect (params+0x16): After Dark sets this to the small PREVIEW rectangle when a module runs in the
-  // control-panel demo box, and to EMPTY for real full-screen operation. The AUTHENTIC full-screen value is
-  // EMPTY — RE-confirmed at disasm level in THREE modules that all use the SAME idiom: EmptyRect(demoRect) as a
-  // "am I in the demo box?" boolean. Boris (addm 474: reads the EmptyRect high byte), Strange Attractors, and
-  // Spotlight (DoInitialize @ADgm 0x1BD0: `pea [paramblock+0x16]; EmptyRect; seq; move.w -> globals+0x2398` =
-  // the in-demo flag) all branch on it; none reads demoRect as drawing/exclusion BOUNDS. So EMPTY is the
-  // correct general default (addm 635, warmup Q9) — it makes EmptyRect(demoRect)=TRUE => the full-screen branch.
-  // ADNODEMORECT/ADDEMOFULL force the old full-screen-RECT value (the *preview* meaning; makes every module
-  // think it's in the demo box). addm 648 (agent s5-compose) REFUTED the "flip Q9 to full-screen-bounds"
-  // hypothesis: Strange Attractors + Boris both go STATIC under full-screen-bounds (they need EMPTY); the value
-  // is EMPTY, not full-screen-bounds.
-  //   SPOTLIGHT is NOT a demoRect-semantics exception. The addm-635 "reads demoRect as its capture-circle
-  // BOUNDS" claim is FALSE (disasm above: it's the same EmptyRect demo-mode test). What actually happens: under
-  // the authentic EMPTY demoRect (full-screen branch, globals+0x2398=0) Spotlight draws a FULL revealed image
-  // but it is STATIC (distinct=1, ~90% covered) — the pre-existing "draws full seed but static" distortion-
-  // saver reveal-animation gap (state doc iter-K / addm-84: screen==offscreen, no darkening between save and
-  // reveal). Serving a NON-empty demoRect flips EmptyRect->FALSE => Spotlight takes its DEMO-BOX branch, which
-  // DOES animate on our host (small moving bright spots on black). So this line is a WORKAROUND that forces the
-  // demo-mode branch to buy motion — a historical motion crutch (spot_demo_workaround) that masked the
-  // full-screen reveal bug; not an authentic-value recovery. addm 665: spot_demo_workaround DELETED — the
-  // authentic full-screen reveal is now the DEFAULT for Spotlight. The three layers that made the
-  // workaround necessary are all fixed: (iii) seed timing (addm 661/662: the init-time screen SAVE is
-  // seeded so the offscreen holds the bright image, screen stays black), (ii) oval masks (addm 657/662:
-  // scoped CopyBits maskRgn -> circular spotlights), and (iv) velocity (addm 660/663/664 FixMath
-  // Pascal-FUNCTION unification + scalar-conversion default: BUILDSPOTS' speed*cos/sin init velocity is
-  // now nonzero and correct-magnitude -> the spots move). Decoded acceptance: bright oval spotlights
-  // (~15720 px) moving on black with edge bounce. This retired the LAST workaround gate in the host.
-  // (legacy-cleanup addm 679: the ADSPOTDEMO A/B revert to the retired demo-box behaviour is deleted —
-  // dead by default in main.)
-  // NAME-GATE RETIREMENT (lane D): the `strstr(argv[1],"Spotlight")` mask activation is GONE. It had
-  // already been overtaken by addm 669, which made scan-converted region masks the corpus-wide DEFAULT
-  // (`C.masks_enabled = getenv("ADNORGNMASK")==nullptr`, above): the line here only ever re-asserted a
-  // flag that was already true on every default run, so it was inert on the default path for the whole
-  // corpus INCLUDING Spotlight. Measured: Spotlight default vs ADNOSPOTMASK=1 is byte-identical on both
-  // hash axes (200 f, 200 distinct frames each) — the "opt out of the masks" lever could not opt out,
-  // because the default-on assignment upstream had already won. The structural predicate the census
-  // asked for ("did this CopyBits pass a mask region?") is therefore already in force and always was
-  // the right one: a masked CopyBits honours its mask for every module, and a module that never builds
-  // a scan-mask keeps the bounds-only path (rgn_mask() returns null). ADNOSPOTMASK is retired to a
-  // no-op; ADNORGNMASK / ADRGNMASK=0 remain the real corpus-wide mask A/B, and they now apply to
-  // Spotlight too instead of silently exempting it.
+  // control-panel demo box, and to EMPTY for real full-screen operation, so EMPTY is the authentic
+  // full-screen value. Three modules use the SAME idiom — EmptyRect(demoRect) as an "am I in the demo
+  // box?" boolean: Boris (reads the EmptyRect high byte), Strange Attractors, and Spotlight
+  // (DoInitialize @ADgm 0x1BD0: `pea [paramblock+0x16]; EmptyRect; seq; move.w -> globals+0x2398` = the
+  // in-demo flag). None of them reads demoRect as drawing/exclusion BOUNDS, so EMPTY is the correct
+  // general default: it makes EmptyRect(demoRect)=TRUE and selects the full-screen branch.
+  // ADNODEMORECT/ADDEMOFULL force the full-screen-RECT value instead (the *preview* meaning, which makes
+  // every module think it is in the demo box); Strange Attractors and Boris both go STATIC under it.
   bool demoEmpty = getenv("ADNODEMORECT")==nullptr && getenv("ADDEMOFULL")==nullptr;
   if(demoEmpty){
     mem->write_u16b(params+0x16,0); mem->write_u16b(params+0x18,0);
@@ -10227,15 +9040,10 @@ int main(int argc, char** argv){
   mem->write_u16b(mons+0x02, 0); mem->write_u16b(mons+0x04, 0);
   mem->write_u16b(mons+0x06, (uint16_t)Hh); mem->write_u16b(mons+0x08, (uint16_t)W); // [0].bounds
   // synchFlag: Nocturnes' DoDrawFrame reads MonitorData+8 (=mons+0xA) as the per-monitor
-  // "draw creatures on this monitor" enable in its DRAWPAIR layer loop. A single active host
-  // monitor must present as enabled (1); the host's 0 left the only layer disabled -> DRAWPAIR
-  // skipped every creature.
-  //   lane D: UNCONDITIONAL. This is an authentic-value recovery, not a per-module favour — the host
-  //   publishes exactly one monitor and that monitor IS active, so synchFlag=1 is simply the true
-  //   description of the MonitorsInfo we hand out; 0 described a monitor that does not exist. The
-  //   old name gate made the host tell Nocturnes the truth and every other module a lie. Measured
-  //   byte-identical corpus-wide (200 f, both axes) and load-bearing for Nocturnes, which collapses
-  //   to a single static frame when this reverts to 0. ADNONCLAYER keeps the old value for A/B.
+  // "draw creatures on this monitor" enable in its DRAWPAIR layer loop. The host publishes exactly one
+  // monitor and that monitor IS active, so synchFlag=1 is the true description of the MonitorsInfo we
+  // hand out; 0 describes a monitor that does not exist, leaves the only layer disabled, and DRAWPAIR
+  // skips every creature (Nocturnes collapses to a single static frame). ADNONCLAYER keeps 0 for A/B.
   mem->write_u8 (mons+0x0A, getenv("ADNONCLAYER")?0:1);    // synchFlag
   mem->write_u8 (mons+0x0B, 8);                          // curDepth = 8bpp
   mem->write_u32b(params+0x08, mons);                    // params.monitors
@@ -10266,22 +9074,21 @@ int main(int argc, char** argv){
     // reading 0x000C000C). Stub pops the 4-byte arg and writes a 0 long result, landing A7 on
     // the result slot:  movea.l (A7)+,A1 ; addq.l #4,A7 ; clr.l (A7) ; jmp (A1).
     uint32_t adsd_stub = mem->allocate(8);
-    mem->write_u16b(adsd_stub+0, 0x225F);   // movea.l (A7)+,A1   (pop return addr) [was 0x205F=pop into A0, leaving A1 stale -> jmp(A1) derailed]
+    mem->write_u16b(adsd_stub+0, 0x225F);   // movea.l (A7)+,A1   (pop return addr)
     mem->write_u16b(adsd_stub+2, 0x588F);   // addq.l #4,A7       (discard the arg)
     mem->write_u16b(adsd_stub+4, 0x4297);   // clr.l (A7)         (result = 0)
     mem->write_u16b(adsd_stub+6, 0x4ED1);   // jmp (A1)           (return to result slot)
-    // WHAT 'ADSd' ACTUALLY IS (addm 773 — supersedes the sprite-engine reading below it).
-    //   'ADSd' is the After Dark **SOUND** extension. Every classic-API module links the same
-    //   Object-Pascal sound unit, and its inline MacApp name strings identify it beyond doubt —
-    //   around the 'ADSd' call site each module carries, in order:
+    // WHAT 'ADSd' IS: the After Dark **SOUND** extension. Every classic-API module links the same
+    //   Object-Pascal sound unit, and its inline MacApp name strings identify it beyond doubt — around
+    //   the 'ADSd' call site each module carries, in order:
     //     Nocturnes 0x1013D0 "MAIN    " / 0x101426 "OPENSOUND" / 0x101460 "CLOSESOUND" /
     //               0x1014A2 "PLAYSOUND" / 0x1014E6 "GETSOUNDLENGTH"
     //     Dominoes  0x100F6C(MAIN) / 0x100FBA "OPENSOUND" / 0x100FF4 "CLOSESOUND" / 0x101036 "PLAYSOUND"
     //     Bogglins 0x1016FC+, Puzzle 0x1014A6+, Einstein 0x102586+ (+"QUIETSOUND"), Zot! 0x10048E+.
     //   Nocturnes' "MAIN" @0x1013D8 and Dominoes' @0x100F6C are THE SAME FUNCTION instruction for
     //   instruction (only the pc-rel displacement to the module-local lookup helper differs). It is
-    //   the SOUND OBJECT constructor, not a creature/sprite ctor. (Corroborated by the dll# side:
-    //   the deluxe-runtime consumer is AD3_**Sound** — addm 333a.)
+    //   the SOUND OBJECT constructor, not a creature/sprite ctor. (The dll# side's consumer is the
+    //   AD3_Sound library.)
     //
     //   THE OBJECT MODEL (read with resource_dasm's DST-FIRST operand order):
     //     001013F2  movea.l A4, D0        ; A4 = extension dataPtr returned by the lookup
@@ -10289,158 +9096,105 @@ int main(int argc, char** argv){
     //     0010140A  jsr [A0]              ; -> Handle in the Pascal result slot
     //     0010140C  movea.l A3, (A7)+     ; A3 = the Handle
     //     00101412  movea.l A0, [A3]      ; A0 = master pointer = the allocated block
-    //     00101414  move.l  [A0], A4      ; *** STORE: block[0] = THE EXTENSION RECORD ***
+    //     00101414  move.l  [A0], A4      ; STORE: block[0] = THE EXTENSION RECORD
     //   i.e. the extension record IS the class's method table, and the module installs it into the
     //   object it just allocated. Every later method dispatches back through that same record.
-    //   *** The slot->method map below was WRONG and is corrected here (addm 791). It read
-    //   "OPENSOUND jsr [ext+0x06] / CLOSESOUND jsr [ext+0x0A] / PLAYSOUND jsr [ext+0x16]". Each of
-    //   those names belongs to the method BEFORE it in the table — the root cause is taking a MacsBug
-    //   name blob to label the function that FOLLOWS it, when the blobs follow their own function
-    //   (addm 774) — so +0x06 is CLOSESOUND and +0x0A is PLAYSOUND. The "+0x16 = PLAYSOUND" half was
-    //   wrong by three slots, not one: +0x16 is GETSOUNDLENGTH. The corrected map — verified
-    //   against the SAME unit compiled into the AD3_Sound library fragment, where all seven methods
-    //   are contiguous and each name blob sits between its own function and the next — is:
+    //   MacsBug name blobs FOLLOW their own function, so a name labels the function BEFORE it; the
+    //   slot map, cross-checked against the same unit compiled into the AD3_Sound library fragment
+    //   (where all seven methods are contiguous), is:
     //     +0x02 New/allocator  +0x06 CLOSESOUND  +0x0A PLAYSOUND  +0x0E QUIETSOUND
     //     +0x12 FLUSHSOUND     +0x16 GETSOUNDLENGTH             +0x1A SOUNDBUSY
-    //   OPENSOUND does not occupy a slot at all: it is the function that performs the lookup and
-    //   calls +0x02. So slots +6/+0xA/+0xE/+0x12/+0x16/+0x1A are all live entry points. ***
+    //   OPENSOUND occupies no slot at all: it is the function that performs the lookup and calls
+    //   +0x02. So slots +6/+0xA/+0xE/+0x12/+0x16/+0x1A are all live entry points.
     //
-    // WHY THE HOST MUST NOT HAND OUT A "REAL" ALLOCATION HERE (addm 773, and the reason both of
-    // lane D's retirement experiments failed):
+    // WHY THE HOST MUST NOT HAND OUT A "REAL" ALLOCATION ON THE CLASSIC ARM:
     //   The 0xAAFD handler is a bare NewHandle: Handle -> master ptr -> a block it memsets to 0.
     //   There is no ADSd engine behind it. The moment a module accepts that Handle it installs the
-    //   host's ADSd record as its sound object's method table, and then:
-    //     * CLOSESOUND `jsr [ext+0x0A]` lands back on the ALLOCATOR trap. Live proof (ADSDLOG on a
-    //       copy-only probe): of the 5 AAFD entries in a 5-frame Nocturnes run, ONE has ret=0010140C
-    //       (the legitimate slot+2 New in MAIN) and FOUR have ret=00101492 — the instruction after
-    //       `jsr [A0]` at 0x101490, inside CLOSESOUND. Registers at those entries: A4=the Handle,
-    //       [A4]=the block, [[A4]]=the extension record, confirming the block[0] store above.
-    //       CLOSESOUND pushes 3 args and NO result slot while the 0xAAFD handler Pascal-cleans 1 arg
-    //       and writes a long "result" at A7+8 — it overwrites a pushed argument and leaves A7 4 high
-    //       (masked only by CLOSESOUND's `unlink`, the addm-332 shape).
-    //     * PLAYSOUND dispatches through ext+0x16, which the host never writes: a null dispatch.
-    //   MEASURED CONSEQUENCE — Nocturnes, 200 f, isolating this line alone (ADNONOCTBUCKET=1
-    //   ADSYSCONFIG=C001 keeps systemConfig identical at 0xC001; control: ADSYSCONFIG=C001 by itself
-    //   is byte-IDENT to default):
-    //       with the "real" allocator : 199 distinct, colors=193, ~186 000 non-black px
-    //       with the return-0 stub    : 197 distinct, colors=7,   ~640 non-black px
-    //   The first set of numbers looks like the better render and IS THE CORRUPTION. RENDERED:
-    //   the "real" arm is a full-screen psychedelic diagonal rainbow with ~20 solid black rectangles
-    //   punched into it (uninitialised memory blitted to the screen); the stub-0 arm is a black field
-    //   with pairs of small glowing coloured eyes blinking at scattered positions — which is what
-    //   Nocturnes IS. (scratchpad/adsd_noct_real_f150.png vs adsd_noct_stub0_f150.png.)
-    //   Distinct counts could not see this; only the frames could.
+    //   host's ADSd record as its sound object's method table, and every later method dispatch lands
+    //   on the ALLOCATOR trap with a frame it does not match: the trap Pascal-cleans one argument and
+    //   writes a long result, so it overwrites a pushed argument and leaves A7 4 high (masked only by
+    //   the caller's `unlink`). Slots the host never writes are a null dispatch.
+    //   MEASURED, Nocturnes 200 f: the "real" allocator gives 199 distinct frames, colors=193 and
+    //   ~186 000 non-black px; the return-0 stub gives 197 distinct, colors=7, ~640 non-black px. The
+    //   first set of numbers looks like the better render and IS THE CORRUPTION — rendered, the "real"
+    //   arm is a full-screen psychedelic diagonal rainbow with ~20 solid black rectangles punched into
+    //   it (uninitialised memory blitted to the screen), while the stub-0 arm is a black field with
+    //   pairs of small glowing coloured eyes blinking at scattered positions — which is what Nocturnes
+    //   IS. Distinct counts cannot see this; only the frames can.
     //
     // SO THE RETURN-0 STUB IS AUTHENTIC FOR THE CLASSIC-API MODULE CLASS, and not as a quirk some
     // modules "rely on": 0 is exactly the value the module's own lookup yields when the extension is
     // ABSENT (the `bne` at 0x1013F6 / 0x100F8A is simply not taken), and a scan for the literal
     // 'ADSd' across the After Dark 4.0 application, the "After Dark 4.0 Library" and the faceplate
-    // resources returns ZERO hits (addm 121) — the shipping engine does not appear to publish this
-    // extension to classic modules at all.
+    // resources returns ZERO hits — the shipping engine does not appear to publish this extension to
+    // classic modules at all.
     uint32_t adsd_alloc_stub = mem->allocate(4);
     mem->write_u16b(adsd_alloc_stub,   0xAAFD);   // ADSd-alloc trap (host-serviced, see 0xAAFD handler)
     mem->write_u16b(adsd_alloc_stub+2, 0x4E75);   // rts
-    // addm 333: the dll# cluster needs the REAL allocator too. Clocks' sound init (module fn ~+09xx,
-    // a StateMachine over its 'Chnl' resources) reaches the AD3_Sound library, which looks up 'ADSd'
-    // and calls a method; the return-0 stub makes it throw ("sound engine absent" = fatal to this
-    // module), the ctor unwinds, the instance never publishes, and draw dereferences null. On a real
-    // Mac ADSd always exists. Gate: ADDLLADSD=1 (test), keeping Puzzle/Mowin'/Lunatic Fringe on the
-    // return-0 stub they RELY on.
-    // DEFAULT-ON for dll# since addm 333 (ADNODLLADSD reverts): with the real allocator Clocks' ctor
-    // completes, the instance PUBLISHES to storage[0] (first time ever), and draw msg=3 renders an
-    // animated clock. Verified regression-free for the classic modules (they are not lib510.loaded).
-    // NAME KEY RETIRED (addm 773). Lane D held this key after two failed retirement DIRECTIONS —
-    // (a) "real for all" (it regressed Dominoes 34 -> 22 distinct) and (b) a static "references
-    // 'ADSd'" literal scan (over-broad, and blind to dcmp-compressed modules). Both were pushing the
-    // key OUTWARD, on the assumption that the real allocator is a facility and the stub is a lie.
-    // The RE above shows the assumption is backwards: the allocator is the lie. So the key retires
-    // INWARD — `noct_adsd_path` comes off this line entirely and the gate is now purely the
-    // structural `lib510.loaded`, which the loader already decides with zero names.
-    //   * Experiment (a) is now EXPLAINED rather than merely recorded: Dominoes links the same sound
-    //     unit and takes the same block[0]-store, so "real for all" hands Dominoes the same malformed
-    //     sound object and the same corruption. It was never evidence that Dominoes "relies on" 0.
-    //   * Experiment (b)'s headline disqualifier was itself stale: addm 170 had already established
-    //     that Zot! DOES look up 'ADSd' @0x440 and `jsr [ADSd+2]` @0x472, so it was never the false
-    //     positive the exclusion set was built around. (The scan stays disqualified on the dcmp
-    //     point — but no scan is needed now, because no classic module should be selected at all.)
-    //   * Einstein had already left the key (byte-identical with the bucket off, 155/155).
-    // NOT byte-identical, and deliberately so: this changes exactly one module, Nocturnes, from the
-    // rainbow-garbage render to its real one (frames cited above). Every other corpus module is
-    // untouched — `noct_adsd_path` matched only Nocturnes, and the dll# arm is unchanged.
-    // (addm 773 follow-up: ADNOCTBUCKET/ADNONOCTBUCKET are GONE. Retiring the systemConfig bit-15
-    // arm removed the last reader of `noct_adsd_path`, so the variable, the strstr and both levers
-    // were deleted with it — a zero-reader name gate is one default-flip from silent reactivation.
-    // ADNODLLADSD still reverts the dll# arm; the bit-15 A/B is ADSYSCONFIG=4001.)
-    // LATENT HAZARD (addm 773) NOW ADDRESSED at the record itself — see the addm 791 block
-    // below, which backs the three remaining named methods. What STAYS is the dll# arm below still
-    // handing AD3_Sound this same
-    // method-table-less block. It is load-bearing there (addm 333a: without it Clocks throws and
-    // never publishes), so it stays — but if a dll# module is ever seen rendering garbage rather
-    // than nothing, this record, and its zero at +0x16, is the first place to look.
+    // The dll# cluster needs the REAL allocator. Clocks' sound init (module fn ~+09xx, a StateMachine
+    // over its 'Chnl' resources) reaches the AD3_Sound library, which looks up 'ADSd' and calls a
+    // method; with the return-0 stub it throws ("sound engine absent" = fatal to this module), the ctor
+    // unwinds, the instance never publishes, and draw dereferences null. On a real Mac ADSd always
+    // exists. With the real allocator Clocks' ctor completes, the instance publishes to storage[0] and
+    // draw msg=3 renders an animated clock. Gated on lib510.loaded (ADNODLLADSD reverts), so the classic
+    // modules keep the return-0 stub they rely on.
+    // If a dll# module is ever seen rendering garbage rather than nothing, this record — which
+    // AD3_Sound receives as its object's method table — is the first place to look.
     uint32_t adsd_fn = (lib510.loaded && !getenv("ADNODLLADSD")) ? adsd_alloc_stub : adsd_stub;
     uint32_t adsd = mem->allocate(0x20); mem->memset(adsd,0,0x20);
     mem->write_u32b(adsd+0x02, adsd_fn);
     mem->write_u32b(adsd+0x06, adsd_fn);
     mem->write_u32b(adsd+0x0A, adsd_fn);
     mem->write_u32b(adsd+0x0E, adsd_fn);
-    // ==== addm 791: THE REST OF THE TABLE, and why the 773 hazard note was under-stated ====
+    // ==== The rest of the 'ADSd' method table ====
     // The 'ADSd' method table is SEVEN slots, not four. Read off the consumer's own code — the
     // AD3_Sound library fragment (CODE id 134 of "AD 3.0 Resources/AD 3.0 Code", dcmp-decompressed),
     // which is the library all 11 AD3-family dll# modules import, and which links THE SAME
-    // Object-Pascal sound unit the classic modules carry inline (addm 773). MacsBug name blobs FOLLOW
-    // their function (the addm-774 rule), and the seven exports are contiguous:
+    // Object-Pascal sound unit the classic modules carry inline. MacsBug name blobs FOLLOW their own
+    // function, and the seven exports are contiguous:
     //   +0x02 New/allocator (dispatched off the RECORD inside OPENSOUND, frag 0x46E2)
     //   +0x06 CLOSESOUND      (frag 0x4728)      +0x0A PLAYSOUND       (frag 0x4768)
     //   +0x0E QUIETSOUND      (frag 0x47A4)      +0x12 FLUSHSOUND      (frag 0x47E0)
     //   +0x16 GETSOUNDLENGTH  (frag 0x4820)      +0x1A SOUNDBUSY       (frag 0x486A)
-    // addm 774 supp named +0x16 and left +0x0E "backed, unnamed"; +0x0E is QUIETSOUND and there are
-    // TWO more unbacked named methods, +0x12 and +0x1A. Nothing dispatches +0x1E.
+    // Nothing dispatches +0x1E.
     //
-    // WHY THIS IS NOT MERELY COSMETIC. addm 774 supp records the zero at +0x16 as "safe only because
-    // OPENSOUND returns 0 and GETSOUNDLENGTH null-checks". That is true on the CLASSIC arm and FALSE
-    // on the dll# arm, and the difference is the one line above: adsd_fn. OPENSOUND (frag 0x46B4)
-    // looks the extension up, calls [record+0x02], and only stores the record as the new object's
-    // method table `if the allocator returned NON-ZERO` (beq at frag 0x46EC). On the classic arm
-    // adsd_fn is the return-0 stub, so the object comes back NIL and every method's leading
-    // null-check (`beq` at 0x4716/0x4752/0x4792/0x47D2/0x4812/0x485C) skips the dispatch — safe by
-    // construction. On the dll# arm adsd_fn is the REAL allocator (0xAAFD, addm 333a, load-bearing),
-    // it returns a non-zero Handle, the record IS installed as the method table, and those
-    // null-checks PASS. Measured on current main with a per-slot dispatch probe, 200 f: Daredevil Dan
-    // dispatches +0x0A x145 and +0x0E x6, Bad Dog +0x06, Clocks +0x02 — all with A3 = this record.
-    // So the guard the hazard note relies on is already not holding here; the only reason +0x12/+0x16
-    // /+0x1A have not fired is that no shipped dll# module happens to call those three methods.
+    // WHY BACKING +0x12/+0x16/+0x1A MATTERS, AND ONLY ON THE dll# ARM. OPENSOUND (frag 0x46B4) looks
+    // the extension up, calls [record+0x02], and only stores the record as the new object's method
+    // table `if the allocator returned NON-ZERO` (beq at frag 0x46EC). On the classic arm adsd_fn is
+    // the return-0 stub, so the object comes back NIL and every method's leading null-check (`beq` at
+    // 0x4716/0x4752/0x4792/0x47D2/0x4812/0x485C) skips the dispatch — safe by construction. On the
+    // dll# arm adsd_fn is the REAL allocator (0xAAFD, load-bearing), it returns a non-zero Handle, the
+    // record IS installed as the method table, and those null-checks PASS: measured with a per-slot
+    // dispatch probe, 200 f, Daredevil Dan dispatches +0x0A x145 and +0x0E x6, Bad Dog +0x06, Clocks
+    // +0x02 — all with A3 = this record. The only reason +0x12/+0x16/+0x1A have not fired is that no
+    // shipped dll# module happens to call those three methods.
     //
-    // WHAT A ZERO THERE ACTUALLY COSTS. It is not a crash: the generic dll# null-method shim
-    // (dllA5 && pc<0x10, ADNONULLRTS opts out) absorbs the jsr-through-zero as a plain RTS. But that
-    // RTS does NO Pascal argument cleanup, so the caller resumes with the args still on the stack and
-    // reads one of them back as the answer: GETSOUNDLENGTH's `move.l D7,(A7)+` at frag 0x4826 would
-    // take an ARGUMENT as the sound duration, and SOUNDBUSY's `move.b D7,(A7)+` at 0x4870 an argument
-    // byte as the busy flag. Garbage values, silently, and only "safe" because a DIFFERENT subsystem
-    // happens to catch it. So back the slots properly instead of relying on that.
+    // WHAT A ZERO THERE COSTS. It is not a crash: the generic dll# null-method shim (dllA5 && pc<0x10,
+    // ADNONULLRTS opts out) absorbs the jsr-through-zero as a plain RTS. But that RTS does NO Pascal
+    // argument cleanup, so the caller resumes with the args still on the stack and reads one of them
+    // back as the answer: GETSOUNDLENGTH's `move.l D7,(A7)+` at frag 0x4826 would take an ARGUMENT as
+    // the sound duration, and SOUNDBUSY's `move.b D7,(A7)+` at 0x4870 an argument byte as the busy
+    // flag. Garbage values, silently, and only "safe" because a DIFFERENT subsystem catches it.
     //
     // THE RETURN VALUES ARE NOT INVENTED — the library states them itself. Each method's NIL-object
     // branch is the engine-absent answer: GETSOUNDLENGTH `moveq D7,0` (0x480E) then writes D7,
     // SOUNDBUSY `clr.b D7` (0x4858) then writes D7, FLUSHSOUND does nothing. Backing the slots with
     // 0 / FALSE / no-op makes the have-object-but-no-engine path agree exactly with the no-object
-    // path, which is also the host's working-silent Sound Manager model everywhere else (addm 391)
-    // and the same answer the classic arm's return-0 stub gives.
+    // path, which is also the host's working-silent Sound Manager model everywhere else and the same
+    // answer the classic arm's return-0 stub gives.
     //
     // Pascal frames, read off the call sites (all three push 2 long args, callee-clean):
     //   FLUSHSOUND     0x47DA push A4, 0x47DC push [A6+8], jsr           -> no result slot
     //   GETSOUNDLENGTH 0x4818 subq.l #4,A7 (LONG result), 2 args, jsr    -> long result, caller pops
     //   SOUNDBUSY      0x4862 subq.l #2,A7 (WORD result), 2 args, jsr    -> word result, caller pops
-    // SCOPED TO THE dll# ARM, and that scope is load-bearing rather than cautious. On the classic
-    // arm adsd_fn is the return-0 stub, so OPENSOUND's `beq` at frag 0x46EC IS taken, the object
-    // comes back NIL, and every method's leading null-check skips its dispatch — the three slots are
-    // unreachable there BY CONSTRUCTION, so backing them buys nothing. It also is not free: these are
-    // three extra mem->allocate() calls, and the corpus proved a classic module notices. Nonsense
-    // (std) renders differently under ANY build that makes these three allocations — measured with a
-    // discriminator build (adhost68k_ash.cc) that allocates 6+8+8 bytes in the same order and then
-    // does NOTHING with them: it reproduces the patched frame hash EXACTLY (c5cfc758, vs base
-    // e8e85e66), so the delta is the heap-layout shift, not the sound slots. Nonsense never
-    // dispatches this record at all (per-slot probe: "NO SLOT OF THIS RECORD WAS EVER DISPATCHED").
-    // So: pay the allocation only on the arm where the hazard is real.
-    // ADNOSNDSLOTS restores the zero words (the A/B lever for this change).
+    // The dll# scope is load-bearing rather than cautious. On the classic arm the three slots are
+    // unreachable BY CONSTRUCTION (the NIL-object argument above), so backing them buys nothing, and
+    // it is not free: these are three extra mem->allocate() calls, and a classic module notices.
+    // Nonsense (std) renders differently under ANY build that makes these three allocations — a
+    // discriminator build that allocates 6+8+8 bytes in the same order and then does NOTHING with them
+    // reproduces the patched frame hash EXACTLY, so the delta is the heap-layout shift, not the sound
+    // slots (Nonsense never dispatches this record at all). So: pay the allocation only on the arm
+    // where the hazard is real. ADNOSNDSLOTS restores the zero words (the A/B lever).
     if(lib510.loaded && !getenv("ADNODLLADSD") && !getenv("ADNOSNDSLOTS")){
       uint32_t adsd_flush = mem->allocate(6);
       mem->write_u16b(adsd_flush+0, 0x225F);  // movea.l (A7)+,A1   (pop return address)
@@ -10460,46 +9214,43 @@ int main(int argc, char** argv){
       mem->write_u32b(adsd+0x16, adsd_len);   // GETSOUNDLENGTH
       mem->write_u32b(adsd+0x1A, adsd_busy);  // SOUNDBUSY
     }
-    // ==== addm 798: +0x06/+0x0A/+0x0E WERE BACKED BY THE WRONG FUNCTION ====
-    // The block above backed the three slots that held ZERO. This one fixes the three that were
-    // "backed" in name only. +0x06/+0x0A/+0x0E all held `adsd_fn`, and on the dll# arm adsd_fn is
-    // adsd_alloc_stub — THE 0xAAFD ALLOCATOR. That handler is written for ONE Pascal argument with a
-    // LONG result slot (it writes the Handle at A7+8 and Pascal-cleans 4 bytes). The three methods it
-    // was standing in for have entirely different frames — read off AD3_Sound's own dispatch sites,
-    // each of which reserves NO result slot and is callee-clean (the caller's own epilogue is the
-    // proof of the arg count: CLOSESOUND/QUIETSOUND end `addq.w #8,A7`, PLAYSOUND `lea (12,A7),A7`):
+    // ==== +0x06/+0x0A/+0x0E: correctly-framed no-ops, not the allocator ====
+    // The block above backs the three slots that would otherwise hold ZERO. These three would
+    // otherwise hold `adsd_fn`, which on the dll# arm is adsd_alloc_stub — THE 0xAAFD ALLOCATOR. That
+    // handler is written for ONE Pascal argument with a LONG result slot (it writes the Handle at
+    // A7+8 and Pascal-cleans 4 bytes). The three methods it would stand in for have entirely
+    // different frames — read off AD3_Sound's own dispatch sites, each of which reserves NO result
+    // slot and is callee-clean (the caller's own epilogue is the proof of the arg count:
+    // CLOSESOUND/QUIETSOUND end `addq.w #8,A7`, PLAYSOUND `lea (12,A7),A7`):
     //   CLOSESOUND +0x06  frag 0x4722 push A4, 0x4724 push [A6+8],                jsr [A3+0x06]  2 args
     //   PLAYSOUND  +0x0A  frag 0x475E push A4, 0x4760 push [A6+0xC], 0x4764 [A6+8], jsr [A3+0x0A] 3 args
     //   QUIETSOUND +0x0E  frag 0x479E push A4, 0x47A0 push [A6+8],                jsr [A3+0x0E]  2 args
-    // So every dispatch through them ran the allocator against a mismatched frame and did three
-    // wrong things at once: (a) wrote a fresh Handle over a pushed ARGUMENT at [A7+8], (b) leaked
-    // that Handle plus a >=0x40 B block that nothing ever frees, and (c) returned with A7 4 low
-    // (2-arg) or 8 low (3-arg) — masked only by the caller's `unlink A6`, the addm-332 shape.
-    // Measured on THIS main, 200 f, with a per-slot census keyed on the CALLER's own instruction
-    // (the 206B/206C displacement before the return address — host bookkeeping can disagree with the
-    // guest, the caller's bytes cannot):
+    // Dispatching them through the allocator runs it against a mismatched frame and does three wrong
+    // things at once: (a) writes a fresh Handle over a pushed ARGUMENT at [A7+8], (b) leaks that
+    // Handle plus a >=0x40 B block that nothing ever frees, and (c) returns with A7 4 low (2-arg) or
+    // 8 low (3-arg). Per-slot census on 200 f, keyed on the CALLER's own instruction (the 206B/206C
+    // displacement before the return address — host bookkeeping can disagree with the guest, the
+    // caller's bytes cannot):
     //   Daredevil Dan l40  PLAYSOUND x145 + QUIETSOUND x6      Clocks l40  PLAYSOUND x65
     //   Rebound std        PLAYSOUND x10                       Bad Dog     CLOSESOUND x1
-    // plus exactly ONE legitimate +0x02 New per module. (The counts differ from the addm-791 census,
-    // which was taken on main 5589e9c2 — Clocks and Bugs have since started dispatching.)
+    // plus exactly ONE legitimate +0x02 New per module.
     // (a) and (c) are inert: both the clobbered slot and the A7 deficit sit in stack the caller
     // discards with its `unlink` two instructions later, and the census is IDENTICAL count-for-count
-    // with and without this fix, so no module can observe the difference. (b) is what actually
-    // escapes: 200 f of Daredevil Dan leaks 38 949 B across 151 blocks (largest 27 204 B — the size
-    // comes from whatever junk is in D1), and it grows linearly with run length. On a screen saver,
-    // which runs unattended for hours, that is the symptom that matters.
-    // addm 333a's load-bearing claim covers the ALLOCATOR AT +0x02 ONLY (Clocks' OPENSOUND needs a
-    // non-zero Handle back so the record is installed as the object's method table). It says nothing
-    // about the other three slots having to be that same trap; they were collateral, not a design.
+    // either way, so no module can observe the difference. (b) is what actually escapes: 200 f of
+    // Daredevil Dan leaks 38 949 B across 151 blocks (largest 27 204 B — the size comes from whatever
+    // junk is in D1), and it grows linearly with run length. On a screen saver, which runs unattended
+    // for hours, that is the symptom that matters.
+    // The allocator is load-bearing AT +0x02 ONLY (Clocks' OPENSOUND needs a non-zero Handle back so
+    // the record is installed as the object's method table); nothing requires the other three slots to
+    // be that same trap.
     // WHAT THE HOST SHOULD ANSWER: the host has no sound engine (the working-silent Sound Manager
-    // model, addm 391), so the honest answer to "close/play/quiet this sound" is to do nothing and
-    // return cleanly. These three return no value at all, so a correctly-framed no-op is the complete
-    // answer — there is no value to invent, unlike GETSOUNDLENGTH/SOUNDBUSY above.
-    // SCOPED TO THE dll# ARM for the same two reasons as the block above: on the classic arm adsd_fn
-    // is the return-0 stub, OPENSOUND's `beq` at frag 0x46EC is taken, the sound object is NIL and
-    // every method's leading null-check skips its dispatch — the slots are unreachable there BY
-    // CONSTRUCTION — and extra allocations on that arm move the heap under Nonsense (std), which is
-    // layout-sensitive (adsound-lane STEP 8). ADNOSNDMETHODS restores adsd_fn in all three (the A/B).
+    // model), so the honest answer to "close/play/quiet this sound" is to do nothing and return
+    // cleanly. These three return no value at all, so a correctly-framed no-op is the complete answer
+    // — there is no value to invent, unlike GETSOUNDLENGTH/SOUNDBUSY above.
+    // SCOPED TO THE dll# ARM for the same two reasons as the block above: on the classic arm the sound
+    // object is NIL and every method's leading null-check skips its dispatch, so the slots are
+    // unreachable BY CONSTRUCTION, and extra allocations on that arm move the heap under Nonsense
+    // (std), which is layout-sensitive. ADNOSNDMETHODS restores adsd_fn in all three (the A/B).
     if(lib510.loaded && !getenv("ADNODLLADSD") && !getenv("ADNOSNDMETHODS")){
       uint32_t snd_m2 = mem->allocate(6);     // 2 long args, no result slot: CLOSESOUND, QUIETSOUND
       mem->write_u16b(snd_m2+0, 0x225F);      // movea.l (A7)+,A1   (pop return address)
@@ -10514,9 +9265,6 @@ int main(int argc, char** argv){
       mem->write_u32b(adsd+0x0A, snd_m3);     // PLAYSOUND  (3 args)
       mem->write_u32b(adsd+0x0E, snd_m2);     // QUIETSOUND (2 args)
     }
-    // addm 775: the ADSDDRAW lever and its 0xAAF9 trap are DELETED (addm 773 proved the lever
-    // mis-aimed: slot +0x0A is a sound method, not a draw adapter; the default path never wrote
-    // the trap, so removal is behaviour-free by construction).
     // ---- ADdl "After Dark deLuxe runtime" extension (the dll# two-stage cluster) --------
     // Bugs, Clocks, Bad Dog, Nirvana, Rat Race, Ray, Rebound, Daredevil Dan, Fish! Pro all
     // ship an IDENTICAL 1926-byte ADgm "Universal ADgm" that is only a bootstrap SHIM: the real
@@ -10538,22 +9286,20 @@ int main(int argc, char** argv){
     //   fnptr @+0x2A           init()                                    [no args; called before load]
     //   fnptr @+0x3E           LinkModule(&struct, &entryOut[0x754], "module_main", dll#Handle, params) -> errW
     // Shim LinkModule flow (fn@0xAA): scan list for 'ADdl' -> [A4+0x750]; if 0 -> err 0x504 (the
-    // historical 0-pixel blocker). Version gate. init(+0x2A). GetPort. Get1Resource('dll#'). Build a
+    // 0-pixel blocker). Version gate. init(+0x2A). GetPort. Get1Resource('dll#'). Build a
     // (0x03E8,3) struct. LinkModule(+0x3E) resolves+relocates the module's CODE against the runtime,
     // returning module_main in [A4+0x754]. getModuleEntry(+0x0A) yields the per-frame fn ptr[0x758]
     // and its A5 world[0x75C]. lookupSymbol(+0x0E,"theAfterDarkPort") -> the module's port global,
     // seeded with the AfterDark port. Per frame, _CallModule (fn@0x256) sets A5=[0x75C] and jsr [0x758].
     //
-    // SCAFFOLD (this build): publish 'ADdl' with version 0x0300 so the shim PASSES the ADdl gate and
+    // Fallback scaffold: 'ADdl' is published with version 0x0300 so the shim PASSES the ADdl gate and
     // advances past err 0x504 into Get1Resource('dll#') + the vtable dispatch (the host services
-    // Get1Resource). The vtable slots point at a bare `rts` stub: the shim's own LookUpEntryPoints
-    // error path (movem.l restoring D3..A7 incl. A7 from the save frame at [A4+0x782]) recovers
-    // cleanly when LinkModule reports failure, so this is crash-safe and produces no regression, but
-    // still 0 pixels. REMAINING WORK to render: implement the LIB510 CodeWarrior-68K loader/linker
-    // (load+relocate the 14 libs from "After Dark 4.0 Library" via CREL/DREL/SYMS, then the module's
-    // CRLT/DRLT/SYMT against them) and back these vtable slots with real code, and drive the shim with
-    // the dll# selector convention (sel 2=open/LinkModule, sel 6=draw) instead of the default 0/2/3.
-    // ADRTSZERO (addm 324 probe): a BARE rts returns whatever happens to be left in D0, so a caller that
+    // Get1Resource). When the LIB510 world is not available the vtable slots point at a bare `rts`
+    // stub: the shim's own LookUpEntryPoints error path (movem.l restoring D3..A7 incl. A7 from the
+    // save frame at [A4+0x782]) recovers cleanly when LinkModule reports failure, so the run is
+    // crash-safe but renders nothing. The dll# selector convention is sel 2=open/LinkModule,
+    // sel 6=draw, not the default 0/2/3.
+    // ADRTSZERO: a BARE rts returns whatever happens to be left in D0, so a caller that
     // expects an object back takes the stale register value as a pointer. Clocks' failing virtual calls run
     // with `this` == 100 (an art class id in flight). Emit `moveq #0,D0 ; rts` instead so a stubbed
     // "returns an object" slot yields a clean NULL rather than a plausible-looking integer.
@@ -10575,8 +9321,8 @@ int main(int argc, char** argv){
     mem->write_u16b(addl_clean1+0, 0x205F);             // movea.l (A7)+,A0   (pop return address)
     mem->write_u16b(addl_clean1+2, 0x588F);             // addq.l #4,A7       (drop the argument)
     mem->write_u16b(addl_clean1+4, 0x4ED0);             // jmp (A0)           (return to caller)
-    // *** addm 320 *** The slots NOT covered by the default fill above were left at 0, so any call through
-    // them was `jsr 0`. That is exactly what broke Clocks: MacXResourceFile::ResourceExists does
+    // Slots not covered by the default fill above would be left at 0, so any call through them would be
+    // `jsr 0`. That is what broke Clocks: MacXResourceFile::ResourceExists does
     //     move.l -(A7),(this+4)   ; push the res-file ref  (ONE 4-byte arg, caller does NOT pop)
     //     movea.l (A5-0x277E),A0 ; movea.l (A0+0x22),A0 ; jsr (A0)      <- addl+0x22, was NULL
     // so the "callee" popped nothing, A7 stayed 4 low, and the function's closing
@@ -10588,12 +9334,7 @@ int main(int argc, char** argv){
     //         and discards it with `addq.w #4,A7`, i.e. CALLER-cleaned -> a bare rts is stack-correct.
     // The rest get the bare rts purely so they can never be `jsr 0` again. ADNOADDLFILL reverts.
     if(getenv("ADADDLDBG")) fprintf(stderr,"[addl] base=%08X rts=%08X clean1=%08X\n", addl, addl_rts, addl_clean1);
-    // OPT-IN (ADADDLFILL=1). See addm 320: this DOES eliminate the Clocks throw (the "Out of memory."
-    // message and the Get1Resource('aInf',0) both disappear, confirming the addm-319 diagnosis), but
-    // +0x22 evidently has MORE THAN ONE caller with differing stack conventions — with a fixed
-    // pop-one-arg stub, execution later falls off the end of the stub (fault at clean1+6) and the
-    // 62-module sweep destabilises. Needs per-caller arg counts before it can be the default.
-    // addm 321: conventions DERIVED, not guessed. Dumped the whole relocated library arena and scanned for
+    // Conventions derived, not guessed: a scan of the whole relocated library arena for the
     // the `movea.l (A5-0x277E),A0 ; movea.l (A0+NN),A0 ; jsr (A0)` pattern — 25 call sites, resolved to
     // functions via the recovered symbol table. The record is MacXResourceFile's current-file manager:
     //   +0x1A x2  IXResourceFile (ctor)            +0x1E x1  ~MacXResourceFile
@@ -10605,15 +9346,14 @@ int main(int argc, char** argv){
     //   +0x26: every site brackets the call with `59 4F` (subq.w #4,A7, reserve result) / `58 4F`
     //          (addq.w #4,A7, discard) and never uses the value => no args, CALLER-cleaned; a bare rts
     //          is stack-correct.
-    // Only these two are wired. +0x1A/+0x1E are left exactly as they were: +0x1A is already claimed by the
-    // canvas 0xAAF3 trapstub (a real collision worth revisiting — IXResourceFile calls it too) and +0x1E's
-    // single site has not been characterised. Filling unanalysed slots is what destabilised the sweep.
+    // +0x1A is left to the canvas 0xAAF3 trapstub below (a real collision worth revisiting —
+    // IXResourceFile calls it too). Filling unanalysed slots destabilises the 62-module sweep.
     if(!getenv("ADNOADDLFILL")){
       mem->write_u32b(addl+0x22, addl_clean1);   // callee-clean, one 4-byte arg
       mem->write_u32b(addl+0x26, addl_rts);      // no args, caller-cleaned result
       mem->write_u32b(addl+0x1E, addl_clean1);   // ~MacXResourceFile: same one-arg callee-clean shape
     }
-    // addm 322: same scan applied to +0x1A. Its only callers through this record are IXResourceFile's two
+    // The same scan applied to +0x1A: its only callers through this record are IXResourceFile's two
     // sites, and both look like:
     //     55 4F        subq.w #2,A7            reserve a SHORT result
     //     2F 2D EA 62  move.l -(A7),(A5-0x159E)   \
@@ -10685,11 +9425,11 @@ int main(int argc, char** argv){
       // Boot the '+ODE' runtime (init its subsystem globals like [A5-0x1168]) by running its __start
       // (+ODE 1 @0x0C) on the main emulator (trap handler already installed). ExitToShell/step-limit stops it.
       if(getenv("ADENGINEBOOT") && g_ode.bootEntry){
-        // NOTE: __start @0x12 -> DATA/ZERO relocation (@0x48) does GetResource('DATA')/('ZERO'), but the
-        // AD9 repackager renamed the engine's CODE/DATA/ZERO to '+ODE'/'+ATA'/'+ERO' so GetResource returns
-        // the MODULE's (wrong, undersized) DATA -> the copy loop overruns into a host-arena gap (0x304000).
-        // FIX (next): during boot, alias GetResource('DATA'/'ZERO'/'CODE',0) to the engine's '+ATA'/'+ERO'/
-        // '+ODE' resources so the runtime's own DATA/BSS relocation runs on the right blocks. See ITER-J(p).
+        // __start @0x12 -> DATA/ZERO relocation (@0x48) does GetResource('DATA')/('ZERO'), but the
+        // AD9 repackager renamed the engine's CODE/DATA/ZERO to '+ODE'/'+ATA'/'+ERO', so a plain
+        // GetResource returns the MODULE's (wrong, undersized) DATA and the copy loop overruns into a
+        // host-arena gap (0x304000). During the boot, GetResource('DATA'/'ZERO'/'CODE',0) is aliased to
+        // the engine's '+ATA'/'+ERO'/'+ODE' resources (see g_ode.bootActive below).
         auto& br=emu.registers();
         for(int i=0;i<8;i++){br.d[i].u=0;br.a[i]=0;}
         br.a[5]=g_ode.a5; br.a[7]=0x00002F00;
@@ -10716,7 +9456,7 @@ int main(int argc, char** argv){
         emu.set_debug_hook([&](M68KEmulator& e){ auto&rr=e.registers();
           faultA0=rr.a[0]; faultA6=rr.a[6]; faultPC=rr.pc; faultA7=rr.a[7];   // track last state for post-fault diagnosis
           pcring[pcri++ & 63]=rr.pc;
-          // ADBOOTTRACE=lo:hi:path — log boot-phase PCs in [lo,hi) to a file (addm 344: find the engine's
+          // ADBOOTTRACE=lo:hi:path — log boot-phase PCs in [lo,hi) to a file (find the engine's
           // own 4.0-library reloc WALKER by execution instead of fighting linear-disasm misalignment).
           { static FILE* btf=nullptr; static uint32_t blo=0,bhi=0; static bool binit=false; static long bn=0;
             if(!binit){ binit=true; if(const char* bv=getenv("ADBOOTTRACE")){ char pth[256];
@@ -10738,8 +9478,8 @@ int main(int argc, char** argv){
         // Seed [0x0908] = DATA-init DEST = A5-a5below. __start's DATA-init (+ODE1@0x48) decompresses the
         // zero-RLE '+ATA' (source=*(DATA handle)) into [dest, A5) expanding zero-runs via '+ERO' run-lengths,
         // then DREL-relocates ([A5+off]+=A5). This fills the full below-A5 region incl. the C++ vtables at
-        // A5-0x1C8E. (Was seeded to A5-dataSize -> only the top 0xE14 got the raw compressed blob, leaving the
-        // vtable region zeroed -> every object vtable read back as all-A5 -> first virtual call derailed.)
+        // A5-0x1C8E; seeding the dest to A5-dataSize instead leaves the vtable region zeroed, every
+        // object vtable reads back as all-A5, and the first virtual call derails.
         mem->write_u32b(0x00000908, g_ode.dataDest);
         g_ode.bootActive=true;   // alias GetResource('DATA'/'ZERO') -> engine '+ATA'/'+ERO' during the boot
         try{ emu.execute(); }catch(const std::exception& ex){ bstop=bstop.empty()?ex.what():bstop; }
@@ -10819,23 +9559,14 @@ int main(int argc, char** argv){
   // (jsr [S+2] -> 0x33980000). So only pre-seed for the cluster; others get *glob=0 to build their own.
   uint32_t S = mem->allocate(0x40); mem->memset(S,0,0x40);
   uint32_t T = mem->allocate(0x40); mem->memset(T,0,0x40);
-  // NAME-GATE RETIREMENT (lane D): the CLUSTER[] name list is GONE — not replaced by a structural
-  // predicate, because the measurement showed there is nothing left for a predicate to select. On
-  // current main, 200 f, both hash axes (gray + RGB), ALL SEVEN former members are BYTE-IDENTICAL
-  // with the pre-seed suppressed: Meadow, Dominoes, Bogglins, Globe, Pearls, Down the Drain and
-  // Confetti Factory each produce the same frame stream and the same distinct count with and
-  // without it. The msg-2 handler chain the pre-seed was standing in for is now reached through the
-  // module's OWN construction — addm 740's `'ADr'`/`'aYmm'` handshake (which independently cured
-  // Dominoes and Confetti) plus the ADmf extension block below give the whole Object-Pascal draw
-  // cluster a real root object, so a host-fabricated `glob->S->T` is dead weight. Since every
-  // non-member already ran with `*glob=0`, dropping the list is byte-identical corpus-wide by
-  // construction, and the reuse-path class the gate protected (Flying Toilets, Marbles, Punch Out,
-  // Artist — they branch `if(*glob==0) build-fresh else reuse`) is protected by DEFAULT now rather
-  // than by exclusion from a name list. That protection is still real and still measured: forcing
-  // ADPRESEED=1 on Marbles collapses it from 197 distinct frames to 1 (the documented garbage-vtable
-  // dispatch, jsr [S+2]), which is exactly why the pre-seed must never be the default.
-  // ADPRESEED remains as the diagnostic that reproduces the old cluster behaviour; ADNOPRESEED is
-  // kept as a no-op alias so existing scripts and evidence files still run.
+  // The pre-seed is OFF by default: every module builds its own root object. The Object-Pascal draw
+  // cluster (Meadow, Dominoes, Bogglins, Globe, Pearls, Down the Drain, Confetti Factory) reaches the
+  // msg-2 handler chain through its OWN construction — the 'ADr'/'aYmm' handshake plus the ADmf
+  // extension block above give it a real root object — so a host-fabricated glob->S->T is dead weight.
+  // The reuse-path class (Flying Toilets, Marbles, Punch Out, Artist — they branch `if(*glob==0)
+  // build-fresh else reuse`) must never see a non-null *glob: forcing ADPRESEED=1 on Marbles collapses
+  // it from 197 distinct frames to 1 (the garbage-vtable dispatch, jsr [S+2]).
+  // ADPRESEED reproduces the cluster pre-seed as a diagnostic; ADNOPRESEED is kept as a no-op alias.
   bool preseed_glob = getenv("ADPRESEED")!=nullptr;
   if(getenv("ADNOPRESEED")) preseed_glob=false;
   if(preseed_glob){
@@ -10884,31 +9615,26 @@ int main(int argc, char** argv){
       modA5=m.dataBase; modDataEnd=m.dataBase+(uint32_t)m.data.size(); modA5End=m.dataBase+m.johnA5Data; modCodeBase=m.codeBase; }
     long impMax = getenv("ADIMPMAX")?atol(getenv("ADIMPMAX")):80;
     uint32_t dllA5=lib510.a5, dllTvBase=lib510.tvBaseAddr;
-    // [sp perf / addm 412] Per-call-site cached getenv: the per-instruction debug hook evaluated getenv()
-    // ~77x on EVERY emulated instruction (each an O(environ) scan), the sole reason Time Flies / Super Guy
-    // never finished their FINITE but large init color-remap in 300s. getenv's result cannot change mid-run,
-    // so cache it once per call site. Behaviourally identical (zero regression); ALL machinery still runs
-    // every instruction — only the redundant environ scans are removed. Distinct static per textual site.
+    // Per-call-site cached getenv: the per-instruction debug hook evaluated getenv() ~77x on EVERY
+    // emulated instruction (each an O(environ) scan), which is why Time Flies / Super Guy never finished
+    // their FINITE but large init color-remap in 300s. getenv's result cannot change mid-run, so cache it
+    // once per call site. Behaviourally identical; only the redundant environ scans are removed.
+    // Distinct static per textual site.
     #define CENV(k) ([]() -> const char* { static const char* _cv = getenv(k); return _cv; }())
     // ===================== [pf perf] ARMED-FEATURE-SET HOOK FAST PATH =====================
-    // MEASUREMENT that motivates this (sample(1), Rock Paper Scissors init, 7865 samples on the main
-    // thread): 5050 (64%) of ALL emulation CPU is inside this debug hook, versus 2225 (28%) in the
-    // emulator's actual instruction dispatch and 19 (0.2%) in trap handlers. The hook is not slow
-    // because any one thing in it is slow — it is slow because it is a 1,227-line straight-line chain
-    // of ~75 top-level tests evaluated on EVERY emulated instruction, of which 43 are pure RE probes
-    // gated on an env lever that is UNSET in every production (app) run. addm 412 removed the getenv
-    // SCAN from those tests; what remains per test is still a guard-variable load plus a branch, and
-    // three of the always-on blocks (bitfield-emu, EXTB.L-emu, SUBX/ADDX-emu) each perform their OWN
-    // mem->read_u16b(pc) — three MemoryContext::at lookups per instruction, each of which copies a
-    // shared_ptr (atomic refcount) — measured at ~700 samples, ~9% of total, to read ONE word three times.
+    // Profiling (Rock Paper Scissors init) puts 64% of ALL emulation CPU inside this debug hook, versus
+    // 28% in the emulator's actual instruction dispatch and 0.2% in trap handlers. The hook is not slow
+    // because any one thing in it is slow — it is slow because it is a straight-line chain of ~75
+    // top-level tests evaluated on EVERY emulated instruction, of which 43 are pure RE probes gated on
+    // an env lever that is UNSET in every production (app) run.
     //
     // THE MODEL: decide ONCE, at hook-install time, which features this run actually needs. A run is
     // LEAN-ELIGIBLE iff not a single one of the hook's env levers is set and none of the pointer/counter
     // -armed tracers (ADPCTRACE/ADWATCHADDR/ADPCLOG/ADFINDPAGE/ADIMPTRACE) or the near-JT recorders
     // (g_sffp/g_sfrd/g_sfLiveProbe) are armed. That is exactly the app's configuration. A lean-eligible
-    // run installs a hook containing ONLY the load-bearing duties, with the three opcode reads collapsed
-    // to ONE. Anything else installs the ORIGINAL hook, byte-for-byte unchanged, so every RE lever keeps
-    // behaving exactly as before — this is a fast path, never a reimplementation of the levers.
+    // run installs a hook containing ONLY the load-bearing duties. Anything else installs the ORIGINAL
+    // hook, byte-for-byte unchanged, so every RE lever keeps behaving exactly as before — this is a fast
+    // path, never a reimplementation of the levers.
     //
     // WHY THIS IS NOT A BEHAVIOUR CHANGE: the lean hook is the full hook with every branch whose guard is
     // statically known-false on this path deleted, and every guard known-true folded to its default value.
@@ -10929,7 +9655,7 @@ int main(int argc, char** argv){
       "ADPCHI","ADPCHIMAX","ADPCHIU","ADPCSAMPLE","ADPCTRACE","ADPCTRACEMAX","ADPCTRACEN","ADPLOTWATCH",
       "ADPROBEA0","ADRD2HIST","ADRDFEED","ADRDLOG","ADREGAT","ADREGPC","ADRESOLVE","ADRPSDRIFT","ADRPSDRIFTALL",
       "ADRPSDRIFTN","ADSBCC","ADSBHITS","ADSBLOG","ADSBRNG","ADSBUBW","ADSFMEMDUMP","ADSTKPC","ADSYMDUMP",
-      // addm-747: every lever that steers executed code must arm the full hook (the addm-719supp rule).
+      // Every lever that steers executed code must arm the full hook.
       "ADCALLHIST","ADSGP","ADFAKERET","ADSGREG","ADSGREGMAX","ADTICKCYCLES",
       "ADTHROWDUMP","ADTHROWMAX","ADTMLOG","ADUIBASE","ADWATCH","ADWATCHMAX","ADXHP","ADXHPMAX",
       // Not read inside the hook body, but they ARM state the hook branches on (g_bbtrace_on is set
@@ -10944,17 +9670,14 @@ int main(int argc, char** argv){
     if(getenv("ADLEANLOG")) fprintf(stderr,"[pf] debug hook: %s\n", pf_lean?"LEAN (armed-feature-set fast path)":"FULL (an RE lever is armed)");
     if(getenv("ADPFARMED")) fprintf(stderr,"[pf-armed] sfx=%d slowburn=%d bugs=%d sbreader=%d ddwalk=%d dllA5=%d\n",
       g_sfx?1:0, g_slowburn?1:0, bugs_bucket?1:0, g_sbReaderPC?1:0, g_ddWalkFix?1:0, dllA5?1:0);
-    // addm 804: the emulator precondition used to be checked here, because it armed the lean hook's
-    // shims. It now runs at the top of main() instead, so its warning lands before any load output.
     if(pf_lean){
       // The lean hook. Order of duties is IDENTICAL to the full hook below; only statically-dead branches
       // are absent.
       const bool PFC = getenv("ADPFDUTY")!=nullptr; if(PFC) atexit(pf_duty_dump);
       // ===== [pf] PERIODIC DUTIES OFF THE HOOK: the emulator's own cycle count =====
-      // DUTY CENSUS (61 modules, 1,867,902,214 instructions): the Ticks busy-wait breaker fired 7,295,928
-      // times — by construction once per 256 instructions — and was the ONLY high-rate duty in the hook.
-      // Everything else in the hook fires at most tens of thousands of times, and most of it fires under
-      // a hundred. So the hook was being invoked 1.87 BILLION times almost entirely to run a 256-cycle timer.
+      // The Ticks busy-wait breaker — by construction once per 256 instructions — was the only high-rate
+      // duty in the hook; everything else fires at most tens of thousands of times per run, and most of
+      // it under a hundred. So the hook was invoked billions of times almost entirely to run a timer.
       // M68KEmulator::execute() already calls interrupt_manager->on_cycle_start() on every cycle, and
       // InterruptManager::add(after_cycles, fn) schedules a callback at a future cycle count. A callback
       // that re-adds itself every 256 cycles therefore reproduces the tick spin EXACTLY — same period, and
@@ -10968,9 +9691,9 @@ int main(int argc, char** argv){
       if(pf_lean){
         // The dll# step budget rides along: it is a runaway-loop guard that the census shows NEVER fires,
         // and it no longer needs a per-instruction counter because EmulatorBase::cycles() already is one.
-        // Checking it on the 256-cycle tick means it can trip up to 255 instructions late than the
-        // in-hook version would have — irrelevant for a 30,000,000-instruction runaway guard, and stated
-        // here rather than papered over. ADDLLICNT (which reports the exact count) forces the full hook.
+        // Checking it on the 256-cycle tick means it can trip up to 255 instructions late — irrelevant
+        // for a 30,000,000-instruction runaway guard. ADDLLICNT (which reports the exact count) forces
+        // the full hook.
         // Heap-stable so the callback can re-register ITSELF: a self-capturing local std::function would
         // dangle the moment this scope exits, while the callback lives for the whole run.
         static std::function<bool()>* pf_tick = new std::function<bool()>();
@@ -10988,12 +9711,10 @@ int main(int argc, char** argv){
         pf_im->add(g_tick_cycles, *pf_tick);
       }
       const bool k_senttrap = (getenv("ADPFNOSENTTRAP")==nullptr);
-      // ATTEMPTED AND REJECTED (kept opt-in, not root-caused): A-trapping the null-RTS landing pad would
-      // have taken the hook-free count from 42 to ~52, since `dllA5 != 0` is the only duty arming the other
-      // 19 modules. It reproduces the shim's pop-and-continue and the cycle debt is compensated, yet it
-      // still changes DAREDEVIL DAN (corpus 60/61 instead of 61/61). I could not explain that difference,
-      // and shipping an unexplained one-module change to buy a performance nicety is not a trade worth
-      // making — so it stays OFF. ADPFNULLTRAP=1 re-enables it for whoever picks the diagnosis up.
+      // ADPFNULLTRAP=1 A-traps the null-RTS landing pad, which would take the hook-free module count
+      // from 42 to ~52 (`dllA5 != 0` is the only duty arming the other 19). It reproduces the shim's
+      // pop-and-continue and the cycle debt is compensated, yet it still changes DAREDEVIL DAN (corpus
+      // 60/61 instead of 61/61) for reasons not yet diagnosed, so it stays OFF by default.
       const bool k_nullrtstrap = dllA5 && (getenv("ADPFNULLTRAP")!=nullptr);
       if(k_nullrtstrap) for(uint32_t a=0; a<0x10; a+=2) mem->write_u16b(a, PF_NULLRTS_TRAP);
       auto pf_leanhook = [PFC,k_senttrap,k_nullrtstrap,RET_SENT,&mem,dllA5,params,bugs_bucket,&g_ticks,&g_tm_addr,&g_tm_tp,&g_tm_ret,&g_tm_primed,&g_tm_firing,&g_dll_budget,&g_dll_used,g_slowburn,sb_gate](M68KEmulator& e){
@@ -11003,7 +9724,7 @@ int main(int argc, char** argv){
           uint16_t w=0; uint32_t t=0; try{ w=mem->read_u16b(rr.pc); t=mem->read_u32b(rr.pc+2); }catch(...){}
           if(w==0x4EF9) g_jtxTarget[{rr.pc,t}]++;
         }
-        // ADJTLIVE (addm 719): low-band near-JT execution census, shared-library A5 world.
+        // ADJTLIVE: low-band near-JT execution census, shared-library A5 world.
         if(g_jtlive && g_jtl_a5 && rr.a[5]==g_jtl_a5){
           uint16_t op=0; try{ op=mem->read_u16b(rr.pc); }catch(...){ op=0; }
           bool jmp  = (op==0x4EAD || op==0x4EED);
@@ -11038,11 +9759,7 @@ int main(int argc, char** argv){
             rr.d[0].u=8u; rr.a[7]+=8; rr.pc=ret;
           }
         }
-        // addm 804: the per-instruction opcode read and the five opcode shims that needed it
-        // (CMPA.W width, register-direct bitfield, EXTB.L, SWAP condition codes, SUBX/ADDX) are GONE:
-        // every one of those defects is fixed in the emulator, which pf_probe_emulator_opcodes()
-        // checks at startup and warns about if missing. The hook no longer reads the instruction word.
-        // addm 377: two-A5 screen-BOUNDS reader intercept (armed only for twoA5).
+        // Two-A5 screen-BOUNDS reader intercept (armed only for twoA5).
         if(g_sbReaderPC && rr.pc==g_sbReaderPC){
           if(PFC) g_duty[PFD_SBREADER]++;
           try{
@@ -11076,15 +9793,15 @@ int main(int argc, char** argv){
             g_tm_ret=rr.pc; g_tm_firing=true; g_tm_primed=false;
             rr.a[7]-=4; try{ mem->write_u32b(rr.a[7], g_tm_ret); }catch(...){}
             rr.a[1]=g_tm_tp; rr.a[0]=g_tm_tp; rr.pc=g_tm_addr; } }
-        // [pf] Ticks busy-wait breaker and dll# step budget are NOT here any more — they run off the
+        // [pf] The Ticks busy-wait breaker and the dll# step budget are not in the hook: they run off the
         // emulator's own cycle count via InterruptManager (see the pf_tick scheduling above).
         // dll# null-method shim: a null service slot behaves as the library's RTS-default.
-        if(!k_nullrtstrap && dllA5 && rr.pc<0x10){   // A-trapped by default; this is the ADPFNONULLTRAP A/B
+        if(!k_nullrtstrap && dllA5 && rr.pc<0x10){   // hook-serviced unless ADPFNULLTRAP arms the A-trap
           if(PFC) g_duty[PFD_NULLRTS]++;
           try{ uint32_t ret=mem->read_u32b(rr.a[7]); rr.a[7]+=4; rr.pc=ret; }catch(...){}
           return;
         }
-        // addm 601/602: RD key pump — reproduce UserInput::AddKey's ring-buffer contract.
+        // RD key pump — reproduce UserInput::AddKey's ring-buffer contract.
         if(rr.pc == 0x01037E20u + 0x53A6){
           if(PFC) g_duty[PFD_KEYPC]++;
           int feed = (g_input_seen ? g_rd_dir : 0);
@@ -11107,14 +9824,13 @@ int main(int argc, char** argv){
         }
       };
       // ===== [pf] DYNAMIC ARMING: install a hook ONLY if this run actually has a duty for it =====
-      // The duty census showed every remaining duty is either module-scoped (Slow Burn's BogSim capture,
-      // the two Bugs intercepts, the twoA5 screen-bounds reader, Daredevil Dan's section-walk bound, the
-      // dll# null-RTS shim), probe-scoped (the island recorder), or event-scoped (Time Manager fire, key
-      // pump). None of them is universal any more: the Ticks/budget duties moved to InterruptManager, the
-      // opcode shims are DELETED (addm 804 — the emulator carries every one of those instructions
-      // now, and the startup probe warns if the linked library does not), and RET_SENT is now
-      // serviced by a host-owned A-line trap. So a run with none of them armed installs NO DEBUG HOOK AT
-      // ALL, which is the user's actual bar. Measured: 42 of the 61 modules reach that state.
+      // Every remaining duty is either module-scoped (Slow Burn's BogSim capture, the two Bugs
+      // intercepts, the twoA5 screen-bounds reader, Daredevil Dan's section-walk bound, the dll#
+      // null-RTS shim), probe-scoped (the island recorder), or event-scoped (Time Manager fire, key
+      // pump). None of them is universal: the Ticks/budget duties run off InterruptManager, the
+      // emulator carries the opcode instructions itself (the startup probe warns if the linked library
+      // does not), and RET_SENT is serviced by a host-owned A-line trap. So a run with none of them
+      // armed installs NO DEBUG HOOK AT ALL — 42 of the 61 modules reach that state.
       // Event-scoped duties install the hook mid-run (see g_pf_install_hook call sites); a hook attached
       // later behaves exactly as one attached at load, because every duty it carries is idempotent and
       // keyed on PC rather than on a count kept since installation.
@@ -11167,7 +9883,7 @@ int main(int argc, char** argv){
             else if(mode==7&&reg==1){ try{ea=mem->read_u32b(rr.pc+2);}catch(...){} have=true; } }
           if(have && ea>=g_sfrd_lo && ea<g_sfrd_hi){ auto&r=g_sfrdBySlot[(int32_t)(ea-g_sfrd_a5)]; r.r++; if(!r.rdPc)r.rdPc=rr.pc; worldTag(r); } }
       }
-      // ==== sfBand live near-JT recorder (ADSFLIVEPROBE, addm 670) — execution-based liveness ====
+      // ==== sfBand live near-JT recorder (ADSFLIVEPROBE) — execution-based liveness ====
       // Record every module-world (A5==a5_mod) near-JT slot actually JUMPED-through or ADDRESS-taken at
       // runtime. Gated + cheap (one read_u16b when active). Executed set is LIVE; static-scan sites never hit
       // are DEAD. Records signed a5_mod-relative offsets (above-a5 island slots >0 + wrapped below-a5 slots <0).
@@ -11181,7 +9897,7 @@ int main(int argc, char** argv){
           if(off>-0x8000 && off<0x8000){ if(jmp) g_sfJumped.insert(off); else g_sfAddrTaken.insert(off); }
         }
       }
-      // ==== ADJTLIVE (addm 719): same recorder, shared-library A5 world, low band only ====
+      // ==== ADJTLIVE: same recorder, shared-library A5 world, low band only ====
       if(g_jtlive && g_jtl_a5 && rr.a[5]==g_jtl_a5){
         uint16_t op=0; try{ op=mem->read_u16b(rr.pc); }catch(...){ op=0; }
         bool jmp  = (op==0x4EAD || op==0x4EED);
@@ -11193,14 +9909,11 @@ int main(int argc, char** argv){
             else   { r.addr++; if(!r.pcAddr)r.pcAddr=rr.pc; if(rr.pc>r.pcAddrMax)r.pcAddrMax=rr.pc; } }
         }
       }
-      // addm 491: Slow Burn sim-gate driver. Capture the live BogSim obj when the gate opens normally, and
+      // Slow Burn sim-gate driver. Capture the live BogSim obj when the gate opens normally, and
       // when it would skip (empty queue) substitute the saved obj + fall through to run one CA generation.
-      if((g_slowburn||sb_gate) && rr.pc==0x0103ED46){ g_sb_ubobj=rr.a[2]; }  // gate opened: A2 = valid BogSim obj (addm 688: was sb_qfix||sb_gate)
+      if((g_slowburn||sb_gate) && rr.pc==0x0103ED46){ g_sb_ubobj=rr.a[2]; }  // gate opened: A2 = valid BogSim obj
       if(sb_gate && rr.pc==0x0103ED44 && rr.a[2]==0 && g_sb_ubobj){ rr.a[2]=g_sb_ubobj; rr.pc=0x0103ED46; return; }
-      // addm 688: the addm-491/494 ADDQ/SUBQ.W #n,An full-width shim was DELETED here — the emulator's exec_5
-      // now does the correct full-32-bit An-destination update itself (upstream f633a6c), so BogSim's backward
-      // board walks commit the CA with no host intervention. See the deletion note at the sb_qfix declaration.
-      // ===== addm 494 (probe, default-off ADSBUBW): track UpdateBoard A3/A4 ranges + acc reads/commits =====
+      // ===== ADSBUBW (probe, default-off): track UpdateBoard A3/A4 ranges + acc reads/commits =====
       if(g_slowburn && CENV("ADSBUBW")){
         static uint32_t minA3=0xFFFFFFFF,maxA3=0,minA4=0xFFFFFFFF,maxA4=0; static long nzread=0,commits=0,iters=0;
         if(rr.pc==0x0103F696){ iters++; if(rr.a[3]<minA3)minA3=rr.a[3]; if(rr.a[3]>maxA3)maxA3=rr.a[3]; if(rr.a[4]<minA4)minA4=rr.a[4]; if(rr.a[4]>maxA4)maxA4=rr.a[4]; }
@@ -11209,14 +9922,14 @@ int main(int argc, char** argv){
         if(rr.pc==0x0103F6C2){ fprintf(stderr,"[sbubw] iters=%ld A3[%08X..%08X] A4[%08X..%08X] accNZread=%ld commitsNZ=%ld\n",iters,minA3,maxA3,minA4,maxA4,nzread,commits);
           minA3=0xFFFFFFFF;maxA3=0;minA4=0xFFFFFFFF;maxA4=0;nzread=0;commits=0;iters=0; }
       }
-      // addm 494 probe (ADSBCC): at DisplayPop8 entry, dump color cache [A5-0x665E][0..23] and dest [obj+0x56]
+      // ADSBCC probe: at DisplayPop8 entry, dump color cache [A5-0x665E][0..23] and dest [obj+0x56]
       if(g_slowburn && CENV("ADSBCC") && rr.pc==0x0103EF92){ static int cc=0; if(cc++<6){ uint32_t a5=rr.a[5],obj=rr.a[3];
         uint32_t cache=a5-0x665E; char b[256]; int p=0;
         for(int i=0;i<12;i++){ uint32_t v=0; try{v=mem->read_u32b(cache+(uint32_t)i*4);}catch(...){} p+=snprintf(b+p,256-p,"%08X ",v); }
         uint32_t dest=0; try{dest=mem->read_u32b(obj+0x56);}catch(...){}
         long dnz=0; if(dest){ for(uint32_t i=0;i<0x10000;i+=1){uint8_t v=0;try{v=mem->read_u8(dest+i);}catch(...){} if(v)dnz++;} }
         fprintf(stderr,"[sbcc #%d] obj=%08X dest[+0x56]=%08X destNZ=%ld | colorcache[0..11]= %s\n",cc,obj,dest,dnz,b); } }
-      // ===== addm 494 (probe, default-off ADSBRNG): Slow Burn RNG / RandFill frozen-RNG test =====
+      // ===== ADSBRNG (probe, default-off): Slow Burn RNG / RandFill frozen-RNG test =====
       // RandFill@0x0103F978 fills a 16384-entry random-offset table [obj+0x72] via jsr [A5+0x7360]
       // (Random(0x800)) & 0x7FE. DoInfect walks that table to pick neighbours to infect. If the RNG is
       // frozen (constant), the table is constant -> deterministic spread -> still-life. Trace: RandFill
@@ -11234,7 +9947,7 @@ int main(int argc, char** argv){
           if(rng_calls==16384){ fprintf(stderr,"[sbrng] RandFill done: %ld draws, distinct-consecutive=%ld, uniq-first16=%d\n",rng_calls,rng_distinct,rng_seen_n); }
         }
       }
-      // ===== addm 463: Bugs 'ADdl' extension-scanner list redirect =====
+      // ===== Bugs 'ADdl' extension-scanner list redirect =====
       // At the LIB510 extension scanner entry, Bugs passes globals = the [A6+0x0E] arg (= blankRgn),
       // whose +0x28 list does not contain the 'ADdl'/'ADmf'/'ADSd' entries the host published at
       // params+0x28. Stamp the AD-globals fields Bugs reads from the host GMParamBlock (params).
@@ -11252,23 +9965,23 @@ int main(int argc, char** argv){
               bl,s,globals,mem->read_u16b(globals+0xE),mem->read_u32b(globals+0x10),mem->read_u32b(globals+0x28)); } }
         }
       }
-      // ===== addm 479: Bugs gate-3 — MacPixels::GetDepth screen-mode depth fix =====
-      // ROOT CAUSE (traced, overturns the addm-477 "resource-database open throw" framing): Bugs'
-      // factory __ct__4BugsFv (@0x0102E420) builds an XCanvas (art compositing surface) whose MacPixels
-      // sub-object (obj+0x44) runs in SCREEN/current-port mode: its pixmap-handle field (MacPixels+0x4)
-      // is 0, which MacPixels::OpenPixels (@0x01005D70) treats as a legitimate "draw to the current
-      // GrafPort" mode (it skips the GetGDevice/SetGDevice offscreen save when +0x4==0). But
-      // MacPixels::GetDepth (@0x01006900) HARDCODES a fallback depth of 1 when +0x4==0 instead of
-      // returning the current screen depth. The factory then does `d=GetDepth(canvas); if(d==1||d==2)
-      // Throw(0x701)` (@0x0102E668..0x0102E690) -> the whole construction unwinds (Bugs->PortableModule
-      // ->AfterDarkModule->XObject), the object is never stored at [A5-0x159A], and every draw dispatches
-      // through the default params block (0x0201B46C) -> vtable+8 = 0x02800000 -> the recurring 02800000
-      // fault, blank. The STR# 5 "Could not find Resource Database file" load addm-477 saw is the shared
-      // exception REPORTER running AFTER the throw (pc=0x0010064E, ~3830 instrs of runtime glue), NOT the
-      // cause: the working dll# modules (Clocks/Nirvana/Rebound) hit the SAME `AD 3.0 Resources:AD 3.0
-      // Sound` FSDispatch fnfErr and render fine, and the host already serves the shared 'AD 3.0 Code'
-      // database (14 LIB510 fragments) at startup. HOST FIX (same class as the addm-377 screen-bounds
-      // reader intercept): when Bugs' MacPixels::GetDepth is entered with a screen-mode canvas (+0x4==0),
+      // ===== Bugs: MacPixels::GetDepth screen-mode depth =====
+      // ROOT CAUSE: Bugs' factory __ct__4BugsFv (@0x0102E420) builds an XCanvas (art compositing
+      // surface) whose MacPixels sub-object (obj+0x44) runs in SCREEN/current-port mode: its
+      // pixmap-handle field (MacPixels+0x4) is 0, which MacPixels::OpenPixels (@0x01005D70) treats as a
+      // legitimate "draw to the current GrafPort" mode (it skips the GetGDevice/SetGDevice offscreen
+      // save when +0x4==0). But MacPixels::GetDepth (@0x01006900) HARDCODES a fallback depth of 1 when
+      // +0x4==0 instead of returning the current screen depth. The factory then does
+      // `d=GetDepth(canvas); if(d==1||d==2) Throw(0x701)` (@0x0102E668..0x0102E690) -> the whole
+      // construction unwinds (Bugs->PortableModule->AfterDarkModule->XObject), the object is never
+      // stored at [A5-0x159A], and every draw dispatches through the default params block (0x0201B46C)
+      // -> vtable+8 = 0x02800000 -> the recurring 02800000 fault, blank. The STR# 5 "Could not find
+      // Resource Database file" load seen alongside it is a red herring: that is the shared exception
+      // REPORTER running AFTER the throw (pc=0x0010064E, ~3830 instrs of runtime glue), not the cause —
+      // the working dll# modules (Clocks/Nirvana/Rebound) hit the SAME `AD 3.0 Resources:AD 3.0 Sound`
+      // FSDispatch fnfErr and render fine, and the host already serves the shared 'AD 3.0 Code'
+      // database (14 LIB510 fragments) at startup. HOST FIX (same class as the screen-bounds reader
+      // intercept above): when Bugs' MacPixels::GetDepth is entered with a screen-mode canvas (+0x4==0),
       // return the host screen depth (8) so the depth-guard passes and construction completes. Screen
       // mode = the canvas draws into the current port = the host framebuffer (8-bit), so this is the
       // correct depth, not a forced value. Name-gated to Bugs (byte-inert for every other module, whose
@@ -11279,27 +9992,26 @@ int main(int argc, char** argv){
         if(self && f4==0){
           uint32_t ret=0; try{ ret=mem->read_u32b(rr.a[7]); }catch(...){}
           uint16_t hostDepth=(uint16_t)(CENV("ADBUGSDEPTHVAL")?strtoul(CENV("ADBUGSDEPTHVAL"),0,0):8);
-          // addm 480 (gate-4 ROOT CAUSE): the real MacPixels::GetDepth begins `moveq #1,D0` which zero-fills
-          // the ENTIRE 32-bit D0 before the low word is set, so the function returns a clean 0x000000dd. The
-          // addm-479 fix preserved D0's incoming high word (`& 0xFFFF0000`), leaking heap-region junk (e.g.
-          // 0x0203xxxx) into D0[31:16]. XCanvas::GetDepth propagates that full D0; SuperBugSprite's art-loader
-          // then combines it into a resource-TYPE value, yielding the garbage FOURCC 0x02033D18 that
-          // Get1Resource(type,1000) throws 0x101 on (gate 4). Clear the whole register to match the real
-          // moveq semantics — a strictly more faithful emulation of the intercepted instruction.
+          // The real MacPixels::GetDepth begins `moveq #1,D0`, which zero-fills the ENTIRE 32-bit D0
+          // before the low word is set, so it returns a clean 0x000000dd. Preserving D0's incoming high
+          // word here leaks heap-region junk (e.g. 0x0203xxxx) into D0[31:16]: XCanvas::GetDepth
+          // propagates the full D0, SuperBugSprite's art-loader combines it into a resource-TYPE value,
+          // and Get1Resource(that garbage FOURCC, 1000) throws 0x101. Clear the whole register to match
+          // the real moveq semantics.
           rr.d[0].u=(uint32_t)hostDepth;                     // D0 = screen depth (8), high word zero (moveq semantics)
           rr.a[7]+=8;                                         // pop retaddr(4)+this(4): callee-clean 1-arg
           rr.pc=ret;
-          if(CENV("ADBUGSLOG")){ static int dn=0; if(dn++<6) fprintf(stderr,"[addm479] Bugs MacPixels::GetDepth(screen-mode self=%08X +4=0) -> %u\n",self,hostDepth); }
+          if(CENV("ADBUGSLOG")){ static int dn=0; if(dn++<6) fprintf(stderr,"[bugs-getdepth] Bugs MacPixels::GetDepth(screen-mode self=%08X +4=0) -> %u\n",self,hostDepth); }
         }
       }
-      // ===== EXPERIMENT (gate-7): Bugs dll# CODE-shell 'ADdl' container fix =====
+      // ===== Bugs dll# CODE-shell 'ADdl' container fix (opt-in, ADBUGSLINK) =====
       // The module's own dll# CODE main (0x001003BE, loaded @0x00100000) is the classic AD-Deluxe module
       // shell. Its per-message handler LinkModule (0x001000AA) calls LookUpEntryPoints('ADdl', container)
       // @0x0010001C where container = shell arg1 = [A6+8]. But the LIB510 module_main (0x01036AA4) enters
       // the shell with [A6+8]=a small message-like value (0x06) and params in [A6+0xC] — so the container
       // arg is bogus, the 'ADdl' scan returns 0, and LinkModule latches XError 0x504 ("requires AD 3.0 or
       // later") into [globals+0x77E]; the dispatcher's error-display loop then derefs a garbage error-string
-      // buffer and faults (gate-7 draw cascade). Serve the real host GMParamBlock (params, which carries the
+      // buffer and faults. Serve the real host GMParamBlock (params, which carries the
       // published ext list at +0x28 incl. the 'ADdl'->addl entry and the +0xE 0x4000 capability flag) as the
       // container when the shell hands LookUpEntryPoints a non-container value. Bugs-gated + opt-out.
       if(bugs_bucket && rr.pc==0x00100028 && CENV("ADBUGSLINK")){
@@ -11310,7 +10022,7 @@ int main(int argc, char** argv){
             fprintf(stderr,"[gate7] LookUpEntryPoints container A3=%08X (bogus) -> params=%08X\n",a3,params); }
         }
       }
-      // EXPERIMENT (gate-7 arg-order): the dll# CODE shell (0x001003BE) reads its container from arg1
+      // Alternative shell arg-order fix: the dll# CODE shell (0x001003BE) reads its container from arg1
       // ([A6+8]) and its message from arg2 ([A6+0xC]), but the LIB510 module_main enters it with arg1=a
       // small message-like word (0x06) and arg2=a wrong struct (0x020300A4, not the host GMParamBlock). At
       // the shell entry (pre-link) rewrite the two pushed args: [A7+4]=host params (container), [A7+8]=the
@@ -11321,30 +10033,17 @@ int main(int argc, char** argv){
         if(CENV("ADBUGSLINKLOG")){ static int sn=0; if(sn++<8)
           fprintf(stderr,"[gate7] shell entry: arg1 %08X->%08X(params) arg2 %08X->%08X\n",a1,params,a2,a1); }
       }
-      // (legacy-cleanup addm 679: the addm-471 SUPER GUY D4-clobber hook at pc 0x0103DB38 — a fixed-PC
-      // sequence-dispose suppression that only ran under ADLEGACYDRIVE — is deleted. It is superseded by
-      // the general S4 inter-shot rebuild (g_reshot_on below), which reconstructs any CompoundSequence
-      // module's self-disposed singleton on the next draw fault, name-/PC-agnostically. ADLEGACYDRIVE and
-      // ADNOSGFIX are retired with it; dead by default in main.)
-      // [sp perf / addm 412] The per-instruction debug hook was calling getenv() ~77x PLUS two
-      // speculative read_u16b() on EVERY emulated instruction. getenv() is an O(environ) linear
-      // scan; ~77 of them per instruction made the hot path ~50x slower than the raw emulator.
-      // That is the sole reason Time Flies / Super Guy never finished init in 300s: their init is a
-      // FINITE but large a64KRLESequence sprite decode + per-pixel nearest-color remap (FigureColor
-      // @0x01029912, 256-entry palette scan) — a bounded ~10^8-instruction compute, not a logic gate.
-      // Cache the env lookups ONCE (env never changes mid-run -> behaviourally identical, zero
-      // regression) and skip the entire diagnostic block when no lever is active.
-      // addm 804: the full hook's three opcode shims are DELETED along with the lean hook's --
-      // register-direct bitfield ops, EXTB.L, SWAP condition codes and CMPA.W width are all correct in
-      // the emulator now (PRs #97 merged, #100 open), and pf_probe_emulator_opcodes() warns at startup if
-      // the linked library is missing any of them. NOTE these three were never probe-gated the way the lean
-      // hook's SWAP/CMPA pair was: they fired unconditionally, so removing them is a real change on this
-      // path and was gated as such (full-hook A/B, ADNOLEANHOOK=1). Levers ADNOBFEMU / ADNOMISCEMU /
-      // ADNOADDXFIX / ADBFLOG / ADMISCLOG are retired with them.
-      // (3) [REMOVED addm 388] The speculative host-side MOVE.L memory-indirect emulation (ADNOMIEMU) was
-      // superseded by the proper 68020 full-extension-word memory-indirect implementation in
-      // M68KEmulator.cc (scratchpad/m68k_68020_full.patch). Verified identical-or-better on all sites.
-      // addm 377: two-A5 screen-BOUNDS reader intercept. When execution reaches the library's
+      // The full hook caches its env lookups once via CENV (env never changes mid-run, so this is
+      // behaviourally identical) and skips the whole diagnostic block when no lever is active: an
+      // uncached getenv() per test, ~77 per instruction, made the hot path ~50x slower than the raw
+      // emulator and is why Time Flies / Super Guy never finished init in 300s — their init is a FINITE
+      // but large a64KRLESequence sprite decode + per-pixel nearest-color remap (FigureColor
+      // @0x01029912, 256-entry palette scan), a bounded ~10^8-instruction compute, not a logic gate.
+      // The register-direct bitfield ops, EXTB.L, SWAP condition codes and CMPA.W width are all correct
+      // in the emulator (resource_dasm PRs #97 merged, #100 open), so the hook carries no host-side
+      // shims for them; pf_probe_emulator_opcodes() warns at startup if the linked library is missing
+      // any of them.
+      // Two-A5 screen-BOUNDS reader intercept. When execution reaches the library's
       // screen-bounds reader entry (resolved robustly via the [A5+0x61C8] island at load time), the
       // MacPlatform/screen-region singletons it depends on are NULL (skipped static ctors) so it would
       // return {0,0,0,0}. Fill its two Rect out-params from the host screen and emulate its `rtd #0x0A`
@@ -11388,11 +10087,11 @@ int main(int argc, char** argv){
             rr.pc,rn,rr.d[0].u,rr.d[6].u,rr.a[0],a0c,rr.a[4]); } }
       // ADCODEAT=hexpc — dump the raw code bytes surrounding a PC the FIRST time execution reaches it.
       // Needed to identify a call site by its real (relocated) opcode rather than by the resource_dasm
-      // listing, which for AD3 near-model CODE resources is +4 shifted (addm 308).
+      // listing, which for AD3 near-model CODE resources is +4 shifted.
       // ADALLOCTRACE=hexA5disp — trace the AD3 library allocator reached via `jsr (disp,A5)`.
       // Resolves the near-JT island at A5+disp (4EF9 <target>), then logs every call's size argument
       // ([A7+4] after the jsr) and the D0 result at the matching return address. Finds the exact
-      // allocation that returns 0 and triggers the runtime's "Out of memory." throw (addm 315/316).
+      // allocation that returns 0 and triggers the runtime's "Out of memory." throw.
       if(dllA5 && CENV("ADALLOCTRACE")){
         static uint32_t tgt=0xFFFFFFFF; static std::vector<std::pair<uint32_t,uint32_t>> pend; static int an=0;
         if(tgt==0xFFFFFFFF){ uint32_t d=(uint32_t)strtoul(CENV("ADALLOCTRACE"),0,16); tgt=0;
@@ -11409,10 +10108,10 @@ int main(int argc, char** argv){
       // address->name table. Format (verified on AD3): 0x80, <len>, <len printable chars>, emitted AFTER
       // the function's code. So the name at address N labels the function ENDING at N, and the NEXT
       // function starts at N+2+len (rounded to even). This gives a full symbol table for the AD3 shared
-      // library in a single run — the single biggest RE capability upgrade available here (addm 318).
+      // library in a single run.
       // ADCODEDUMP="lo:hi:path" — one-shot dump of RELOCATED emulated code to a file, so it can be fed to
       // `m68kdasm --68k`. Beats disassembling the on-disk fragment: A5 displacements and cross-fragment
-      // targets are already patched in, so the listing shows real globals instead of `[A5 + 0x0]` (addm 319).
+      // targets are already patched in, so the listing shows real globals instead of `[A5 + 0x0]`.
       if(CENV("ADCODEDUMP")){ static bool cdone=false;
         if(!cdone){ cdone=true; uint32_t lo=0,hi=0; char path[256]={0};
           if(sscanf(CENV("ADCODEDUMP"),"%x:%x:%255s",&lo,&hi,path)==3 && hi>lo){
@@ -11423,19 +10122,18 @@ int main(int argc, char** argv){
       // low zero-filled arena is a call through an unpopulated function pointer; the CPU then "executes"
       // 0000 0000 words and walks upward until it corrupts something. Instead of chasing these one at a
       // time, log EVERY such transition once per (source) site with the source PC, so a single run
-      // enumerates the whole remaining class (addm 322).
+      // enumerates the whole remaining class.
       // ADA7JUMP=<minbytes> — CLASS-WIDE stack-discipline detector. Logs every instruction after which A7
       // has RISEN by >= minbytes, with the PC that did it. A legitimate rise comes from rts (4), unlk,
       // a movem restore, or an explicit `lea (n,A7),A7` epilogue; anything else is an over-pop, which lays
-      // the next frame on top of a live one and silently corrupts the caller's movem-saved registers
-      // (addm 327 — the mirror of the addm-321 under-pop). Optional ADA7LO/ADA7HI restrict it to a PC range.
-      // Global instruction sequence counter (addm 332): shared by ADWATCH/ADCODEAT so events from
+      // the next frame on top of a live one and silently corrupts the caller's movem-saved registers.
+      // Optional ADA7LO/ADA7HI restrict it to a PC range.
+      // Global instruction sequence counter: shared by ADWATCH/ADCODEAT so events from
       // different probes can be ORDERED within one run instead of inferred across runs.
       static uint64_t g_seq=0; g_seq++;
-      // ADGEOLOG (addm 591): trace GeoBounce's screen position + velocity vector each step. At 0x101118
+      // ADGEOLOG: trace GeoBounce's screen position + velocity vector each step. At 0x101118
       // (immediately after the two position integrations) a4 = the object. Logs Fixed X/Y position
-      // (obj+0xa/+0xe, integer part = screen pixel) and the velocity unit vector (obj+0x38/+0x3c). Used to
-      // prove the translation before/after the FracSin memory-dest-pop fix.
+      // (obj+0xa/+0xe, integer part = screen pixel) and the velocity unit vector (obj+0x38/+0x3c).
       if(CENV("ADGEOLOG") && rr.pc==0x00101118){ static long gc=0;
         uint32_t o=rr.a[4]; int32_t px=0,py=0,vx=0,vy=0;
         try{ px=(int32_t)mem->read_u32b(o+0x0a); py=(int32_t)mem->read_u32b(o+0x0e);
@@ -11445,7 +10143,7 @@ int main(int argc, char** argv){
             gc, (uint32_t)px, px>>16, (uint32_t)py, py>>16, (uint32_t)vx, (uint32_t)vy);
       }
       if(CENV("ADSBHITS")){
-        if(rr.pc==0x0103EF92){ g_sb_displaypop++;   // DisplayPop8 (corrected entry; 0103F16E was DisplayPop16)
+        if(rr.pc==0x0103EF92){ g_sb_displaypop++;   // DisplayPop8 (0103F16E is DisplayPop16)
           // board ptr = [A3+0x24]; count nonzero 4-byte cells + max cell value in first 0x20000 bytes.
           uint32_t bd=0; try{ bd=mem->read_u32b(rr.a[3]+0x24); }catch(...){}
           if(bd){ long nzc=0; uint32_t mx=0; for(uint32_t i=0;i<0x20000;i+=4){ uint32_t v=0; try{v=mem->read_u32b(bd+i);}catch(...){} if(v){nzc++; if(v>mx)mx=v;} }
@@ -11486,8 +10184,8 @@ int main(int argc, char** argv){
       // call chain into a fault site without guessing at JT-island targets from static memory reads alone.
       {
         static const uint32_t PCRINGSZ=G_PCRINGSZ;
-        // addm 775 (promoted, see rd2_hist_dump above): ADRD2HIST=lo:hi buckets every executed
-        // PC in [lo,hi) by 16 bytes; dumped at exit.
+        // ADRD2HIST=lo:hi buckets every executed PC in [lo,hi) by 16 bytes; dumped at exit (see
+        // rd2_hist_dump above).
         if(CENV("ADRD2HIST")){
           static uint32_t hlo=0,hhi=0; static bool hi_init=[&]{ sscanf(CENV("ADRD2HIST"),"%x:%x",&hlo,&hhi);
             g_rd2_hist.assign((hhi>hlo)?((hhi-hlo)>>4)+1:0, 0); atexit(rd2_hist_dump); return true; }(); (void)hi_init;
@@ -11647,10 +10345,10 @@ int main(int argc, char** argv){
             fprintf(stderr,"\n"); } }
       }
       // ADRPSDRIFT (diagnostic, default-off): track A7 relative to the frame pointer A6 across the
-      // body of ArenaControl helper 0x0105738A to localise the +4 A7-drift (addm 447 gate 3). The
-      // epilogue at 0x01057B7C restores with `movem.l (A7)+` (A7-relative), so a callee that pops 4
-      // too few leaves A7 4 bytes low and shifts the register restore. We log every A7 change (as
-      // A7-A6) and dump the profile whenever an invocation reaches the epilogue with drift != 0.
+      // body of ArenaControl helper 0x0105738A to localise a +4 A7 drift. The epilogue at 0x01057B7C
+      // restores with `movem.l (A7)+` (A7-relative), so a callee that pops 4 too few leaves A7 4 bytes
+      // low and shifts the register restore. Every A7 change is logged as A7-A6, and the profile is
+      // dumped whenever an invocation reaches the epilogue with drift != 0.
       if(CENV("ADRPSDRIFT")){
         static uint32_t a6=0; static int32_t prevrel=0x7fffffff;
         static std::vector<std::pair<uint32_t,int32_t>> ring; static int invoc=0; static bool armed=false;
@@ -11675,7 +10373,7 @@ int main(int argc, char** argv){
       }
       if(g_dll_budget>=0 && (int64_t)(++g_dll_used) > g_dll_budget)
         throw std::runtime_error("dll# per-message step budget exceeded (module loop)");
-      // ADDDA7FIX (experimental, addm 464): Daredevil Dan section-iterator callback ABI-drift compensator.
+      // ADDDA7FIX (experimental): Daredevil Dan section-iterator callback ABI-drift compensator.
       // The LIB510_Coord AppendSection/IterateSection iterator (@0x01022E58) invokes its per-element callback
       // with 4 pushed args + its OWN `lea (0x10,A7),A7` cleanup (C/caller-clean convention), but the module
       // callback it is handed (0x01035196) returns via `rtd #0x0008` (Pascal callee-pops 8) -> 8 bytes are
@@ -11684,21 +10382,20 @@ int main(int argc, char** argv){
       // callback-return site (the lea @0x01022E76) undo the callee's extra 8-pop so the frame stays balanced.
       if(CENV("ADDDA7FIX") && (rr.pc==0x01022E76 || rr.pc==0x01022EE8)){ rr.a[7]-=8;
         if(CENV("ADDDA7FIXLOG")) fprintf(stderr,"[dda7fix] pc=%08X A7 corrected -8 -> %08X\n",rr.pc,rr.a[7]); }
-      // ==== addm 472: LIB510_Glue section-reset walk host-bound (Daredevil Dan draw-path over-walk) ====
+      // ==== LIB510_Glue section-reset walk host-bound (Daredevil Dan draw-path over-walk) ====
       // The per-frame section-reset loop @0x0102BB4E walks `for(i=0; i<[obj+0x44]; i++)` reading each element
       // as `A0 = *([obj+0x40] + i*4)` then clearing the section's per-frame flags via `tst.w [A0+0xBA]` @0x0102BB6C.
       // For Daredevil Dan the de-aliased construction stores obj+0x40/obj+0x44 as a begin/END-POINTER pair
       // (begin=0x003FB3E4, end=0x003FB45C) rather than a small COUNT, so the loop's `i < end-pointer` bound is a
       // ~4M limit that never terminates: it runs off the initialised section entries into an uninitialised slot
-      // (garbage 0xE0C01F40) and faults reading [garbage+0xBA]=0xE0C01FFA EVERY frame. The host catches the fault
-      // and still emits a frame, but the draw aborts at the same point each frame -> all 8 frames byte-identical
-      // (distinct=1). Host bound (name/de-alias gated so every other module is byte-identical): at the element
-      // dereference @0x0102BB6C, if the element object A0 is not a mapped pointer (i.e. [A0+0xBA] is unreadable),
-      // the walk has reached the real end of the valid section list -> redirect execution to the loop's own exit
-      // epilogue @0x0102BBA6 (movem restore / unlk / rts). A7 is invariant across the loop, so jumping to the
-      // module's own epilogue is exactly a normal loop-exit; the reset completes and the draw runs to the sprite
-      // composite instead of faulting -> the bike animates. Opt out: ADDDNOWALKFIX.
-      if(rr.pc==0x0102BB4E && CENV("ADDDCOLLIDE")){   // PC test FIRST: getenv here ran on every instruction (52% of RPS init)
+      // (garbage 0xE0C01F40) and faults reading [garbage+0xBA] every frame, aborting the draw at the same
+      // point each frame. Host bound (name/de-alias gated so every other module is byte-identical): at the
+      // element dereference @0x0102BB6C, if the element object A0 is not a mapped pointer (i.e. [A0+0xBA]
+      // is unreadable), the walk has reached the real end of the valid section list -> redirect execution
+      // to the loop's own exit epilogue @0x0102BBA6 (movem restore / unlk / rts). A7 is invariant across
+      // the loop, so jumping to the module's own epilogue is exactly a normal loop-exit; the reset
+      // completes and the draw runs to the sprite composite instead of faulting. Opt out: ADDDNOWALKFIX.
+      if(rr.pc==0x0102BB4E && CENV("ADDDCOLLIDE")){   // PC test FIRST: a getenv on every instruction dominates init cost
         static int wn=0; if(wn++<2){ uint32_t obj=rr.a[3]; uint32_t beg=0,end=0;
           try{beg=mem->read_u32b(obj+0x40);}catch(...){} try{end=mem->read_u32b(obj+0x44);}catch(...){}
           fprintf(stderr,"[ddcollide] walk-entry seq=%llu obj(A3)=%08X begin[+40]=%08X end[+44]=%08X count(if end-ptr)=%d\n",
@@ -11707,7 +10404,7 @@ int main(int argc, char** argv){
             uint32_t ba=0xFFFFFFFF; bool okba=true; try{ba=mem->read_u16b(slot+0xBA);}catch(...){okba=false;}
             fprintf(stderr,"   slot[%2d]@%08X = %08X  [+0xBA]=%s%04X\n",si,beg+si*4,slot,okba?"":"UNMAPPED ",ba&0xFFFF);
             if(!okslot||!okba) break; }
-          // addm 492 probe: dump the whole container as raw words, and probe each 8-byte node (stride 0x18)
+          // Dump the whole container as raw words, and probe each 8-byte node (stride 0x18).
           fprintf(stderr,"   [raw container %08X..%08X]\n",beg,end);
           for(uint32_t a=beg;a<end;a+=4){ uint32_t w=0; bool ok=true; try{w=mem->read_u32b(a);}catch(...){ok=false;}
             fprintf(stderr,"     @%08X = %s%08X\n",a,ok?"":"UNMAPPED ",w); }
@@ -11717,7 +10414,7 @@ int main(int argc, char** argv){
             uint32_t v0=0; bool okv=true; try{v0=mem->read_u32b(w0);}catch(...){okv=false;}
             fprintf(stderr,"   node[%d]@%08X word0=%s%08X word1=%s%08X  sec[+0xBA]=%s%04X sec[+0]=%s%08X\n",
               k,na,o0?"":"UNMAPPED ",w0,o1?"":"UNMAPPED ",w1,okb?"":"UNMAPPED ",ba&0xFFFF,okv?"":"UNMAPPED ",v0); } } }
-      // addm 492: section-array HOST RECONSTRUCTION (ADDDSECFIX, default-off). At the reset-walk entry, build a
+      // Section-array HOST RECONSTRUCTION (ADDDSECFIX, default-off). At the reset-walk entry, build a
       // clean flat array of the real section pointers from the interleaved node list and repoint obj+0x40/+0x44.
       if(g_ddWalkFix && rr.pc==0x0102BB4E && CENV("ADDDSECFIX")){
         uint32_t obj=rr.a[3], beg=0,end=0;
@@ -11764,17 +10461,17 @@ int main(int argc, char** argv){
         static uint32_t prev=0; static std::set<uint32_t> seen; static int nn=0;
         // NOTE: RET_SENT (0x00000FF0) is the host's OWN return sentinel and lives in this low range, so a
         // perfectly correct `jmp (A0)` back to the host looks exactly like a null dispatch. Excluding it is
-        // mandatory — without it the detector reports a false "shared defect" in every module (addm 329).
+        // mandatory — without it the detector reports a false "shared defect" in every module.
         if(rr.pc < 0x2000 && rr.pc != 0x00000FF0 && prev >= 0x00100000 && seen.insert(prev).second && nn++ < 40){
           // Capture the object state at the moment of the bad dispatch: for a C++ virtual call the `this`
           // pointer is still live in A2 (and often A0), so [A2] is the vtable word. A null/garbage vtable
-          // word means a dead or unconstructed object rather than a missing relocation (addm 323/324).
+          // word means a dead or unconstructed object rather than a missing relocation.
           uint32_t vt0=0, vt2=0;
           try{ vt0=mem->read_u32b(rr.a[0]); }catch(...){ vt0=0xDEADDEAD; }
           try{ vt2=mem->read_u32b(rr.a[2]); }catch(...){ vt2=0xDEADDEAD; }
           // Also walk the A6 frame chain: [A6+4] is the current function's RETURN ADDRESS (its caller) and
           // [A6+8] is the first argument as the callee received it, which is exactly the pointer slot that
-          // is arriving as a small integer. [[A6]+4] gives the caller's caller (addm 325).
+          // is arriving as a small integer. [[A6]+4] gives the caller's caller.
           uint32_t ret=0, arg1=0, pret=0, prevfp=0;
           try{ ret=mem->read_u32b(rr.a[6]+4); }catch(...){}
           try{ arg1=mem->read_u32b(rr.a[6]+8); }catch(...){}
@@ -11802,7 +10499,7 @@ int main(int argc, char** argv){
           fprintf(stderr,"[symdump] %u symbols\n",n); } }
       if(CENV("ADCODEAT")){ static uint32_t cpc=(uint32_t)strtoul(CENV("ADCODEAT"),0,16); static int cn=0;
         // ADCODEATA2EQ=<hex>: only fire when A2 holds a specific value. ADCODEAT logs the first few hits,
-        // which is useless when a fault happens on a LATER invocation — this pins the bad one (addm 326).
+        // which is useless when a fault happens on a LATER invocation — this pins the bad one.
         bool cmatch = (rr.pc==cpc);
         if(cmatch && CENV("ADCODEATA2EQ")) cmatch = (rr.a[2]==(uint32_t)strtoul(CENV("ADCODEATA2EQ"),0,16));
         if(cmatch && cn++ < (CENV("ADCODEATMAX")?atoi(CENV("ADCODEATMAX")):4)){ fprintf(stderr,"    [codeat %08X #%d seq=%llu] bytes[pc-0x10..pc+0x10]:",rr.pc,cn,(unsigned long long)g_seq);
@@ -11914,7 +10611,7 @@ int main(int argc, char** argv){
             ph,pm,rd16(pm+0),rd16(pm+2),rd16(pm+4),rd16(pm+6),rd16(pm+8),rd16(pm+0x20)); }
         }
       }
-      if(CENV("ADBUGSG4")){ // gate-4 trace: SuperBugSprite art-loader object + type field
+      if(CENV("ADBUGSG4")){ // ADBUGSG4 trace: SuperBugSprite art-loader object + type field
         auto rd32=[&](uint32_t a){ uint32_t v=0xBADBAD; try{v=mem->read_u32b(a);}catch(...){} return v; };
         auto rd16=[&](uint32_t a){ uint16_t v=0xBAD; try{v=mem->read_u16b(a);}catch(...){} return (uint32_t)v; };
         static int g4=0; static int ga=0,gb=0;
@@ -12020,9 +10717,9 @@ int main(int argc, char** argv){
           uint32_t a=0,n=8; sscanf(CENV("ADHEXDUMP"),"%x:%x",&a,&n);
           fprintf(stderr,"    [hexdump %08X..+%X]",a,n*4);
           for(uint32_t i=0;i<n;i++){ uint32_t v=0; try{v=mem->read_u32b(a+i*4);}catch(...){v=0xBADBAD;} if(i%8==0)fprintf(stderr,"\n      +%03X:",i*4); fprintf(stderr," %08X",v);} fprintf(stderr,"\n"); } }
-      // TEMPORARY addm-747 instrumentation: ADCALLHIST=pc[,pc...] histograms every call that lands on one
-      // of the listed PCs, keyed by (return address, first stack longword, next two shorts) — the lever
-      // that measured the RLESequence recolour fan-out (which caller, which object, which index range).
+      // ADCALLHIST=pc[,pc...] histograms every call that lands on one of the listed PCs, keyed by (return
+      // address, first stack longword, next two shorts) — it measures a call's fan-out: which caller,
+      // which object, which index range.
       if(CENV("ADCALLHIST")){
         static std::vector<uint32_t> cps = [&]{ std::vector<uint32_t> v; const char* s=CENV("ADCALLHIST");
           while(s&&*s){ v.push_back((uint32_t)strtoul(s,0,16)); const char* c=strchr(s,','); s=c?c+1:nullptr; } return v; }();
@@ -12031,15 +10728,15 @@ int main(int argc, char** argv){
           try{ ret=mem->read_u32b(rr.a[7]); a1=mem->read_u32b(rr.a[7]+4); s1=mem->read_u16b(rr.a[7]+8); s2=mem->read_u16b(rr.a[7]+10); }catch(...){}
           g_ch_hist[cp][std::make_tuple(ret,s1,s2)]++; g_ch_objs[cp].insert(a1); break; }
       }
-      // TEMPORARY addm-747 probe: ADSGREG=<hexpc> logs D0..D3 at a PC (max ADSGREGMAX lines). Distinct from
-      // main's ADREGPC, which prints a different register set and does not show D1.
+      // ADSGREG=<hexpc> logs D0..D3 at a PC (max ADSGREGMAX lines). Distinct from main's ADREGPC, which
+      // prints a different register set and does not show D1.
       if(CENV("ADSGREG")){ static uint32_t gpc=(uint32_t)strtoul(CENV("ADSGREG"),0,16); static int gn=0;
         if(rr.pc==gpc && gn++ < (CENV("ADSGREGMAX")?atoi(CENV("ADSGREGMAX")):40))
           fprintf(stderr,"    [sgreg #%d] pc=%08X D0=%08X(%u) D1=%08X(%u) D2=%08X D3=%08X(%u)\n",
             gn,rr.pc,rr.d[0].u,rr.d[0].u,rr.d[1].u,rr.d[1].u,rr.d[2].u,rr.d[3].u,rr.d[3].u); }
-      // TEMPORARY addm-747 probe: ADFAKERET=<hexpc> returns immediately from a caller-cleaned function
-      // (D0=0, pc=[A7], pop the return address). Used to make FigureColor0nbpp free so the module's
-      // natural recolour cadence could be measured without the recolour's own cost feeding the guest clock.
+      // ADFAKERET=<hexpc> returns immediately from a caller-cleaned function (D0=0, pc=[A7], pop the
+      // return address). Makes a function free — e.g. FigureColor0nbpp — so the module's natural cadence
+      // can be measured without that function's own cost feeding the guest clock.
       if(CENV("ADFAKERET")){ static uint32_t rpc=(uint32_t)strtoul(CENV("ADFAKERET"),0,16);
         if(rr.pc==rpc){ try{ rr.pc=mem->read_u32b(rr.a[7]); rr.a[7]+=4; rr.d[0].u=0; }catch(...){} } }
       if(CENV("ADSGP")){
@@ -12065,7 +10762,7 @@ int main(int argc, char** argv){
           fprintf(stderr,"    [stkpc #%d] pc=%08X D2(key)=%08X arg1[A7+4]=%08X arg2[A7+8]=%08X obj:",
             sn,rr.pc,rr.d[2].u,mem->read_u32b(a7+4),arg2);
           for(int i=0;i<32;i+=2){ uint16_t v=0; try{v=mem->read_u16b(arg2+i);}catch(...){} fprintf(stderr," %04X",v);} fprintf(stderr,"\n"); } }
-      // ADJTPROBE: measure the TRUE near-model JT entry format empirically (addm 289). Every time execution
+      // ADJTPROBE: measure the TRUE near-model JT entry format empirically. Every time execution
       // lands inside the TV/JT band, record (pc - tvBase) % 8. If the host's island layout matched the
       // library's expectation, callers would always land on the executable word (offset 0 for our
       // {4EF9,target,0} islands). A spike at a different residue names the real format/stride.
@@ -12077,8 +10774,8 @@ int main(int argc, char** argv){
       }
       // ADLIFEGUARD: Life & All's DoDrawFrame builds+deletes a temporary LifeModule whose virtual-member
       // dtor (@0x01040E7E) does `tst.l [obj+0x7A]; beq skip; else A0=[obj+0x7A]; A0=[A0]; A0=[A0]; jsr[A0]`.
-      // On this secondary instance +0x7A / +0xA are never initialised (a misaligned XHandle-vtable straddle,
-      // addm 405), so the double-deref faults; the fault unwinds and the module's cleanup NULLS its object
+      // On this secondary instance +0x7A / +0xA are never initialised (a misaligned XHandle-vtable
+      // straddle), so the double-deref faults; the fault unwinds and the module's cleanup NULLS its object
       // slot ([A5-0x2320]) -> every later frame dispatches through null and the saver freezes. Sanitize:
       // at the dtor entry, if [obj+0x7A]/[obj+0xA] would fault when dereferenced, zero it so the `beq` skips
       // the virtual dispose. Zero-touch for the main object (its ptrs are valid) and all other modules.
@@ -12090,7 +10787,7 @@ int main(int argc, char** argv){
             if(bad){ try{ mem->write_u32b(obj+fo,0); }catch(...){}
               if(CENV("ADLIFEGUARDLOG")) fprintf(stderr,"[lifeguard] zeroed obj+0x%X (was %08X) dtor obj=%08X\n",(unsigned)fo,p,obj); } } } }
       }
-      // ADBUGSG8 (gate-8 probe, default-off): at each AddNewSequenceBase dispatch site, dump obj + its
+      // ADBUGSG8 (probe, default-off): at each AddNewSequenceBase dispatch site, dump obj + its
       // fields + the [obj+8] method-table pointer so we can see whether obj is a proper polymorphic object
       // (vtable at +0) whose +8 sub-object-vtable is corrupt, vs. a mistyped data buffer.
       if(CENV("ADBUGSG8")){ static int g8n=0; int cap=CENV("ADBUGSG8MAX")?atoi(CENV("ADBUGSG8MAX")):24;
@@ -12107,15 +10804,14 @@ int main(int argc, char** argv){
           for(int i=0;i<=0x14;i+=4) fprintf(stderr," +%X=%08X",i,rd(m8+i)); fprintf(stderr,")\n");
         }
       }
-      // ADWATCH=hexaddr : report the PC that changes the long at <addr>. Added to chase the recurring
-      // stack-address-in-an-A5-global (0x002FFF7E -> A5-5396, seen from three directions: addm 239/240/298),
-      // which is the leading candidate for the dll# cluster defect (a ctor storing a stack temporary).
+      // ADWATCH=hexaddr : report the PC that changes the long at <addr>. Useful for chasing a stack
+      // address stored into an A5 global (e.g. a ctor keeping a stack temporary).
       if(CENV("ADWATCH")){ static uint32_t wa=(uint32_t)strtoul(CENV("ADWATCH"),0,16);
         static uint32_t last=0; static bool init=false; static int hits=0;
         uint32_t cur=0; bool ok=true; try{ cur=mem->read_u32b(wa); }catch(...){ ok=false; }
         if(ok){ if(!init){ last=cur; init=true; }
-          // ADWATCHMAX raises the report cap (default 20). A 20-hit cap silently truncates long runs — it
-          // stopped before the failing invocation and made a reused stack slot look uncorrupted (addm 327).
+          // ADWATCHMAX raises the report cap (default 20). The default cap silently truncates long runs and
+          // can stop before the failing invocation, making a reused stack slot look uncorrupted.
           else if(cur!=last && hits++ < (CENV("ADWATCHMAX")?atoi(CENV("ADWATCHMAX")):20)){
             fprintf(stderr,"    [watch %08X seq=%llu] %08X -> %08X  at pc=%08X (a0=%08X a1=%08X sp=%08X)\n",
               wa,(unsigned long long)g_seq,last,cur,rr.pc,rr.a[0],rr.a[1],rr.a[7]);
@@ -12153,7 +10849,7 @@ int main(int argc, char** argv){
         if(rr.pc==0x01020328 && xn<cap){ xn++;
           fprintf(stderr,"    [xhp GetSize-inner-ret] D0=%08X\n",rr.d[0].u); }
         // Super Guy draw dispatch @0x0103DA2C: dump the singleton [A5-0x2320], its vtable, and the
-        // blank(vt+4)/draw(vt+8) slots to characterize the post-fix draw fault.
+        // blank(vt+4)/draw(vt+8) slots to characterise a draw fault.
         static int dd=0;
         if((rr.pc==0x0103D9DA||rr.pc==0x0103DA32||rr.pc==0x0103DA1E||rr.pc==0x0103DA08) && dd<20){ dd++;
           uint32_t A5=rr.a[5], sing=rd32(A5-0x2320), vt=rd32(sing);
@@ -12216,18 +10912,14 @@ int main(int argc, char** argv){
       }
       // MPW-C modules keep their globals base in A4. Some (Boris) restore A4 from a
       // loader-patched slot that the raw resource leaves 0, so A4 becomes 0 and
-      // [A4+off] derefs low memory (derailing into the framebuffer). Whenever A4 is 0
-      // while executing module code, force it to the module base so globals resolve.
+      // [A4+off] derefs low memory (derailing into the framebuffer). ADFORCEA4 forces
+      // A4 to the module base whenever it is 0 while executing module code.
       //
-      // BUT: this is too blunt. Functions that save A4 (movem A4,-(A7)) and reuse it as a
-      // scratch/NULL pointer legitimately hold A4==0; forcing it derails them. WORSE, near-model
-      // modules that keep A4 as a real GLOBALS base (Nocturnes, Frost & Fire, Dominoes) read
-      // [A4+0] = the module HEADER (0x600E0000 'ADgm') when A4 is wrongly forced to CODE_BASE →
-      // fault. Measured 2026-07-12: the force is now a NET LOSS — OFF cuts Nocturnes/Frost & Fire
-      // 30→0 and Dominoes 6→1 faults with ZERO regression across the whole rendering set
-      // (Spiral Gyra/Shapes/Stained Glass/Mandelbrot/Down the Drain/Confetti all intact). So the
-      // force is now OPT-IN via ADFORCEA4 (the session's other fixes made it obsolete). entry-time
-      // A4 is always CODE_BASE (see call_module).
+      // The force is opt-in because it is too blunt: functions that save A4 (movem A4,-(A7))
+      // and reuse it as a scratch/NULL pointer legitimately hold A4==0, and near-model modules
+      // that keep A4 as a real GLOBALS base (Nocturnes, Frost & Fire, Dominoes) read [A4+0] =
+      // the module HEADER (0x600E0000 'ADgm') when A4 is wrongly forced to CODE_BASE -> fault.
+      // Entry-time A4 is always CODE_BASE (see call_module).
       if(CENV("ADFORCEA4") && rr.a[4]==0 && rr.pc>=CODE_BASE && rr.pc<CODE_BASE+0x100000)
         rr.a[4]=CODE_BASE;
       if(findpg){ static uint32_t seenpc=0;
@@ -12281,14 +10973,14 @@ int main(int argc, char** argv){
       if(watchA){ static uint32_t last=0xDEADBEEF; uint32_t v=0; try{v=mem->read_u32b(watchA);}catch(...){}
         if(v!=last){ fprintf(stderr,"    [%08X] %08X -> %08X at pc=%08X\n",watchA,last,v,rr.pc); last=v;
           // ADWATCHRING=N: also dump the last N executed PCs, so a watch hit names its CALLER, not just
-          // the storing instruction (addm 739: this is what located the code writing over a live object).
+          // the storing instruction.
           if(CENV("ADWATCHRING")){ uint32_t want=(uint32_t)atoi(CENV("ADWATCHRING"));
             uint32_t cnt=std::min<uint32_t>(g_pcringN,std::min<uint32_t>(want,G_PCRINGSZ));
             fprintf(stderr,"      ring:"); for(uint32_t i=0;i<cnt;i++) fprintf(stderr," %08X",g_pcring[(g_pcringN-cnt+i)&(G_PCRINGSZ-1)]);
             fprintf(stderr,"\n"); } } }
       // ADDUMPAT=<hexpc>:<hexlo>:<hexhi>:<path> — dump a memory range the FIRST time PC reaches <hexpc>.
       // ADCODEDUMP fires at the first hook call, so it can only ever see load-time state; this sees the
-      // state at a chosen moment (addm 739: the LIB510 sequence tables as the failing call reads them).
+      // state at a chosen moment.
       if(CENV("ADDUMPAT")){ static bool ddone=false;
         static uint32_t dpc=0,dlo=0,dhi=0; static char dpath[256]={0};
         static bool dparsed=(sscanf(CENV("ADDUMPAT"),"%x:%x:%x:%255s",&dpc,&dlo,&dhi,dpath)==4);
@@ -12307,7 +10999,7 @@ int main(int argc, char** argv){
         fprintf(stderr,"    [PCLOG %08X] arg1=%08X arg2=%08X  *arg1bytes=%02X%02X%02X%02X%02X%02X%02X%02X  deref(*arg1)=%08X derefbytes=%02X%02X%02X%02X%02X%02X%02X%02X  ret=%08X\n",
           pclogA,a1,a2, b[0],b[1],b[2],b[3],b[4],b[5],b[6],b[7], deref, db[0],db[1],db[2],db[3],db[4],db[5],db[6],db[7], (uint32_t)0);
       }
-      // [RD keypump / addm 601] Feed the shared-library UserInput global key-buffer ONCE per
+      // RD keypump: feed the shared-library UserInput global key-buffer ONCE per
       // frame, at UserInput::Do entry (RD-specific library codeBase+0x53A6). Uses the LIVE A5
       // (rr.a[5] == a5_mod when the library runs under RD's two-A5 world) as the buffer base,
       // and reproduces UserInput::AddKey exactly (buffer@A5-0x2B78, head@A5-0x2B7E,
@@ -12370,7 +11062,7 @@ int main(int argc, char** argv){
           string dis; try{ dis=M68KEmulator::disassemble_one(buf,24,rr.pc); }catch(...){ dis="?"; }
           size_t nl=dis.find('\n'); if(nl!=string::npos) dis=dis.substr(0,nl);
           fprintf(stderr,"  %08X: %-42s d0=%08X d1=%08X d3=%08X d5=%08X d6=%08X d7=%08X a0=%08X a2=%08X a3=%08X a4=%08X a6=%08X a7=%08X\n",
-            rr.pc,dis.c_str(),rr.d[0].u,rr.d[1].u,rr.d[3].u,rr.d[5].u,rr.d[6].u,rr.d[7].u,rr.a[0],rr.a[2],rr.a[3],rr.a[4],rr.a[6],rr.a[7]); dn++;  // ADDIS now prints d5/d6/d7 too (sp probe)
+            rr.pc,dis.c_str(),rr.d[0].u,rr.d[1].u,rr.d[3].u,rr.d[5].u,rr.d[6].u,rr.d[7].u,rr.a[0],rr.a[2],rr.a[3],rr.a[4],rr.a[6],rr.a[7]); dn++;  // d5/d6/d7 are included for the sp probe
         }
       }
     });
@@ -12395,18 +11087,18 @@ int main(int argc, char** argv){
   // the module returns to the sentinel (or faults).
   // dll# two-stage driver: real module_main is a PortableModule dispatcher entered with a
   // different ABI than the classic ADgm main. Storage = a persistent Handle the module keeps
-  // its C++ object in; A5 = the shared LIB510 A5 world; SP frame (Lunacy-confirmed):
+  // its C++ object in; A5 = the shared LIB510 A5 world; SP frame:
   //   [SP+0]=ret [SP+4]=storage [SP+8]=message(word) [SP+0xA]=blankRgn [SP+0xE]=params(GMParamBlock)
   bool dllMode = !rez_ids[FOURCC("dll#")].empty() && lib510.loaded && lib510.moduleMain;
   uint32_t dllStorage=0;
-  uint32_t dllStorageSize=0;   // sysz (module instance-storage size); hoisted for the ADINITDIFF storage probe
+  uint32_t dllStorageSize=0;   // sysz (module instance-storage size); used by the ADINITDIFF storage probe
   if(dllMode){
     // The module's per-instance storage block size is declared by its 'sysz' resource (Clocks =
     // 0x7530 = 30000 bytes). The module uses the passed storage arg DIRECTLY as the block base
     // (movea.l (arg),A0; move.l (A0+off) — no handle deref), and writes/reads fields well past a
-    // few hundred bytes (BlockMove to +0x48, fields at +0x1E/+0x28, ...). A too-small block (the
-    // old 0x40) makes those accesses overlap other heap allocations -> garbage/string bytes in
-    // pointer fields -> the "ta S"/"Miss" faults. Allocate the full 'sysz' block and pass it direct.
+    // few hundred bytes (BlockMove to +0x48, fields at +0x1E/+0x28, ...). A too-small block makes
+    // those accesses overlap other heap allocations -> garbage/string bytes in pointer fields, so
+    // allocate the full 'sysz' block and pass it direct.
     uint32_t syszN = 0x8000;
     { auto it=rez.find({FOURCC("sysz"),(int16_t)0});
       if(it==rez.end()&&!rez_ids[FOURCC("sysz")].empty()) it=rez.find({FOURCC("sysz"),rez_ids[FOURCC("sysz")][0]});
@@ -12416,7 +11108,7 @@ int main(int argc, char** argv){
     // Forge the 'aYmm' Gestalt response block (see g_dll_ay). The version-gate reads the word at +0x0C
     // and requires it >= the requested version (0x0300). Report AD 3.0 so the module constructs.
     g_dll_ay=mem->allocate(0x40); mem->memset(g_dll_ay,0,0x40);
-    // addm 465 (Bugs): the ADBUGSEXT globals stamp writes globals+0x10 (the FillRect pattern ptr), but
+    // Bugs: the ADBUGSEXT globals stamp writes globals+0x10 (the FillRect pattern ptr), but
     // g_dll_ay lands ADJACENT to Bugs' globals object so globals+0x10 == aYmm+0xC (the version word).
     // The stamp's pointer high-word (0x0201..) then clobbers the forged 0x0300 -> AfterDarkExists(0x300)
     // fails -> Throw 0x301 BEFORE construction. Relocate the aYmm block to a clear fixed address so the
@@ -12424,7 +11116,7 @@ int main(int argc, char** argv){
     // ADNOBUGSAY opts out. Default-off for every non-Bugs module (bugs_bucket requires ADBUGSEXT).
     if(bugs_bucket && !getenv("ADNOBUGSAY")){
       uint32_t reloc=getenv("ADBUGSAYADDR")?(uint32_t)strtoul(getenv("ADBUGSAYADDR"),0,16):0x02030000; uint32_t asz=getenv("ADBUGSAYSZ")?(uint32_t)strtoul(getenv("ADBUGSAYSZ"),0,16):0x40; try{ mem->allocate_at(reloc,asz); mem->memset(reloc,0,asz); g_dll_ay=reloc; }catch(...){}
-      fprintf(stderr,"[addm465] relocated g_dll_ay -> %08X (bugs aYmm/globals de-overlap)\n", g_dll_ay);
+      fprintf(stderr,"[bugs-ay-reloc] relocated g_dll_ay -> %08X (bugs aYmm/globals de-overlap)\n", g_dll_ay);
     }
     uint16_t ayver = getenv("ADAYVER") ? (uint16_t)strtoul(getenv("ADAYVER"),0,16) : 0x0300;
     mem->write_u16b(g_dll_ay+0x0C, ayver);
@@ -12437,7 +11129,7 @@ int main(int argc, char** argv){
     mem->write_u16b(g_dll_adfd,   0xAAFB);   // trap: ADfd env-check callback -> noErr
     mem->write_u16b(g_dll_adfd+2, 0x4E75);   // rts (reached via relocated return in the handler)
     fprintf(stderr,"[lib510] dll# driver: module_main=%08X A5=%08X storage=%08X (sysz=%X) aYmm=%08X\n", lib510.moduleMain, lib510.a5, dllStorage, syszN, g_dll_ay);
-    // ADJTDIAG (addm 719, diagnostic only): dump the CodeWarrior runtime-helper jump-table window
+    // ADJTDIAG (diagnostic only): dump the CodeWarrior runtime-helper jump-table window
     // [A5+0x20, A5+0x70) — the ten 8-byte JT entries the mounted library's baked `jsr (d16,A5)` sites
     // address (0x42/0x4A/0x52/0x5A/0x62/0x6A = slots 4..9) — next to what the library's OWN "Runtime"
     // fragment says should be there (JUMP index k -> codeBase+jumpOff[k]).
@@ -12467,37 +11159,31 @@ int main(int argc, char** argv){
           f.libName.c_str(),f.jumpOff.size(),lo,hitHelper);
       }
     }
-    // ===== S1 (addm 637): STRUCTURAL __mul32 near-model-helper install — dissolves the addm-477/492/513
-    // per-name gates (Bugs / Daredevil Dan / Clocks / Rebound) AND makes the ADMULSKIP=Nirvana carve-out
-    // automatic, via a structural (name-free) discriminator instead of an argv[1] substring list.
+    // ===== STRUCTURAL __mul32 near-model-helper install: a name-free discriminator that covers the
+    // modules needing the helper (Bugs / Daredevil Dan / Clocks / Rebound) while leaving Nirvana alone.
     //
-    // ROOT (RE'd addm 465/477/492/503/513): CodeWarrior's 68000 target has no 32-bit MUL, so the C runtime
-    // emits `jsr (0x42,A5)` to the near-model __mul32 helper. The canonical caller is the shared LIB510 rand()
-    // LCG (`state=state*0x41C64E6D+0x3039` @0x01017B4C) — it lives in the SHARED library, so the call SITE
-    // exists for every dll# module and cannot itself be the discriminator. The near-model segment JT slot the
-    // absent AD3.0 engine link would have bound to __mul32 is A5+0x42; it is a CROSS-fragment Runtime export,
-    // so it is NOT recoverable from any module's own jumpOff (own-code offsets only — the ITER-I wall, addm
-    // 253-259/9779/10063; a jumpOff-driven full near-JT mis-binds cross-fragment slots, which is why the
-    // reverted ADMODJT default-ON hit a "misalignment", and why a bare near-JT rebuild cannot dissolve this
-    // gate). The host therefore synthesises the helper (a pure-arith MULU.L; identical result for a math
-    // helper), exactly as the four name-gates did.
+    // ROOT: CodeWarrior's 68000 target has no 32-bit MUL, so the C runtime emits `jsr (0x42,A5)` to the
+    // near-model __mul32 helper. The canonical caller is the shared LIB510 rand() LCG
+    // (`state=state*0x41C64E6D+0x3039` @0x01017B4C) — it lives in the SHARED library, so the call SITE
+    // exists for every dll# module and cannot itself be the discriminator. The near-model segment JT slot
+    // the absent AD3.0 engine link would have bound to __mul32 is A5+0x42; it is a CROSS-fragment Runtime
+    // export, so it is NOT recoverable from any module's own jumpOff (own-code offsets only), and a
+    // jumpOff-driven near-JT rebuild mis-binds cross-fragment slots. The host therefore synthesises the
+    // helper (a pure-arith MULU.L; identical result for a math helper).
     //
-    // THE DISCRIMINATOR (near-vs-far model, evidence-grounded): after load, the broken NEAR-model modules
-    // leave A5+0x42 holding the module's own DRLT-self-reloc default `4EF9 0101A6F6` = jmp __sd__6XImageFUi
-    // (the XImage deleting-dtor) — a WRONG binding that makes rand()'s multiply derail into the destructor
-    // (fault 8270014A @0x0101A7AA; addm 513 dumped exactly this for Clocks: slot 02008C42 = 4EF9 0101A6F6).
-    // FAR-model modules (Nirvana) instead leave A5+0x42 bound to a GENUINE library sub-path binding (NOT
-    // 0101A6F6) that must be preserved — overwriting it unbalances init and blanks the module (the exact
-    // reason ADMULSKIP=Nirvana existed). So install the MULU.L helper IFF the slot currently holds the
-    // known-wrong XImage-dtor jmp — this fires for Bugs/Daredevil/Clocks/Rebound with ZERO names and is inert
-    // for Nirvana / Bad Dog! / every other module by construction. Verified (addm 637): the four target
-    // modules render BYTE-IDENTICALLY to their old name-gated renders; Nirvana byte-identical (carve-out now
-    // automatic); ADNOMULAUTO reverts (Clocks -> distinct=1 blank, confirming the fix is load-bearing).
-    // Guarded by !g_reservedJT (a run that already overlaid the slot — ADMULONLY — stays byte-identical).
-    // Default-ON; opt-out ADNOMULAUTO (legacy ADNOBUGSMUL/ADNODDMUL/ADNOCLKMUL also disable it for old A/B).
+    // THE DISCRIMINATOR (near-vs-far model): after load, the broken NEAR-model modules leave A5+0x42
+    // holding the module's own DRLT-self-reloc default `4EF9 0101A6F6` = jmp __sd__6XImageFUi (the XImage
+    // deleting-dtor) — a WRONG binding that makes rand()'s multiply derail into the destructor (fault
+    // 8270014A @0x0101A7AA). FAR-model modules (Nirvana) instead leave A5+0x42 bound to a GENUINE library
+    // sub-path binding (NOT 0101A6F6) that must be preserved — overwriting it unbalances init and blanks
+    // the module. So install the MULU.L helper IFF the slot currently holds the known-wrong XImage-dtor
+    // jmp — this fires for Bugs/Daredevil/Clocks/Rebound with ZERO names and is inert for Nirvana /
+    // Bad Dog! / every other module by construction. Guarded by !g_reservedJT so a run that already
+    // overlaid the slot (ADMULONLY) is untouched. Default-ON; opt-out ADNOMULAUTO (ADNOBUGSMUL /
+    // ADNODDMUL / ADNOCLKMUL also disable it).
     {
       uint32_t slot=lib510.a5+0x42;
-      const uint32_t XIMAGE_SD=0x0101A6F6;                 // the wrong near-model default binding (addm 513)
+      const uint32_t XIMAGE_SD=0x0101A6F6;                 // the wrong near-model default binding
       bool optOut = getenv("ADNOMULAUTO")||getenv("ADNOBUGSMUL")||getenv("ADNODDMUL")||getenv("ADNOCLKMUL");
       uint16_t w0=0; uint32_t tgt=0; try{ w0=mem->read_u16b(slot); tgt=mem->read_u32b(slot+2); }catch(...){}
       if(getenv("ADMULDIAG")){
@@ -12505,35 +11191,32 @@ int main(int argc, char** argv){
           slot,w0,tgt,(int)(w0==0x4EF9&&tgt==XIMAGE_SD),(int)g_reservedJT.count(slot),(int)optOut);
         if(w0==0x4EF9){ fprintf(stderr," tgtcode:"); for(int i=0;i<8;i+=2){ uint16_t v=0; try{v=mem->read_u16b(tgt+(uint32_t)i);}catch(...){} fprintf(stderr," %04X",v); } }
         fprintf(stderr,"\n"); }
-      // *** addm 718c RE (the Nirvana seeded-fault root cause) — READ THIS BEFORE WIDENING THIS TEST. ***
-      // The addm-637 test recognises exactly ONE bad target, the XImage deleting-dtor at 0x0101A6F6, so it
-      // misses every module whose DRLT self-reloc default landed on a different routine. Census of the whole
-      // dll# family (ADMULDIAG, 19 modules): 12 slots EMPTY (w0=0000, untouched), 4 bound to the XImage dtor
-      // (Bugs/Clocks/Daredevil Dan/Rebound — caught), and 2 bound to a module-local routine that the constant
-      // MISSES: Nirvana (0103C952) and Messages 4.0 (01042122). All 6 bound targets open with `4E56 0000`
-      // (LINK A6,#0), and CodeWarrior's __mul32 is a LEAF callee-clean multiply that opens no frame — so a
-      // LINK-target test is the obvious structural generalisation of the constant.
-      // IT IS ALSO WRONG, AND THE MEASUREMENT SAYS SO: with the LINK rule shipped, Nirvana installs the helper
-      // and COLLAPSES to distinct=1 (vs 26 with the install off) — reproducing addm 436's "renders WITHOUT the
-      // island, blanks WITH it" exactly. addm 436's carve-out is CONFIRMED, not stale: for Nirvana that slot
-      // carries a genuine binding a DIFFERENT library sub-path drives, and rand() merely collides with it.
-      // (Messages 4.0 is unaffected either way, 26 distinct in all four configs.) So the constant STAYS.
-      // WHAT THE DERAIL COSTS, precisely, so the next attempt starts from the measurement: rand()@0x01017B4C
-      // is `state = state*0x41C64E6D + 0x3039` issued as `jsr (0x42,A5)`, so for these 2 modules it enters a
-      // deleting destructor with (state, 0x41C64E6D) as (this, __in_chrg): the dtor STORES A VTABLE POINTER AT
-      // ADDRESS `state` — scribbling 4 bytes wherever the LCG state happens to point, which for Nirvana is
-      // inside the framebuffer — then returns 0. Nirvana's rand() has therefore ALWAYS returned 0 and always
-      // corrupted 4 bytes per call; a black framebuffer merely made it silent (the dtor read 0 at this+0x14
-      // and took its null path), and the addm-718 seed made it loud (garbage there -> hard init fault).
-      // THE FIX THAT WOULD WORK is by CALL SITE, not by slot: hook the one `jsr (0x42,A5)` inside rand() (a
-      // fixed shared-library address, identical for every dll# module) and serve the multiply there, leaving
-      // the slot alone for its other user. Not attempted here — it is a separate change from the seed flip.
+      // READ THIS BEFORE WIDENING THIS TEST.
+      // The XIMAGE_SD test recognises exactly ONE bad target, the XImage deleting-dtor at 0x0101A6F6, so
+      // it misses every module whose DRLT self-reloc default landed on a different routine. Across the
+      // dll# family (ADMULDIAG, 19 modules) 12 slots are EMPTY (w0=0000, untouched), 4 are bound to the
+      // XImage dtor (Bugs/Clocks/Daredevil Dan/Rebound — caught), and 2 are bound to a module-local
+      // routine the constant MISSES: Nirvana (0103C952) and Messages 4.0 (01042122). All 6 bound targets
+      // open with `4E56 0000` (LINK A6,#0), while CodeWarrior's __mul32 is a LEAF callee-clean multiply
+      // that opens no frame — so a LINK-target test looks like the structural generalisation.
+      // IT IS WRONG, AND THE MEASUREMENT SAYS SO: under the LINK rule Nirvana installs the helper and
+      // collapses to a static image. For Nirvana that slot carries a genuine binding a DIFFERENT library
+      // sub-path drives, and rand() merely collides with it; overwriting it unbalances init. (Messages
+      // 4.0 is unaffected either way.) So the constant STAYS.
+      // WHAT THE DERAIL COSTS: rand()@0x01017B4C is `state = state*0x41C64E6D + 0x3039` issued as
+      // `jsr (0x42,A5)`, so for those 2 modules it enters a deleting destructor with (state, 0x41C64E6D)
+      // as (this, __in_chrg): the dtor STORES A VTABLE POINTER AT ADDRESS `state`, scribbling 4 bytes
+      // wherever the LCG state happens to point — for Nirvana, inside the framebuffer — then returns 0.
+      // Nirvana's rand() therefore always returns 0 and always corrupts 4 bytes per call.
+      // THE FIX THAT WOULD WORK is by CALL SITE, not by slot: hook the one `jsr (0x42,A5)` inside rand()
+      // (a fixed shared-library address, identical for every dll# module) and serve the multiply there,
+      // leaving the slot alone for its other user.
       // ADMULLINK opts INTO the LINK rule for whoever picks that up (it reproduces the Nirvana collapse).
       bool tgtLinks=false;   // LINK An,#d = 0100 1110 0101 0nnn -> (opcode & 0xFFF8) == 0x4E50
       if(w0==0x4EF9 && getenv("ADMULLINK")){ try{ tgtLinks = ((mem->read_u16b(tgt)&0xFFF8)==0x4E50); }catch(...){} }
-      // addm 719: RETIRED when the authentic layout is live — A5+0x42 now holds the shipped library's
-      // own __mul32 (runtime fragment JUMP index 4) and no fragment's slots alias it any more, so there
-      // is nothing to detect and nothing to forge. ADNOJTBASE re-arms this whole block.
+      // Inert when the authentic layout is live (g_jtAuth): A5+0x42 then holds the shipped library's own
+      // __mul32 (runtime fragment JUMP index 4) and no fragment's slots alias it, so there is nothing to
+      // detect and nothing to forge. ADNOJTBASE re-arms this whole block.
       if(!g_jtAuth && !optOut && !g_reservedJT.count(slot) && w0==0x4EF9 && (tgt==XIMAGE_SD || tgtLinks)){
         static const uint8_t mul[]={0x20,0x2F,0x00,0x04, 0x22,0x2F,0x00,0x08, 0x4C,0x01,0x00,0x00, 0x4E,0x74,0x00,0x08};
         uint32_t mstub=mem->allocate(sizeof(mul)); for(size_t i=0;i<sizeof(mul);i++) mem->write_u8(mstub+i,mul[i]);
@@ -12542,33 +11225,22 @@ int main(int argc, char** argv){
           slot,tgt,(tgt==XIMAGE_SD?" [the XImage.__sd default]":""),mstub);
       }
     }
-    // addm 513 (Clocks + Rebound FLIP): install CodeWarrior's __mul32 near-JT helper at A5+0x42, default-ON by
-    // name. These two dll#/LIB510 modules init-fault with the EXACT shared signature 8270014A @0x0101A7AA —
-    // the SAME rand()/__mul32 derail as Bugs (addm477 gate-2) and Daredevil Dan (addm492). RE (this addm):
-    // rand()@0x01017B4C runs the ANSI-C LCG `state = state*0x41C64E6D + 0x3039` and issues the 32x32 multiply
-    // via `jsr [A5+0x42]`. In the lane40 sweep (no ADMULONLY) that near-JT slot is never overlaid, so it keeps
-    // its base-reloc default `jmp 0x0101A6F6` (= XImage __sd region). The multiply call therefore lands in the
-    // XImage deleting-dtor with (seed, 0x41C64E6D) as (this, __in_chrg); the garbage `this` (0x8270...) makes
-    // __dt__6XImageFv walk a bogus next-ptr chain and deref 0x8270014A at 0x0101A7AA -> hard init fault -> the
-    // module never builds -> the canvas stays all-white (no motion). The named Bugs/DD gates never covered
-    // this family's other rand() users. FIX: same one-slot MULU.L helper island as addm477/492 (identical
-    // (addm 513 Clocks/Rebound __mul32 name-gate REMOVED — folded into the S1 structural install above.)
-    // addm 483 (Bugs, gate-5 host fix): back-fill LIB510_Coord's section-iterator converter near-JT band.
-    // NOT a CW integer helper (the addm-482 "A5+0x5A = __div32/__mod32" premise is DISPROVEN by direct RE):
-    // gate-5's faulting slot A5+0x5A is the Coord section-iterator (IterateSection @0x01022E24) callback, and
-    // the correct target is Coord.jumpOff[11] = ConvertPackNative @0x0101F2CC (link A6,#-4; reads the section
-    // element from [A6+0x10]; 'IHDR'-compares; returns a 16-byte stride in D0 — an EXACT match for the loop's
-    // `jsr (A0); add.l D0,A3` advance-by-returned-stride contract; an integer-divide helper cannot process a
-    // section element nor return a stride). This is the SAME class + SAME code as Daredevil Dan's addm-470
-    // ADDDJTFIX: LIB510_Coord ships DRE=0 (zero DRLT self-relocs) so the host's self-reloc near-JT builder
-    // (line ~1560) NEVER populates Coord's OWN converter island band; the slot stays 0 and `jsr (A0)` on it
-    // walks zero-padding -> wild PC. Coord passes 8 converters via `pea (d16,A5)` (486D): d16 = 0x5A/0x62/0x6A/
-    // 0x72/0x7A/0x82/0x8A/0x92 = jumpOff[11..18]. FIX: scan the Coord fragment's own code for those pea sites
-    // and install A5+d16 = {4EF9, Coord.codeBase + Coord.jumpOff[(d16-2)/8]} — pure host near-JT infrastructure,
-    // identical mechanism to the __mul32 island above. COLLISION-SAFE: slots already populated by another
-    // fragment's self-reloc (observed: 0x6A, 0x8A) are LEFT ALONE (skip if word0 already == 0x4EF9 or reserved)
-    // so those fragments keep their method dispatch. Bugs-gated + opt-out ADNOBUGSCOORDJT -> byte-inert elsewhere.
-    if(!g_jtAuth && bugs_bucket && !getenv("ADNOBUGSCOORDJT")){   // addm 719: subsumed by the authentic layout
+    // Bugs host fix: back-fill LIB510_Coord's section-iterator converter near-JT band. The slot A5+0x5A
+    // is the Coord section-iterator (IterateSection @0x01022E24) callback, not a CW integer helper, and
+    // the correct target is Coord.jumpOff[11] = ConvertPackNative @0x0101F2CC (link A6,#-4; reads the
+    // section element from [A6+0x10]; 'IHDR'-compares; returns a 16-byte stride in D0 — an EXACT match
+    // for the loop's `jsr (A0); add.l D0,A3` advance-by-returned-stride contract; an integer-divide
+    // helper cannot process a section element nor return a stride). Same class as Daredevil Dan's
+    // ADDDJTFIX: LIB510_Coord ships DRE=0 (zero DRLT self-relocs) so the host's self-reloc near-JT
+    // builder never populates Coord's OWN converter island band; the slot stays 0 and `jsr (A0)` on it
+    // walks zero-padding -> wild PC. Coord passes 8 converters via `pea (d16,A5)` (486D): d16 =
+    // 0x5A/0x62/0x6A/0x72/0x7A/0x82/0x8A/0x92 = jumpOff[11..18]. Scan the Coord fragment's own code for
+    // those pea sites and install A5+d16 = {4EF9, Coord.codeBase + Coord.jumpOff[(d16-2)/8]} — pure host
+    // near-JT infrastructure, identical mechanism to the __mul32 island above. COLLISION-SAFE: slots
+    // already populated by another fragment's self-reloc (observed: 0x6A, 0x8A) are LEFT ALONE (skip if
+    // word0 already == 0x4EF9 or reserved) so those fragments keep their method dispatch. Bugs-gated +
+    // opt-out ADNOBUGSCOORDJT -> byte-inert elsewhere.
+    if(!g_jtAuth && bugs_bucket && !getenv("ADNOBUGSCOORDJT")){   // subsumed by the authentic layout
       // Locate the Coord fragment: the lib510 frag whose code range contains IterateSection (0x01022E24),
       // robust to libName spelling (AD3_* vs LIB510_* import sets).
       AdLibFragment* coord=nullptr;
@@ -12588,15 +11260,15 @@ int main(int argc, char** argv){
             uint32_t slot=lib510.a5+d16;
             uint16_t w0=0; try{ w0=mem->read_u16b(slot); }catch(...){}
             bool collide = g_reservedJT.count(slot) || w0==0x4EF9;
-            // In the single-A5 world (addm-393 aliasing) some Coord converter cells (observed 0x6A=IHDRCount,
-            // 0x8A) are ALSO written by another fragment's DRLT self-reloc builder (line ~1560), leaving a
-            // non-Coord method in the cell. Coord's `pea (d16,A5)` is the LEGITIMATE consumer of these cells on
-            // the section-iterator path, so OVERWRITE with Coord's converter (Bugs-gated, so no cross-module
+            // In the single-A5 world some Coord converter cells (observed 0x6A=IHDRCount, 0x8A) are ALSO
+            // written by another fragment's DRLT self-reloc builder, leaving a non-Coord method in the
+            // cell. Coord's `pea (d16,A5)` is the LEGITIMATE consumer of these cells on the
+            // section-iterator path, so OVERWRITE with Coord's converter (Bugs-gated, so no cross-module
             // reach). ADBUGSCOORDJTNOFORCE restores the collision-preserving skip for A/B diagnostics.
             if(collide && getenv("ADBUGSCOORDJTNOFORCE")){
               skipped++;
               if(getenv("ADBUGSCOORDJTLOG"))
-                fprintf(stderr,"[addm483] Coord near-JT A5+0x%X SKIP (collision, w0=%04X) site=%08X k=%u\n",
+                fprintf(stderr,"[bugs-coord-jt] Coord near-JT A5+0x%X SKIP (collision, w0=%04X) site=%08X k=%u\n",
                   d16,w0,(uint32_t)(coord->codeBase+i),k);
               continue;
             }
@@ -12604,37 +11276,37 @@ int main(int argc, char** argv){
             try{ mem->write_u16b(slot,0x4EF9); mem->write_u32b(slot+2,method); g_reservedJT.insert(slot); }catch(...){}
             installed++;
             if(getenv("ADBUGSCOORDJTLOG"))
-              fprintf(stderr,"[addm483] Coord near-JT A5+0x%X (@%08X) -> {4EF9,%08X} (jumpOff[%u]=%X) site=%08X%s\n",
+              fprintf(stderr,"[bugs-coord-jt] Coord near-JT A5+0x%X (@%08X) -> {4EF9,%08X} (jumpOff[%u]=%X) site=%08X%s\n",
                 d16,slot,method,k,coord->jumpOff[k],(uint32_t)(coord->codeBase+i),collide?"  [overwrote collision]":"");
           }
         }
-        fprintf(stderr,"[addm483] Bugs Coord converter near-JT back-fill: installed=%d skipped(collision)=%d oob=%d (Coord code=%08X)\n",
+        fprintf(stderr,"[bugs-coord-jt] Bugs Coord converter near-JT back-fill: installed=%d skipped(collision)=%d oob=%d (Coord code=%08X)\n",
           installed,skipped,oob,coord->codeBase);
-      } else fprintf(stderr,"[addm483] Bugs Coord back-fill: Coord fragment NOT found (skipped)\n");
+      } else fprintf(stderr,"[bugs-coord-jt] Bugs Coord back-fill: Coord fragment NOT found (skipped)\n");
     }
-    // ===== addm 486 (Bugs, gate-8 host fix): GENERALIZED module-fragment near-JT pea-callback back-fill.
-    // ROOT CAUSE (root-caused to the byte): gate-8's draw fault `jsr [[obj+8]+4]` inside
-    // AddNewSequenceBase dispatches on element+8, a sub-object pointer that is 0 because the element
-    // array was never constructed. The MultiSequence ctor (@0x01032A20) builds its 4 inline elements via
-    // `pea $1ea(a5) ; jsr [A5+0x4328]` — passing the ELEMENT CONSTRUCTOR (@0x01032B1A, which does
-    // `lea 8(this),a2; jsr [A5+0x5D58]` = construct the sub-object AT element+8) as a callback whose
-    // address is the near-JT slot A5+0x1EA. But A5+0x1EA is ALL ZEROS: the host builds a module near-JT
-    // slot only when it is the target of a direct `jsr (d16,A5)`, NOT when its ADDRESS is taken by a
-    // `pea (d16,A5)` callback-pass. So `jsr (A5+0x1EA)` executes zero-padding -> construction never runs
-    // -> element+8 stays 0 -> the later virtual dispatch faults. This is the SAME single-A5 near-JT class
-    // as gate-5/Coord (addm-483) and Daredevil Dan (addm-470/ADDDJTFIX) — but for the MODULE fragment
-    // rather than a library fragment. The correct target is codeBase + jumpOff[(d16-2)/8], VERIFIED
-    // against the ONE built module slot A5+0x1E2 (=__sd, jumpOff[60]=0x46A8 -> 0x01032AC8, exact match).
-    // FIX (generalize addm-483 to lib510.modFrags): scan each module fragment's own code for `pea (d16,A5)`
-    // (486D) near-JT sites ((d16&7)==2, d16<0x3800) and install A5+d16 = {4EF9, codeBase+jumpOff[(d16-2)/8]}
-    // ONLY when the slot is empty (never overwrite a built 4EF9 / reserved slot). Bugs-gated + opt-out
-    // ADNOBUGSCTORJT. This also makes the addm-485 [A5+0x4328] helper repoint UNNECESSARY and HARMFUL: the
-    // element ctor is a 1-ARG function (`addq #4,a7`), correctly paired with the 1-arg FORWARD in-place
-    // construct helper 0x0100BFD0 that [A5+0x4328] already holds; addm-485 mis-repointed it to the 2-arg
-    // REVERSE destroy loop 0x0100BF6A (which reads a bogus count cookie at [base-4] of the inline array).
-    // So when this fix is armed, the addm-485 repoint is auto-disabled (unless ADFORCEBUGSVEC).
+    // ===== Bugs host fix: GENERALIZED module-fragment near-JT pea-callback back-fill.
+    // ROOT CAUSE: the draw fault `jsr [[obj+8]+4]` inside AddNewSequenceBase dispatches on element+8, a
+    // sub-object pointer that is 0 because the element array was never constructed. The MultiSequence
+    // ctor (@0x01032A20) builds its 4 inline elements via `pea $1ea(a5) ; jsr [A5+0x4328]` — passing the
+    // ELEMENT CONSTRUCTOR (@0x01032B1A, which does `lea 8(this),a2; jsr [A5+0x5D58]` = construct the
+    // sub-object AT element+8) as a callback whose address is the near-JT slot A5+0x1EA. But A5+0x1EA is
+    // ALL ZEROS: the host builds a module near-JT slot only when it is the target of a direct
+    // `jsr (d16,A5)`, NOT when its ADDRESS is taken by a `pea (d16,A5)` callback-pass. So
+    // `jsr (A5+0x1EA)` executes zero-padding -> construction never runs -> element+8 stays 0 -> the later
+    // virtual dispatch faults. Same single-A5 near-JT class as the Coord back-fill above and Daredevil
+    // Dan's ADDDJTFIX, but for the MODULE fragment rather than a library fragment. The correct target is
+    // codeBase + jumpOff[(d16-2)/8], verified against the ONE built module slot A5+0x1E2 (=__sd,
+    // jumpOff[60]=0x46A8 -> 0x01032AC8, exact match). Scan each module fragment's own code for
+    // `pea (d16,A5)` (486D) near-JT sites ((d16&7)==2, d16<0x3800) and install
+    // A5+d16 = {4EF9, codeBase+jumpOff[(d16-2)/8]} ONLY when the slot is empty (never overwrite a built
+    // 4EF9 / reserved slot). Bugs-gated + opt-out ADNOBUGSCTORJT. This also makes the [A5+0x4328] helper
+    // repoint below UNNECESSARY and HARMFUL: the element ctor is a 1-ARG function (`addq #4,a7`),
+    // correctly paired with the 1-arg FORWARD in-place construct helper 0x0100BFD0 that [A5+0x4328]
+    // already holds, whereas that repoint aims it at the 2-arg REVERSE destroy loop 0x0100BF6A (which
+    // reads a bogus count cookie at [base-4] of the inline array). So when this fix is armed, the repoint
+    // is auto-disabled (unless ADFORCEBUGSVEC).
     int g_ctorjt_installed=0;
-    if(!g_jtAuth && bugs_bucket && !getenv("ADNOBUGSCTORJT")){    // addm 719: subsumed by the authentic layout
+    if(!g_jtAuth && bugs_bucket && !getenv("ADNOBUGSCTORJT")){    // subsumed by the authentic layout
       auto backfill=[&](AdLibFragment& f){
         const std::string& cb=f.code;
         for(size_t i=0;i+3<cb.size();i+=2){
@@ -12646,34 +11318,33 @@ int main(int argc, char** argv){
             if(w0==0x4EF9 || g_reservedJT.count(slot)) continue;             // already built -> leave alone
             uint32_t method=f.codeBase + f.jumpOff[k];
             try{ mem->write_u16b(slot,0x4EF9); mem->write_u32b(slot+2,method); g_reservedJT.insert(slot); g_ctorjt_installed++;
-              if(getenv("ADBUGSCTORJTLOG")) fprintf(stderr,"[addm486] mod near-JT A5+0x%X (@%08X) -> {4EF9,%08X} (%s jumpOff[%u]=%X) site=%08X\n",
+              if(getenv("ADBUGSCTORJTLOG")) fprintf(stderr,"[bugs-ctor-jt] mod near-JT A5+0x%X (@%08X) -> {4EF9,%08X} (%s jumpOff[%u]=%X) site=%08X\n",
                 d16,slot,method,f.libName.c_str(),k,f.jumpOff[k],(uint32_t)(f.codeBase+i)); }catch(...){}
           }
         }
       };
       for(auto& f : lib510.modFrags) backfill(f);
-      fprintf(stderr,"[addm486] Bugs module near-JT pea-callback back-fill: installed=%d slot(s)\n",g_ctorjt_installed);
+      fprintf(stderr,"[bugs-ctor-jt] Bugs module near-JT pea-callback back-fill: installed=%d slot(s)\n",g_ctorjt_installed);
     }
-    // addm 485 (Bugs, gate-7/draw): the msg=3 draw path derails on a CodeWarrior array-destructor
-    // ABI mismatch. LadybugSprite::DoAction (@0x01032A20) destroys an in-place sub-array of
-    // MultiSequence elements via `pea export_57 ; jsr [A5+0x4328]` where [A5+0x4328] resolves to the
-    // 1-ARG "destroy-array" helper @0x0100BFD0 (pushes ONE arg/element). But export_57 (the module's
-    // own JUMP-table slot) was mis-resolved to __sd__13MultiSequenceFUi (the 2-ARG scalar-DELETING
-    // destructor @0x01032AC8, epilogue `addq.w #8,A7`) instead of the 1-ARG complete destructor
-    // ~MultiSequence = __dt__13MultiSequenceFv (@0x01032B84, epilogue `addq.w #4,A7`). Each element
-    // call over-pops A7 by 4; after the 4-element loop the helper's OWN epilogue then pops a wild
-    // return address off the misaligned stack -> `jmp (A0)` into low memory -> the zero-walk that
+    // ADBUGSDTOR (Bugs, opt-in experiment): the msg=3 draw path derails on a CodeWarrior
+    // array-destructor ABI mismatch. LadybugSprite::DoAction (@0x01032A20) destroys an in-place
+    // sub-array of MultiSequence elements via `pea export_57 ; jsr [A5+0x4328]` where [A5+0x4328]
+    // resolves to the 1-ARG "destroy-array" helper @0x0100BFD0 (pushes ONE arg/element). But export_57
+    // (the module's own JUMP-table slot) resolves to __sd__13MultiSequenceFUi (the 2-ARG
+    // scalar-DELETING destructor @0x01032AC8, epilogue `addq.w #8,A7`) instead of the 1-ARG complete
+    // destructor ~MultiSequence = __dt__13MultiSequenceFv (@0x01032B84, epilogue `addq.w #4,A7`). Each
+    // element call over-pops A7 by 4; after the 4-element loop the helper's OWN epilogue then pops a
+    // wild return address off the misaligned stack -> `jmp (A0)` into low memory -> the zero-walk that
     // lands in the module's classic AD-Deluxe CODE shell @0x00100000, whose LinkModule then latches
-    // XError 0x504 and derails the error path (the addm-484 symptom). Semantics: DoAction destroys a
-    // SUB-array of block `this` in place, so the elements must NOT be freed -> the 1-arg ~MultiSequence
-    // (__dt, no operator delete) is correct, not the deleting __sd. FIX: repoint the export_57 thunk
-    // (a `jmp __sd` slot in the A5 data band) from __sd (0x01032AC8) to __dt (0x01032B84). Robust to
-    // A5-offset: scan the A5 data band for the exact 6-byte thunk {4EF9, 0x01032AC8} and rewrite the
-    // target longword. Bugs-gated + opt-out ADNOBUGSDTOR. NOTE: addresses are the fixed load addrs of
-    // Bugs' MODULE_129 (codeBase 0x0102E420); the scan/compare makes it inert if they ever move.
-    // Experiment ADBUGSDTOR (opt-in, INEFFECTIVE ALONE): repoint the MultiSequence export_57 thunk
-    // __sd->__dt. Does NOT move the derail because the faulting loop destroys XObjects via a DIFFERENT
-    // slot (XObject __sd @0x0100439E), proving the mismatch is systematic, not one export.
+    // XError 0x504 and derails the error path. Semantics: DoAction destroys a SUB-array of block `this`
+    // in place, so the elements must NOT be freed -> the 1-arg ~MultiSequence (__dt, no operator delete)
+    // is correct, not the deleting __sd. This lever repoints the export_57 thunk (a `jmp __sd` slot in
+    // the A5 data band) from __sd (0x01032AC8) to __dt (0x01032B84). Robust to A5-offset: scan the A5
+    // data band for the exact 6-byte thunk {4EF9, 0x01032AC8} and rewrite the target longword.
+    // Bugs-gated + opt-out ADNOBUGSDTOR. NOTE: addresses are the fixed load addrs of Bugs' MODULE_129
+    // (codeBase 0x0102E420); the scan/compare makes it inert if they ever move. INEFFECTIVE ALONE: it
+    // does NOT move the derail, because the faulting loop destroys XObjects via a DIFFERENT slot
+    // (XObject __sd @0x0100439E) — the mismatch is systematic, not one export.
     if(bugs_bucket && getenv("ADBUGSDTOR")){
       const uint32_t SD=0x01032AC8, DT=0x01032B84;
       uint32_t lo = (lib510.a5>0x9000)? lib510.a5-0x8000 : 0x00010000;
@@ -12682,32 +11353,29 @@ int main(int argc, char** argv){
       for(uint32_t a=lo; a+6<=hi; a+=2){
         uint16_t w0=0; uint32_t tgt=0;
         try{ w0=mem->read_u16b(a); tgt=mem->read_u32b(a+2); }catch(...){ continue; }
-        if(w0==0x4EF9 && tgt==SD){ try{ mem->write_u32b(a+2, DT); fixed++; if(getenv("ADBUGSDTORLOG")) fprintf(stderr,"[addm485] export_57 thunk @%08X: jmp __sd(%08X) -> jmp __dt(%08X)\n",a,SD,DT); }catch(...){} }
+        if(w0==0x4EF9 && tgt==SD){ try{ mem->write_u32b(a+2, DT); fixed++; if(getenv("ADBUGSDTORLOG")) fprintf(stderr,"[bugs-abi] export_57 thunk @%08X: jmp __sd(%08X) -> jmp __dt(%08X)\n",a,SD,DT); }catch(...){} }
       }
-      fprintf(stderr,"[addm485] Bugs export_57 __sd->__dt: %d thunk(s) (A5=%08X)\n",fixed,lib510.a5);
+      fprintf(stderr,"[bugs-abi] Bugs export_57 __sd->__dt: %d thunk(s) (A5=%08X)\n",fixed,lib510.a5);
     }
-    // addm 485 (Bugs, gate-7/draw): the systematic CodeWarrior array-destructor ABI mismatch. Bugs'
-    // draw path destroys object arrays through per-class deleting destructors __sd(this,__in_chrg)
-    // (2-arg, epilogue `addq #8,A7`), which the module hands to a runtime array-destroy helper. But
-    // the CRLT/near-JT import for that helper resolves to the 1-ARG "destroy-array" loop @0x0100BFD0
-    // (pushes ONE arg/element) instead of the 2-ARG loop @0x0100BF6A (pushes {this,__in_chrg=2}). The
-    // 1-arg helper under-pushes vs the 2-arg __sd's `addq #8,A7`, so each element over-pops A7 by 4;
-    // the loop's own epilogue then pops a wild return address -> the zero-walk into the classic CODE
-    // shell -> XError 0x504 (the addm-484 symptom). The module's OWN convention is 2-arg: MultiSequence
-    // ::__dt destroys its sub-array via [A5+0x4330]->0x0100C018 (a 2-ARG reverse loop) with a 2-arg
-    // __sd. So the 1-arg helper @0x0100BFD0 is never legitimately paired with a 2-arg __sd; every A5
-    // import thunk that resolves the array-destroy helper to it is mis-bound. FIX: repoint every A5-band
-    // thunk `jmp 0x0100BFD0` -> `jmp 0x0100BF6A` (the adjacent 2-arg forward loop), restoring A7
-    // discipline for all such sites at once. Bugs-gated + opt-out ADNOBUGSVEC.
-    // addm 486: when the module near-JT back-fill is armed (g_ctorjt_installed>0) the element ctor slot is
-    // populated and the CONSTRUCT helper [A5+0x4328]=0x0100BFD0 is correctly paired with the 1-arg element
-    // ctor -> the addm-485 repoint (which turns the forward-construct loop into a reverse-destroy loop) is
-    // both unnecessary and HARMFUL. Auto-disable it unless the operator forces it with ADFORCEBUGSVEC.
-    // addm 719: the authentic layout supersedes the addm-486 back-fill, which is what used to disable this
-    // repoint. Gating the back-fill off without gating THIS off re-arms a workaround the layout has already
-    // made unnecessary and harmful (measured: it repoints A5+0x4328 from the 1-arg forward in-place
-    // construct helper 0x0100BFD0 to the 2-arg reverse destroy loop 0x0100BF6A, so Bugs' element array is
-    // never constructed and draw faults on the unconstructed element's virtual dispatch).
+    // Bugs draw path: the systematic CodeWarrior array-destructor ABI mismatch. Bugs' draw path destroys
+    // object arrays through per-class deleting destructors __sd(this,__in_chrg) (2-arg, epilogue
+    // `addq #8,A7`), which the module hands to a runtime array-destroy helper. But the CRLT/near-JT
+    // import for that helper resolves to the 1-ARG "destroy-array" loop @0x0100BFD0 (pushes ONE
+    // arg/element) instead of the 2-ARG loop @0x0100BF6A (pushes {this,__in_chrg=2}). The 1-arg helper
+    // under-pushes vs the 2-arg __sd's `addq #8,A7`, so each element over-pops A7 by 4; the loop's own
+    // epilogue then pops a wild return address -> the zero-walk into the classic CODE shell -> XError
+    // 0x504. The module's OWN convention is 2-arg: MultiSequence::__dt destroys its sub-array via
+    // [A5+0x4330]->0x0100C018 (a 2-ARG reverse loop) with a 2-arg __sd. So the 1-arg helper @0x0100BFD0
+    // is never legitimately paired with a 2-arg __sd; every A5 import thunk that resolves the
+    // array-destroy helper to it is mis-bound. The fix repoints every A5-band thunk `jmp 0x0100BFD0` ->
+    // `jmp 0x0100BF6A` (the adjacent 2-arg forward loop), restoring A7 discipline for all such sites at
+    // once. Bugs-gated + opt-out ADNOBUGSVEC.
+    // The repoint is also DISABLED whenever the module near-JT back-fill is armed (g_ctorjt_installed>0)
+    // or the authentic JT layout is live (g_jtAuth): both leave the element ctor slot populated so the
+    // CONSTRUCT helper [A5+0x4328]=0x0100BFD0 is correctly paired with the 1-arg element ctor, and the
+    // repoint would turn that forward in-place construct loop into the 2-arg reverse destroy loop
+    // 0x0100BF6A — Bugs' element array is then never constructed and the draw faults on the
+    // unconstructed element's virtual dispatch. ADFORCEBUGSVEC forces it anyway.
     if(bugs_bucket && !g_jtAuth && !getenv("ADNOBUGSVEC") && !(g_ctorjt_installed>0 && !getenv("ADFORCEBUGSVEC"))){
       const uint32_t ONEARG=0x0100BFD0, TWOARG=0x0100BF6A;
       uint32_t lo = (lib510.a5>0x9000)? lib510.a5-0x8000 : 0x00010000;
@@ -12716,9 +11384,9 @@ int main(int argc, char** argv){
       for(uint32_t a=lo; a+6<=hi; a+=2){
         uint16_t w0=0; uint32_t tgt=0;
         try{ w0=mem->read_u16b(a); tgt=mem->read_u32b(a+2); }catch(...){ continue; }
-        if(w0==0x4EF9 && tgt==ONEARG){ try{ mem->write_u32b(a+2, TWOARG); fixed++; if(getenv("ADBUGSVECLOG")) fprintf(stderr,"[addm485] array-destroy helper thunk @%08X: jmp 1arg(%08X) -> jmp 2arg(%08X)\n",a,ONEARG,TWOARG); }catch(...){} }
+        if(w0==0x4EF9 && tgt==ONEARG){ try{ mem->write_u32b(a+2, TWOARG); fixed++; if(getenv("ADBUGSVECLOG")) fprintf(stderr,"[bugs-abi] array-destroy helper thunk @%08X: jmp 1arg(%08X) -> jmp 2arg(%08X)\n",a,ONEARG,TWOARG); }catch(...){} }
       }
-      fprintf(stderr,"[addm485] Bugs array-destroy helper ABI fix: %d thunk(s) repointed 1arg->2arg (A5=%08X)\n",fixed,lib510.a5);
+      fprintf(stderr,"[bugs-abi] Bugs array-destroy helper ABI fix: %d thunk(s) repointed 1arg->2arg (A5=%08X)\n",fixed,lib510.a5);
     }
     // ADSERVEIMP (reconnaissance): Art Critic's init virtual-call chain (module 0x0103D8B0:
     // jsr [[A3]+0x78]) targets an UNRESOLVED cross-fragment virtual method whose vtable slot the
@@ -12741,17 +11409,17 @@ int main(int argc, char** argv){
     g_cm_phase=label;
     draw_ops=0;
     if(dllMode){
-      // two-A5 model (addm 363b): a large 4.0 module runs with A5 = its OWN module world so its 65KB of
-      // globals are s16-addressable off a5_mod. Library/AD3 modules keep the shared lib510.a5 (unchanged).
+      // two-A5 model: a large 4.0 module runs with A5 = its OWN module world so its 65KB of
+      // globals are s16-addressable off a5_mod. Library/AD3 modules keep the shared lib510.a5.
       rr.a[7]=STACK_TOP; rr.a[5]= lib510.twoA5 ? lib510.a5_mod : lib510.a5; rr.a[4]=lib510.modFrags[0].codeBase;
       // AD3 dll# module_main ABI (recovered from module_main arg reads): the DEEPEST arg
       // (A6+0x12) is the persistent STORAGE block — module_main does `A0=(A6+0x12); this =
       // (A5-0x3E54) = [A0]` i.e. reads its this-ptr from storage[0] (0 => construct via factory,
       // non-0 => reuse). args at A6+0x08/0x0E are immediately overwritten by module globals (scratch).
-      // So storage must be pushed FIRST (deepest) to land at A6+0x12; a wrong slot made the module
-      // read params[0] (=garbage 0x0005001E) as this-ptr and skip construction.
+      // So storage must be pushed FIRST (deepest) to land at A6+0x12; from a wrong slot the module
+      // reads params[0] (garbage) as this-ptr and skips construction.
       rr.push_u32(mem, dllStorage);        // A6+0x12  = storage ([0] = this-ptr, zeroed => construct)
-      rr.push_u32(mem, blankRgn);          // A6+0x0E  (Bugs' AD-globals fields patched at scanner, addm 463)
+      rr.push_u32(mem, blankRgn);          // A6+0x0E  (Bugs' AD-globals fields patched at scanner)
       rr.push_u16(mem, (uint16_t)msg);     // A6+0x0C  = message selector
       rr.push_u32(mem, params);            // A6+0x08  (scratch/overwritten)
       rr.push_u32(mem, RET_SENT);          // A6+0x04  return
@@ -12760,13 +11428,13 @@ int main(int argc, char** argv){
       rr.a[7] = STACK_TOP; rr.a[5] = A5;
       rr.a[4] = CODE_BASE;  // MPW near-model globals base: some modules (Boris) jsr [A4+off] w/o setting A4
       rr.push_u32(mem, glob); rr.push_u32(mem, blankRgn);   // A2 = blank RgnHandle (not the port)
-      // ADNOCTARG1 (addm 443 experiment): Nocturnes' DoDrawFrame/DoBlank read their GAME OBJECT from
+      // ADNOCTARG1 (experiment): Nocturnes' DoDrawFrame/DoBlank read their GAME OBJECT from
       // module_main arg1 ([A6+8]) via [arg1] (pairArray@+0, count@+6, sprites@+0x306/+0x30A). The default
       // arg1 = params (GMParamBlock) whose [+0]=controlValues (0x0064000C) is a garbage pointer, so the
       // native DRAWPAIR spawn/draw loops are gated off. *glob (the scene the module built in init) has
       // [*glob]=the real game object. For blank/draw, pass *glob as arg1 so [arg1]=gameObj activates.
       uint32_t arg1v = params;
-      if(getenv("ADNOCTARG1") && (msg==2||msg==3)){   // lane D: opt-in lever, no longer also name-gated
+      if(getenv("ADNOCTARG1") && (msg==2||msg==3)){   // opt-in lever, not name-gated
         try{ uint32_t sc=mem->read_u32b(glob); if(sc>0x1000) arg1v=sc; }catch(...){} }
       rr.push_u16(mem, (uint16_t)msg); rr.push_u32(mem, arg1v);
       rr.push_u32(mem, RET_SENT);
@@ -12781,19 +11449,13 @@ int main(int argc, char** argv){
       //     linear 256-colour nearest-match. Flying Toasters! (68K, ToastersD68K/MODULE_129) measures
       //     181,972,990 instructions of PURE FORWARD PROGRESS here (its sprite-descriptor cursor A4 climbs
       //     monotonically across the whole bank -- verified by PC/register histogram; NOT a spin loop);
-      //     Guernsey Madness and Fish World hit the SAME LIB510_RLE quantiser wall. The old 5M cap killed
-      //     that at ~3% and left the screen black, which read as "the flock page never presents". 5M was
-      //     calibrated against AD 3.0 Clocks (heaviest msg 161K) BEFORE any Deluxe sprite module was
-      //     exercised. Raise the construction ceiling to 320M (~1.75x FT's measured init) so the real
-      //     conversion completes and the intro + flock render; a genuine construction hang still trips in
-      //     ~6s under the lean hook, inside the sweep's outer timeout. (The disk-free census already ran
-      //     dll# modules with ADDLLMAXI=0, so it is byte-identical either way; this only fixes the DEFAULT
-      //     path used by the app and the single-module viewer.)
+      //     Guernsey Madness and Fish World hit the SAME LIB510_RLE quantiser wall. The construction
+      //     ceiling is therefore 320M (~1.75x FT's measured init) so the real conversion completes and
+      //     the intro + flock render; a genuine construction hang still trips in ~6s under the lean
+      //     hook, inside the sweep's outer timeout.
       //   - Every other message (blank/draw/idle): stays TIGHT (5M). Per-frame work is light (FT draw =
-      //     321K, blank = 108K), so a draw that runs away is still caught in ~0.1s. Only ONE message class
-      //     is relaxed, so the blast radius of the raise is the construction call alone.
-      // Byte-identical for every module that already completed under 5M (they finish far below either
-      // ceiling); the only behavioural change is that a heavy-but-progressing init is no longer clipped.
+      //     321K, blank = 108K), so a draw that runs away is still caught in ~0.1s. Only ONE message
+      //     class is relaxed, so the blast radius of the raise is the construction call alone.
       static int64_t cap_init = getenv("ADDLLMAXI") ? (int64_t)strtoll(getenv("ADDLLMAXI"),0,10) : 320000000;
       static int64_t cap_step = getenv("ADDLLMAXI") ? (int64_t)strtoll(getenv("ADDLLMAXI"),0,10) : 5000000;
       int64_t cap = (msg==0)? cap_init : cap_step;
@@ -12857,8 +11519,8 @@ int main(int argc, char** argv){
     }
   };
 
-  // addm 491 (decisive test lever ADSBEFN): directly drive BogSim::EachFrame(obj) N times per captured
-  // frame, bypassing the palette-crossfade scheduler, to test whether the CA can spread given generations.
+  // ADSBEFN test lever: directly drive BogSim::EachFrame(obj) N times per captured frame, bypassing the
+  // palette-crossfade scheduler, to test whether the CA can spread given generations.
   auto call_func = [&](uint32_t pc, uint32_t obj)->bool{
     auto& rr=emu.registers();
     rr.a[7]=STACK_TOP; rr.a[5]= lib510.twoA5 ? lib510.a5_mod : lib510.a5; rr.a[4]=lib510.modFrags[0].codeBase;
@@ -12876,7 +11538,7 @@ int main(int argc, char** argv){
       if(getenv("ADSBEFLOG")){ static int ef=0; if(ef++<5) fprintf(stderr,"[eachframe] end %s pc=%08X\n",ex.what(),rr.pc); } return false; }
   };
   int sb_efn = (g_slowburn && getenv("ADSBEFN")) ? atoi(getenv("ADSBEFN")) : 0;
-  // addm 494: call a BogSim method with N extra Pascal args (pushed right-to-left BEFORE `this`), e.g.
+  // Call a BogSim method with N extra Pascal args (pushed right-to-left BEFORE `this`), e.g.
   // DisplayPop8(this, depth, dest). Same setjmp-head + budget setup as call_func.
   auto call_argf = [&](uint32_t pc, uint32_t obj, std::vector<uint32_t> args)->bool{
     auto& rr=emu.registers();
@@ -12895,29 +11557,24 @@ int main(int argc, char** argv){
     catch(const exception& ex){ g_dll_budget=-1; if(strstr(ex.what(),"sentinel")) return true; return false; }
   };
 
-  // Drive the module: init (msg 0), then per-frame draw. The AD 68K message set is
-  // small (0=init/setup, and a blank/draw message); try the candidate draw messages
-  // and dump the framebuffer to find which one paints.
-  // Classic After Dark loop: init once, blank once (msg 2 erases the screen), then
-  // draw one animation frame per tick (msg 3). ADBLANKMSG/ADDRAWMSG override; ADDRAWMSG
-  // alone (no blank) preserves the old single-message behaviour for probing.
+  // Drive the module: the classic After Dark loop — init once (msg 0), blank once (msg 2 erases the
+  // screen), then draw one animation frame per tick (msg 3). ADBLANKMSG/ADDRAWMSG override; ADDRAWMSG
+  // alone (no blank) drives a single message, for probing which one paints.
   // Seed the low-memory Ticks global before init so any deadline computed at init (Ticks+delay)
   // is relative to a known base; then advance it each frame below.
   g_ticks = 60; mem->write_u32b(0x16A, g_ticks);
   // Seed the Mac wall-clock seconds global Time@0x20C (the run-once LIFE class gates its generation-step
   // on this changing frame-to-frame; see the Secs2Date handler). Base = an arbitrary plausible date
   // (0x9E000000 s ~= mid-1988), advanced per frame in the draw loop.
-  // addm 585: opt-in ADREALCLOCK — serve REAL current local Mac time-of-day to 68K clock savers
-  // (Clocks). This is the 68K twin of the PPC addm-552 fix. The Clocks module reads Time@0x20C (the
-  // GetDateTime glue reads this low-mem global directly) and decodes it via Secs2Date (A9C6). Seeding
-  // 0x20C from the real LOCAL Mac epoch, and recomputing it from real wall time each frame (below),
-  // makes the rendered clock face show the true current local time and advance 1:1. OPT-IN because a
-  // 1s-granularity real clock would FREEZE the run-once LIFE/Frost&Fire class that gates its
-  // generation step on 0x20C CHANGING frame-to-frame (the PPC precedent froze Psycho Deli's
-  // do{GetDateTime}while(t==start) spin); default (no ADREALCLOCK) keeps the synthetic-epoch
-  // +ADSECSRATE/frame path BYTE-IDENTICAL. ADFAKEEPOCH=<secs-since-1904-local> pins a fixed epoch for
-  // deterministic on-screen reference renders (the acceptance gate). This lever is the ABSOLUTE epoch
-  // only; the tick RATE (0x16A) stays handled by the addm-573/578 wall-clock/idle-FF path.
+  // Opt-in ADREALCLOCK — serve REAL current local Mac time-of-day to 68K clock savers (Clocks). The
+  // Clocks module reads Time@0x20C (the GetDateTime glue reads this low-mem global directly) and decodes
+  // it via Secs2Date (A9C6). Seeding 0x20C from the real LOCAL Mac epoch, and recomputing it from real
+  // wall time each frame (below), makes the rendered clock face show the true current local time and
+  // advance 1:1. OPT-IN because a 1s-granularity real clock would FREEZE the run-once LIFE/Frost&Fire
+  // class that gates its generation step on 0x20C CHANGING frame-to-frame; the default (no ADREALCLOCK)
+  // keeps the synthetic-epoch +ADSECSRATE/frame path. ADFAKEEPOCH=<secs-since-1904-local> pins a fixed
+  // epoch for deterministic on-screen reference renders. This lever is the ABSOLUTE epoch only; the tick
+  // RATE (0x16A) is handled by the wall-clock/idle-FF path.
   const bool g_realclock = getenv("ADREALCLOCK")!=nullptr;
   auto ad_real_mac_secs=[&]()->uint32_t{
     if(const char* fe=getenv("ADFAKEEPOCH")) return (uint32_t)strtoul(fe,0,0);   // test lever: fixed epoch
@@ -13004,7 +11661,7 @@ int main(int argc, char** argv){
   }
   // ADCALLCTORS=hexaddr[,hexaddr...]: call each ABSOLUTE code address in sequence with the PASS2 ctor
   // convention (A5=g_a5, A4=owning fragment codeBase, [SP]=RTS sentinel, [SP+4]=paramblk read at [A6+8]).
-  // Purpose (addm 280-281 approach (b)): bypass the lost-D1 static-ctor walker by invoking the ctor TABLE
+  // Purpose: bypass the lost-D1 static-ctor walker by invoking the ctor TABLE
   // entries that ADCTORSCAN located in the relocated A5 world, e.g. the LIB510_Glue run
   // (01028C7A,01028C82,01028A4A) and the LIB510_Canvas run (01019A62,01019AA2). Called in sequence (NOT
   // isolated) because C++ static ctors commonly depend on earlier ones. Reports the Required1 registry
@@ -13104,13 +11761,13 @@ int main(int argc, char** argv){
       }
     }
   }
-  // *** addm 718: THE PRE-INIT DESKTOP SEED — the whole seed policy, in one unconditional call. ***
+  // ---- Pre-init desktop seed: the whole seed policy, in one unconditional call ----
   // The screen holds a source image when the module's DoInitialize runs, exactly as a real Mac's screen
   // held the desktop when the saver kicked in. Everything downstream (a save-under's capture, Spotlight's
   // full-screen save, Down the Drain's tile reads, Punch Out's round trip, and every module's own blank)
   // then behaves as it did on hardware with no host decision involved. ADNOSEED runs unseeded.
-  // HONEST GAP: the image is the host's synthetic desktop unless ADSEEDIMG names one — capturing the
-  // user's REAL desktop needs Screen Recording permission on modern macOS (flagged, not implemented).
+  // The image is the host's synthetic desktop unless ADSEEDIMG names one; capturing the user's real
+  // desktop would need Screen Recording permission on modern macOS.
   if(g_seed_on){
     load_seed_img();
     seed_gfb();
@@ -13120,22 +11777,21 @@ int main(int argc, char** argv){
   } else {
     fprintf(stderr,"[adhost68k] ADNOSEED: no pre-init seed (screen starts black)\n");
   }
-  // *** addm 718c: THE AD3.0 (dll#) LANE'S ENGINE BLANK — the host owns it, because nothing else does. ***
+  // ---- The AD3.0 (dll#) lane's engine blank: the host owns it, because nothing else does ----
   // The seed is filtered by whatever code implements the engine's screen blank for the module's lane:
-  //   * AD4 library lane  — PortableModule::DoBlankScreen, the addm-698 worker, real emulated library code
-  //                         that runs early inside Initialize (verified live: it executes, seed erased);
+  //   * AD4 library lane  — PortableModule::DoBlankScreen, real emulated library code that runs early
+  //                         inside Initialize (verified live: it executes, seed erased);
   //   * classic ADgm lane — the module's own msg-2 DoBlankScreen, which the host drives (52 of 61 erase);
   //   * dll# / AD3.0 lane — NOTHING. The host's msg-2 for a two-stage dll# module is open/LinkModule, not a
-  //                         blank (see the deLuxe selector map below), the addm-698 worker never executes for
-  //                         it, and an ADPROBE of selectors 0..12 paints nothing: the code that blanked in
-  //                         this lane lived in the AD 3.0 ENGINE APP, which is not part of this emulation.
-  //                         For that lane the host IS the engine, so the host performs the blank — exactly
-  //                         as the black-init framebuffer silently did before the seed existed.
+  //                         blank (see the deLuxe selector map below), the library worker never executes
+  //                         for it, and an ADPROBE of selectors 0..12 paints nothing: the code that
+  //                         blanked in this lane lived in the AD 3.0 ENGINE APP, which is not part of
+  //                         this emulation. For that lane the host IS the engine, so the host blanks.
   // Structural, not a name: a dll# module is one that ships a 'dll#' resource. 18 of the 19 in the corpus
   // erase the screen in their own init anyway and are unaffected either way; Nirvana is the one that never
   // does (it is a feedback saver that grows its plasma out of the index-0 background), so without this it
   // finds no background, freezes at 1 distinct frame, and its rand() derail faults on the seed's bytes.
-  // LIMITATION (recorded): a dll# module that genuinely wanted the desktop would be denied it here. None
+  // Limitation: a dll# module that genuinely wanted the desktop would be denied it here. None
   // exists in this corpus (every screen transformer we have — Down the Drain, Punch Out, Puzzle, Spin Brush,
   // Spotlight — is classic ADgm); the tell would be a dll# module whose seed survives its init AND that reads
   // the screen, and the answer then is to RE the ADdl blank selector rather than widen this. ADNODLLBLANK
@@ -13143,16 +11799,16 @@ int main(int argc, char** argv){
   if(g_preinit_seeded && !rez_ids[FOURCC("dll#")].empty() && !getenv("ADNODLLBLANK")){
     mem->memset(C.g_fb, 0, (uint32_t)C.fb_w*C.fb_h);
     // The engine blank consumed the seed, so this run HAS no source image any more: drop the snapshot and
-    // the seeded flag together. (Zeroing the snapshot instead would make every dll# module measure as
+    // the seeded flag together. Zeroing the snapshot instead would make every dll# module measure as
     // "seed 100% intact" against an all-black screen, arm g_seed_kept, and hand the drained-source re-seed
-    // a licence to paint the test image over 8 of them mid-run — measured, and the reason this is spelled
-    // out here.) With both cleared the lane is exactly the unseeded run it was before addm 718.
+    // a licence to paint the test image over 8 of them mid-run. With both cleared the lane is exactly an
+    // unseeded run.
     g_seed_snap.clear(); g_preinit_seeded=false;
     fprintf(stderr,"[adhost68k] AD3.0 (dll#) lane: host performs the engine's screen blank -> g_fb black before init (seed consumed)\n");
   }
   fprintf(stderr,"[adhost68k] --- init (msg 0) ---\n");
   if(getenv("ADBBTRACEINIT")){ g_bbtrace_fp=fopen(getenv("ADBBTRACEINIT"),"w"); g_bbtrace_on=true; g_bbtrace_last=0; g_bbtrace_n=0; }
-  // ADINITDIFF (addm 297): same empirical probe as ADOPENDIFF but around INIT (msg 0). The module's OPEN is a
+  // ADINITDIFF: same empirical probe as ADOPENDIFF but around INIT (msg 0). The module's OPEN is a
   // no-op (0 traps, 3 scalar writes), so whatever it early-returns on must be established during INIT. Count
   // how much of the A5 world init actually populates — this number is the cheapest progress metric for the
   // 29-module dll# cluster ("runs but does nothing" -> a number that can be driven up).
@@ -13163,21 +11819,21 @@ int main(int argc, char** argv){
   }
   if(getenv("ADINITTRACE")){ g_bbtrace_fp=fopen(getenv("ADINITTRACE"),"w"); g_bbtrace_on=true; g_bbtrace_last=0; g_bbtrace_n=0; }
   call_module(0, "init");
-  // addm 718 (adjudication instrument): the same survival measure as after the blank, taken right after
-  // INIT — the engine's black fill runs early inside Initialize for library modules (addm 698), so this
-  // separates "erased by init" from "erased by the module's msg-2 blank".
+  // The same seed-survival measure as after the blank, taken right after INIT: the engine's black fill
+  // runs early inside Initialize for library modules, so this separates "erased by init" from "erased by
+  // the module's msg-2 blank".
   if(g_preinit_seeded && !g_seed_snap.empty()){
     long same=0, tot=(long)C.fb_w*C.fb_h;
     for(long i=0;i<tot;i++) if(mem->read_u8(C.g_fb+(uint32_t)i)==g_seed_snap[(size_t)i]) same++;
     fprintf(stderr,"[adhost68k] seed survived INIT: %.1f%%\n", 100.0*(double)same/(double)tot);
   }
   if(getenv("ADINITTRACE")){ g_bbtrace_on=false; if(g_bbtrace_fp){ fclose(g_bbtrace_fp); g_bbtrace_fp=nullptr; } }
-  // ADDLLTHISFROM=hexaddr — TEST LEVER (addm 312). Clocks' init constructs its instance and parks the
+  // ADDLLTHISFROM=hexaddr — test lever. Clocks' init constructs its instance and parks the
   // pointer in an A5 GLOBAL (0x02004BEC went 0 -> 0x020120C0) rather than in storage[0], which is where
   // the host's dll# driver expects the this-ptr. If the "storage[0] = this-ptr" reading of the ABI is
   // wrong for AD3.0 dll# modules, seeding storage[0] from that global should let open/draw proceed.
   // ADSEEDGLOBAL="dst:src[,dst:src...]" — after init, copy the long at src into dst (both absolute hex).
-  // TEST LEVER (addm 313): Clocks' msg2 handler reads its object from the A5 global at 0x02007666 (reloc
+  // Test lever: Clocks' msg2 handler reads its object from the A5 global at 0x02007666 (reloc
   // disp 0xEA66) which init NEVER writes, while init DOES publish a constructed object at 0x02004BEC
   // (disp 0xBFEC). Use this to test whether they are the same object -> i.e. whether one of those two
   // A5 displacements is mis-relocated. NOT a fix; a probe.
@@ -13260,9 +11916,8 @@ int main(int argc, char** argv){
   // draw=6. (Rendering still requires the LIB510 ADdl runtime linker; see the ADdl publish above.)
   bool isDllModule = !rez_ids[FOURCC("dll#")].empty();
   int blankMsg = getenv("ADBLANKMSG") ? atoi(getenv("ADBLANKMSG")) : 2;
-  // dll# draw selector: 3, NOT 6 — addm 312 decoded module_main's switch (msg6 = the DEFAULT/bail case,
-  // identical to out-of-range) and addm 333 confirmed live: msg3 draws 43818 px of animated clock the
-  // first time the instance actually publishes. The old 6 was a guess that happened to be a no-op.
+  // dll# draw selector is 3, not 6: module_main's switch treats msg 6 as the DEFAULT/bail case, identical
+  // to out-of-range, while msg 3 draws (verified live).
   int drawMsg  = getenv("ADDRAWMSG")  ? atoi(getenv("ADDRAWMSG"))  : 3;
   if(isDllModule) fprintf(stderr,"[adhost68k] dll# two-stage module: using deLuxe selector map (open=%d draw=%d); needs ADdl LIB510 runtime\n",blankMsg,drawMsg);
   int frames   = getenv("ADFRAMES")   ? atoi(getenv("ADFRAMES"))   : 4;
@@ -13273,21 +11928,16 @@ int main(int argc, char** argv){
       fprintf(stderr,"[probe] msg=%2d draw_ops=%ld fb_nz %ld->%ld\n",m,draw_ops,nz0,nz1); }
     return 0;
   }
-  // A few modules perform their full-screen background erase in a DIFFERENT message than the
-  // msg-2 blank the host normally calls. Mowin' Man erases in msg 1 (a solid-pattern FillRgn ->
-  // black); its msg-2 handler is a no-op and its msg-3 draw only stamps incremental grass blades
-  // on top. Calling only msg 2 left Mowin' Man's canvas on the uninitialised white framebuffer
-  // (99.8% white). Route those modules' blank to msg 1. This is a per-module opt-in (like the
-  // Object-Pascal preseed CLUSTER) because msg 1 is NOT a universal blank: for Confetti Factory
-  // it hangs and for Mandelbrot it disrupts the incremental draw — so it must not fire globally.
-  // S4: the general drive detects a no-op msg-2 blank that leaves the white matte and falls back to msg 1
-  // automatically (see the post-blank fallback below), superseding the old Mowin'-Man name-list, which
-  // only ran under ADLEGACYDRIVE. (legacy-cleanup addm 679: that dead-by-default block is deleted.)
+  // A few modules perform their full-screen background erase in a message other than the msg-2 blank the
+  // host normally calls: Mowin' Man erases in msg 1 (a solid-pattern FillRgn -> black), its msg-2 handler
+  // is a no-op and its msg-3 draw only stamps incremental grass blades on top. msg 1 is NOT a universal
+  // blank, though — it hangs Confetti Factory and disrupts Mandelbrot's incremental draw — so it must
+  // never be sent globally.
   if(!getenv("ADNOBLANK")){ fprintf(stderr,"[adhost68k] --- blank (msg %d) ---\n",blankMsg);
     // ADSAVEGLOB=hexaddr: save an A4-relative module global before blank and restore after. Boris's blank
     // (msg=2) DISPOSES the object at [A4+0x1C80] that init built and draw needs -> draw null-derefs. Restoring
     // it across blank tests whether the dispose is the sole remaining blocker (the disposed heap block is not
-    // reclaimed by our allocator, so the pointer stays valid). Now a COMMA-LIST of addresses: Boris keeps its
+    // reclaimed by our allocator, so the pointer stays valid). A COMMA-LIST of addresses: Boris keeps its
     // scene pointer in TWO mirrored slots ([A4+0x1C80] and its glob handle [0x302EA8]) that draw bidirectionally
     // syncs, so BOTH must be preserved across blank or the still-zero one re-clobbers the restored one.
     std::vector<uint32_t> sgl; std::vector<uint32_t> sgvl;
@@ -13297,7 +11947,7 @@ int main(int argc, char** argv){
     for(uint32_t a : sgl){ uint32_t v=0; try{ v=mem->read_u32b(a); }catch(...){} sgvl.push_back(v); }
     probe1c80("before-blank");
     if(getenv("ADBBTRACEBLANK")){ g_bbtrace_fp=fopen(getenv("ADBBTRACEBLANK"),"w"); g_bbtrace_on=true; g_bbtrace_last=0; g_bbtrace_n=0; }
-    // ADOPENDIFF (addm 295): the module's OWN open/blank path passes the aYmm gate and attempts construction.
+    // ADOPENDIFF: the module's OWN open/blank path passes the aYmm gate and attempts construction.
     // Instead of ASSUMING where its objects land (the A5-0x159A / A5-0x277E assumptions are unproven or
     // disproven), snapshot the whole A5 world and report every slot the module itself populates with a
     // plausible pointer. This locates the real singleton/registry slots empirically.
@@ -13315,115 +11965,65 @@ int main(int argc, char** argv){
         fprintf(stderr,"  scene+0x1A0(pair0 dra>arams):"); for(int i=0x1A0;i<0x1D0;i+=4) fprintf(stderr," %08lX",(unsigned long)rl(sc+i)); fprintf(stderr,"\n"); } }
     if(getenv("ADDOMTRBLANK")){ g_domtr_fp=fopen(getenv("ADDOMTRBLANK"),"w"); g_domtr_on=true; g_domtr_last=0; g_domtr_n=0; }
     call_module(blankMsg,"blank");
-    // *** addm 691 RETIRED: the addm-636 "white-matte -> send msg 1 as the real blank" selector ***
-    // It counted NONZERO fb pixels after msg-2 and, if >90% (a no-op msg-2 that "left the uninitialised white
-    // matte"), sent msg 1 as a fallback blank. That is the same outcome-heuristic sin as the 2% darken above
-    // (a pixel-magnitude count deciding which selector is the real blank), and it is now BOTH obsolete AND
-    // actively harmful — proven, scratchpad/blank_ordering_evidence.md:
-    //   - OBSOLETE for its target: the framebuffer is memset to index-0 (BLACK) at setup (ad_toolbox.hh), not a
-    //     white matte, so Mowin' Man's msg-2 leaves an all-index-0 screen (white_frac ~0) and the selector NEVER
-    //     fires for Mowin' (measured). Mowin' renders correctly on the black-init fb (msg-3 stamps grass on
-    //     black — the authentic result; its own erase would have painted black anyway).
-    //   - HARMFUL where it MISFIRES: the >90%-nonzero test instead matches 7 modules that fill their own
-    //     backdrop/seed >90% nonzero during INIT with a no-op msg-2 (Frost & Fire, Marbles, Modern Art, Satori,
-    //     Spheres, Strange Attractors, Sunburst). For them msg 1 is NOT a blank — it is a different lifecycle
-    //     selector, and injecting it BREAKS them: Modern Art renders ZERO frames (hangs/faults before frame 0),
-    //     Marbles FREEZES (distinct 1 vs 20 without it); Frost&Fire/Satori/Sunburst are perturbed off their
-    //     authentic animation; Spheres/Strange Attractors are inert. Deleting the injection FIXES Modern Art +
-    //     Marbles and returns the 3 feedback savers to their un-injected path; 54/61 modules byte-identical.
-    // The authentic blank step is simply the module's msg-2 DoBlankScreen (which the engine sends to every
-    // module); there is no "detect a white matte, then send msg 1" anywhere in the engine. So the selector is
-    // deleted. ADMOWINSELLEGACY restores it for A/B.
+    // ADMOWINSELLEGACY restores an obsolete selector: it counted NONZERO fb pixels after msg-2 and, if
+    // >90% (a no-op msg-2 that "left the uninitialised white matte"), sent msg 1 as a fallback blank. The
+    // framebuffer is memset to index-0 (BLACK) at setup (ad_toolbox.hh), not a white matte, so it never
+    // fires for its Mowin' Man target; where it DOES fire it matches 7 modules that fill their own backdrop
+    // >90% nonzero during INIT with a no-op msg-2 (Frost & Fire, Marbles, Modern Art, Satori, Spheres,
+    // Strange Attractors, Sunburst), for which msg 1 is a different lifecycle selector that breaks them
+    // (Modern Art renders zero frames, Marbles freezes). The authentic blank step is simply the module's
+    // msg-2 DoBlankScreen, which the engine sends to every module; there is no "detect a white matte, then
+    // send msg 1" anywhere in the engine.
     if(getenv("ADMOWINSELLEGACY")){
       const bool s4_blankchk = (blankMsg==2 && !getenv("ADBLANKMSG"));
       auto s4_white_frac=[&]()->double{ long w=0, n=(long)C.fb_w*C.fb_h; if(n<=0) return 0.0;
         for(long i=0;i<n;i++){ if(mem->read_u8(C.g_fb+(uint32_t)i)!=0) w++; } return (double)w/(double)n; };
       if(s4_blankchk && draw_ops==0 && s4_white_frac()>0.90){
-        fprintf(stderr,"[adhost68k] S4 LEGACY: msg-2 no-op left >90%% nonzero -> sending msg 1 (addm-636 selector)\n");
+        fprintf(stderr,"[adhost68k] S4 LEGACY: msg-2 no-op left >90%% nonzero -> sending msg 1 (legacy selector)\n");
         call_module(1,"blank1");
       }
     }
     if(g_domtr_on){ g_domtr_on=false; if(g_domtr_fp){ fclose(g_domtr_fp); g_domtr_fp=nullptr;
       fprintf(stderr,"[domtr-blank] wrote %ld PCs\n",g_domtr_n); } }
-    // *** addm 596 BORIS PERFORM-BLANK ***: Boris draws its "Hold on.  Boris is napping." please-wait title
-    // (+ a one-shot title box) with white pixels during INIT (msg 0) — verified via ADBORTITLE: a single
-    // DrawString phase=init fg=255, and the module issues ZERO EraseRect/PaintRect the whole run. The real
-    // After Dark engine sends PerformBlank (paint whole screen BLACK) AFTER DoInitialize and BEFORE the
-    // draw loop, which erases that title; our host only does the addm-549 CLUT[0]->black *palette* edit at
-    // startup and never repaints the framebuffer at the blank step, so the init-drawn white title survives
-    // forever as a top-left residual. Model PerformBlank for Boris: memset the framebuffer to index 0 (the
-    // black backdrop) at the blank step. The town/cat/starfield are all drawn by the DRAW loop (msg 3),
-    // AFTER this, so they are untouched; only the init artifacts are cleared. Name-gated g_boris (a general
-    // fb-fill at blank is known-harmful to feedback savers, addm 549) => whole non-Boris corpus byte-identical
-    // by construction. Opt-out ADNOBORISBLANK=1 (A/B revert).
-    // Fish World draws the same class of one-shot INIT title ("This display looks best in more than 256
-    // colors.", white, phase=init) which — once the addm-596 GWorld-tracking fix removes the white cell that
-    // used to cover it — persists top-left. Same cure: PerformBlank clears the FB after init. Safe for Fish
-    // World: its scene is re-composited per-frame from the offscreen GWorld to the FB (the water backdrop is
-    // index-0 black = the clear value), so only the white title is removed. Gated with g_gwblank (Fish World/
-    // Slow Burn only — addm 633 kept this at the old name-gate so generalizing g_gwtrack doesn't blank-clear
-    // the whole corpus, which addm 549 found harmful to feedback savers).
-    // *** addm 691 HEURISTIC HOLD (honestly relabelled per addm 690's record-correction) ***
-    // This is a NAME-FREE HEURISTIC, not a mechanism-faithful reproduction. It reads the OUTCOME (a sparse lit
-    // residue) as a PROXY for the CAUSE (the engine blank falls in the lifecycle BEFORE the module's real scene
-    // is painted). The authentic mechanism and why the host cannot reproduce it byte-identically are both now
-    // PROVEN (blank-ordering RE, scratchpad/blank_ordering_evidence.md):
+    // Boris, Fish World and Slow Burn draw a one-shot white please-wait title during INIT (msg 0) —
+    // "Hold on.  Boris is napping.", "This display looks best in more than 256 colors." — with a single
+    // DrawString at fg=255 and no EraseRect/PaintRect anywhere in the run. On hardware the engine's blank
+    // erased it; the host has no equivalent post-init repaint, so it would persist as a top-left residual.
     //
-    // AUTHENTIC MECHANISM (direct disasm of the engine worker @0x010215A2, PortableModule::DoBlankScreen,
-    // adjacent to __dt__14PortableModule, reached via [A5+0x6198]): it UNCONDITIONALLY paints the whole blank
-    // rect BLACK and nothing else — single-GDevice path `ForeColor(0x21=blackColor); FillRect(blankRect)`;
+    // AUTHENTIC MECHANISM (disasm of the engine worker @0x010215A2, PortableModule::DoBlankScreen, adjacent
+    // to __dt__14PortableModule, reached via [A5+0x6198]): it UNCONDITIONALLY paints the whole blank rect
+    // BLACK and nothing else — single-GDevice path `ForeColor(0x21=blackColor); FillRect(blankRect)`;
     // multi-GDevice path walks GetDeviceList doing per-device `RGBForeColor(black); FillRect`. There is ZERO
-    // CopyBits/save and ZERO pixel-count/threshold in the function. So the real engine did exactly what addm 690
-    // said: an unconditional black fill at a fixed point after DoInitialize and before the DoDrawFrame loop.
+    // CopyBits/save and ZERO pixel-count or threshold in the function: an unconditional black fill at a
+    // fixed point after DoInitialize and before the DoDrawFrame loop.
     //
-    // WHY THE HOST CANNOT DO THAT BYTE-IDENTICALLY (measured, scratchpad/blank_ab.out, 61-module A/B of this
-    // heuristic vs an unconditional blank ADFORCEBLANKALL): 25/61 modules change their index plane, because the
-    // host calls each module's messages DIRECTLY (no engine wrapper) and its drive establishes those modules'
-    // scene/seed IN THE FRAMEBUFFER during init/blank — i.e. the host collapses hardware's init->blank->draw
-    // ORDERING (a module that on hardware painted its scene in DoDrawFrame, AFTER the engine blank, paints it
-    // pre-blank here). A module that fully repainted every frame would be immune to a pre-draw blank and stay
-    // IDENT; the 25 DIFFERs PROVE those modules rely on pre-blank framebuffer PERSISTENCE and do NOT repaint.
-    // Classifying by DISPLAYED colour (ADFBHASHRGB, scratchpad/blank_rgb40.out): 6 of the 25 change the visible
-    // image and are genuine regressions (Confetti Factory, Frost & Fire, Marbles, Messages 4.0, Nirvana,
-    // Satori); the other 19 are index-cosmetic (idx255-black rewritten to idx0-black, same displayed pixels
-    // through 40 frames — Mandelbrot/Rain/Photon/Spiral Gyra/Strange Attractors/Warp!/Bogglins/Dominoes/…). The
-    // index plane is the project's byte-identity invariant (feedback savers read it back), so even the 19
-    // index-cosmetic diffs fail the merge bar — an unconditional blank is not shippable.
+    // WHY THE HOST CANNOT DO THAT BYTE-IDENTICALLY: it calls each module's messages DIRECTLY (no engine
+    // wrapper), so its drive establishes some modules' scene/seed IN THE FRAMEBUFFER during init/blank —
+    // collapsing hardware's init->blank->draw ORDERING. A 61-module A/B against an unconditional blank
+    // (ADFORCEBLANKALL) moves 25 modules' index plane: they rely on pre-blank framebuffer PERSISTENCE and
+    // do not repaint every frame. Classified by DISPLAYED colour (ADFBHASHRGB), 6 of the 25 change the
+    // visible image (Confetti Factory, Frost & Fire, Marbles, Messages 4.0, Nirvana, Satori) and the other
+    // 19 are index-cosmetic (idx255-black rewritten to idx0-black). The index plane is the project's
+    // byte-identity invariant (feedback savers read it back), so even the 19 fail the merge bar — an
+    // unconditional blank is not shippable. Dissolving this needs a compositing rework: a separate BACKDROP
+    // surface the blank paints black, distinct from the MODULE SCENE surface the module draws into and
+    // reads back, driven so no persistent module scene/seed is established in the shared FB before the blank.
     //
-    // TO DISSOLVE THIS HEURISTIC (compositing rework, not yet done): give the host a separate BACKDROP surface
-    // that the blank paints black, distinct from the MODULE SCENE surface the module draws into and reads back,
-    // and drive init->blank->draw so that no persistent module scene/seed is ever established in the shared FB
-    // before the blank. Then the engine's unconditional black fill becomes safe (the scene comes back on the
-    // first post-blank draw) and this whole block deletes itself. Until then it stays a HEURISTIC HOLD.
-    //
-    // The proxy discriminator (kept below): the module left a SPARSE, NON-BLACK residue on an otherwise-black
-    // screen — precisely the one-shot INIT TITLE the engine's darken erased (Slow Burn/Fish World "looks best in
-    // more than 256 colors", Boris "Boris is napping" — near-white idx, NOT repainted by the module's Blank),
-    // separated from a legitimate BACKDROP/scene by two runtime facts, both measured here:
-    //
-    // That residue is precisely the one-shot INIT TITLE the engine's darken erased (Slow Burn/Fish World "looks
-    // best in more than 256 colors", Boris "Boris is napping" — near-white idx, NOT repainted by the module's
-    // Blank). It is separated from a module's legitimate BACKDROP/scene by two runtime facts, both measured here:
-    //   (a) NON-BLACK: count only pixels whose CLUT entry decodes to a visible (non-black) colour. Modules that
-    //       fill the screen with a nonzero-but-BLACK index (Mandelbrot/Dominoes/Einstein/Rain idx255->rgb0,
-    //       Down the Drain/Globe/Bogglins partial idx255) contribute ZERO, so the darken never touches them —
-    //       their index plane stays byte-identical. (A raw nonzero-index test was unsafe: a blanket darken over
-    //       idx255-black content silently rewrote 255->0 and broke Mandelbrot — measured addm 680.)
-    //   (b) SPARSE: the non-black residue covers < ADBLANKRESIDUE (default 2%) of the screen. A real backdrop or
-    //       scene (Marbles 7.6%, Confetti 10.6%, OM Appliances 13.5%, Pearls/Messages ~100%) is far above; every
-    //       observed init title is far below (Slow Burn 0.15%, Boris 0.22%). The 3.8x/7x margins either side of
-    //       the empirical gap [0.27%, 7.6%] make the exact cut-off non-critical.
-    // Both hold -> darken to index-0 exactly as the engine (and the old name-gate for its subset) did; else leave
-    // it. Fish World now satisfies nb==0 (its own Blank composites black water over the title, addm-633 universal
-    // gwtrack) so the darken is a no-op for it -> byte-identical whether it fires or not; only Slow Burn/Boris are
-    // actually cleared. A darken over an already-all-index-0 screen (the whole nb==0 corpus) is a no-op, so those
-    // modules are byte-identical by construction. VERIFIED addm 680: full 61-module fbhash A/B vs the name-gate
-    // main = IDENT 61 / DIFFER 0.
-    // Levers: ADBLANKRESIDUE=<frac> tune the sparse cut-off; ADNOBORISBLANK disables (unchanged); ADC2BLANKLEGACY
-    // restores the exact (g_boris||g_gwblank) name-gate for A/B; ADS4LOG traces. DIAGNOSTIC (blank-ordering RE):
-    // ADFORCEBLANKALL forces the darken unconditionally (the authentic-engine candidate) — A/B it vs the default
-    // to reproduce the 25-module index-plane divergence; ADFBHASHRGB=1 hashes CLUT-decoded RGB instead of the
-    // index plane, separating index-cosmetic diffs (19) from genuine display regressions (6).
+    // Until then the init title is identified by a proxy discriminator that separates it from a module's
+    // legitimate backdrop/scene by two runtime facts:
+    //   (a) NON-BLACK: count only pixels whose CLUT entry decodes to a visible (non-black) colour. Modules
+    //       that fill the screen with a nonzero-but-BLACK index (Mandelbrot/Dominoes/Einstein/Rain
+    //       idx255->rgb0, Down the Drain/Globe/Bogglins partial idx255) contribute ZERO, so the darken never
+    //       touches them. A raw nonzero-index test is unsafe: a blanket darken over idx255-black content
+    //       silently rewrites 255->0 and breaks Mandelbrot.
+    //   (b) SPARSE: the non-black residue covers < ADBLANKRESIDUE (default 2%) of the screen. A real backdrop
+    //       or scene (Marbles 7.6%, Confetti 10.6%, OM Appliances 13.5%, Pearls/Messages ~100%) is far above;
+    //       every observed init title is far below (Slow Burn 0.15%, Boris 0.22%), and the margins either
+    //       side of the empirical gap [0.27%, 7.6%] make the exact cut-off non-critical.
+    // Levers: ADBLANKRESIDUE tunes the sparse cut-off; ADNOBORISBLANK disables; ADC2BLANKLEGACY restores the
+    // (g_boris || g_gwblank) name-gate for A/B; ADS4LOG traces; ADFORCEBLANKALL forces the darken
+    // unconditionally (the authentic-engine candidate); ADFBHASHRGB=1 hashes CLUT-decoded RGB instead of the
+    // index plane, separating index-cosmetic diffs from genuine display regressions.
     bool do_blank_darken;
     if(getenv("ADC2BLANKLEGACY")) do_blank_darken = (g_boris || g_gwblank);
     else {
@@ -13438,15 +12038,14 @@ int main(int argc, char** argv){
       if(getenv("ADS4LOG")) fprintf(stderr,"[s4-blankdarken] nonblack=%ld/%ld (%.4f) resmax=%.4f -> %s\n",
         nonblack,n,nbfrac,resmax, do_blank_darken?"DARKEN":"leave");
     }
-    // EXPERIMENT LEVER (blank-ordering RE): ADFORCEBLANKALL forces the darken UNCONDITIONALLY at the
-    // blank lifecycle point (the authentic engine DoBlankScreen candidate). A/B vs the heuristic isolates
-    // exactly which module class relies on pre-blank framebuffer persistence into the draw loop.
+    // ADFORCEBLANKALL forces the darken UNCONDITIONALLY at the blank lifecycle point (the authentic
+    // engine DoBlankScreen candidate); A/B vs the heuristic isolates which module class relies on
+    // pre-blank framebuffer persistence into the draw loop.
     if(getenv("ADFORCEBLANKALL")) do_blank_darken = true;
-    // addm 699: the 2% do_blank_darken PROXY is RETIRED — the init titles it wiped are now shown-then-cleared
-    // by the authentic banner overlay (capture+suppress above + present-time composite below). It modelled a
-    // nonexistent post-init blank (the real engine blank is intra-init-early, already reproduced by the
-    // black-init framebuffer — RE in scratchpad/banner_lifecycle_evidence.md). Kept only under ADDARKENLEGACY
-    // for A/B. Default: no darken.
+    // The darken is OFF by default: the init titles it wiped are shown-then-cleared by the banner overlay
+    // (capture+suppress above, present-time composite below), and it modelled a nonexistent post-init
+    // blank — the real engine blank is intra-init-early, already reproduced by the black-init framebuffer.
+    // ADDARKENLEGACY re-enables it for A/B.
     if(getenv("ADDARKENLEGACY") && do_blank_darken && !getenv("ADNOBORISBLANK")){
       mem->memset(C.g_fb, 0, (uint32_t)C.fb_w*C.fb_h);
       fprintf(stderr,"[adhost68k] PerformBlank DARKEN (legacy): fb cleared to index-0\n");
@@ -13471,14 +12070,13 @@ int main(int argc, char** argv){
       if(thisp){ fprintf(stderr,"    this obj fields:"); for(int i=0;i<32;i+=4){uint32_t v=0;try{v=mem->read_u32b(thisp+i);}catch(...){}fprintf(stderr," +%X=%08X",i,v);} fprintf(stderr,"\n"); } }
     probe1c80("after-blank");
     for(size_t i=0;i<sgl.size();i++){ try{ if(!mem->read_u32b(sgl[i]) && sgvl[i]) mem->write_u32b(sgl[i], sgvl[i]); }catch(...){} } }
-  // addm 718: DID THE MODULE'S OWN BLANK KEEP THE SEED? The pre-init seed put a source image on g_fb
-  // before msg 0; the module has now run its own DoInitialize + DoBlankScreen. Compare the screen against
-  // the exact bytes the seed wrote: a module using the base blank has erased it (survival ~0%), a module
-  // that overrides the blank to keep/transform the screen still has it. This is a MEASUREMENT of the
-  // module's own code, not a classifier — and the separation is not a judgement call: across the corpus
-  // the survival distribution is bimodal with nothing in between (the addm-716 census measured 49 modules
-  // at exactly 0.0% change and the other 12 at 47.6-100%). Its ONE consumer is the drained-source re-seed
-  // in the frame loop below, which must not fire on an additive saver whose screen merely went uniform.
+  // Did the module's own blank keep the seed? The pre-init seed put a source image on g_fb before msg 0;
+  // the module has now run its own DoInitialize + DoBlankScreen. Compare the screen against the exact
+  // bytes the seed wrote: a module using the base blank has erased it (survival ~0%), a module that
+  // overrides the blank to keep/transform the screen still has it. The separation is not a judgement
+  // call — across the corpus the survival distribution is bimodal with nothing in between (49 modules at
+  // exactly 0.0% change, the other 12 at 47.6-100%). Its ONE consumer is the drained-source re-seed in
+  // the frame loop below, which must not fire on an additive saver whose screen merely went uniform.
   // ADSEEDKEPTPCT overrides the threshold; ADSEEDKEPTLOG always prints the measured number.
   if(g_preinit_seeded && !g_seed_snap.empty()){
     long same=0, tot=(long)C.fb_w*C.fb_h;
@@ -13497,25 +12095,9 @@ int main(int argc, char** argv){
   auto rnd = [&](uint32_t m){ seed = seed*1103515245u+12345u; return (seed>>16)%m; };
   bool appDrive = getenv("ADAPPDRAW")!=nullptr;
   g_anim_phase=true;   // init/handshake done; GetOSEvent now reports clean nullEvents
-  // *** addm 718: THE SEED DECISION IS RETIRED — everyone gets a seed, before msg 0. ***
-  // What used to stand here: (a) `wantSeed = getenv("ADSEEDIMG")`, (b) a SEEDNAMED name list
-  // {Spin Brush, Puzzle}, (c) an extra "detect" draw that watched CopyBits for a screen->screen read
-  // (the addm-712 destination discriminator) and seeded the module if it had painted <=3 indices.
-  // All three answered ONE question — WHO gets a source image — and all three were the wrong place to
-  // ask it. On hardware nobody decided: the desktop was simply on the screen when the saver started and
-  // each module's own DoBlankScreen either erased it or kept it. That is now what the host does (see the
-  // seed block at g_seed_on), so:
-  //   * the detector is deleted, and with it its extra draw — that draw was a pure host artifact, one
-  //     module frame nothing on hardware ever ran; every module is now one draw "younger" here;
-  //   * SEEDNAMED is deleted. The addm-687 hold reason (generalising the detector to the GetCPixel /
-  //     ScrollRect readers would false-seed Snake, which also reads the screen) no longer applies:
-  //     there is no detector to false-fire. Snake gets a seed like everything else and its own blank
-  //     erases it — verified pixel-identical to an unseeded run;
-  //   * ADSEEDIMG survives as the explicit-image lever (now a PATH, see load_seed_img), ADNOAUTOSEED and
-  //     ADSEEDDBG are retired with the probe they controlled, and ADNOSEED restores the unseeded run.
-  // Engine RE: the real After Dark engine (AfterDarkModule C++ class) sends DoEnableAnimation before the
-  // first DoDrawFrame — that likely seeds per-frame animation state. Our init/blank/draw sequence may miss
-  // it. ADPREMSG=n sends message n once after blank, before the draw loop, to probe which message seeds.
+  // The real After Dark engine (AfterDarkModule C++ class) sends DoEnableAnimation before the first
+  // DoDrawFrame, which likely seeds per-frame animation state; the host's init/blank/draw sequence may
+  // miss it. ADPREMSG=n sends message n once after blank, before the draw loop, to probe which seeds.
   if(getenv("ADPREMSG")){ int pm=atoi(getenv("ADPREMSG")); fprintf(stderr,"[adhost68k] pre-draw msg %d\n",pm);
     call_module(pm,"premsg"); }
   // ADRESTOREOBJ=hexaddr : snapshot the long at hexaddr now; before each draw, if it has gone NULL
@@ -13526,7 +12108,7 @@ int main(int argc, char** argv){
   if(getenv("ADRESTOREOBJ")){ g_robj_a=(uint32_t)strtoul(getenv("ADRESTOREOBJ"),0,16);
     try{ g_robj_v=mem->read_u32b(g_robj_a); }catch(...){}
     fprintf(stderr,"[restoreobj] watching [%08X]=%08X\n",g_robj_a,g_robj_v); }
-  // ---- addm 569: LIVE CONTROL CHANNEL (68K) --------------------------------
+  // ---- Live control channel (68K) -----------------------------------------
   // In ADSTREAM (app) mode, poll stdin non-blocking each frame for "SET <idx> <val>"
   // lines and apply them to the SAME GMParamBlock controlValues slots that ADCVSET
   // seeds (params + idx*2, idx 0..3). The module reads controlValues[idx] each frame,
@@ -13550,10 +12132,10 @@ int main(int argc, char** argv){
       if(sscanf(line.c_str(),"SET %d %d",&idx,&val)==2 && idx>=0 && idx<4){
         try{ mem->write_u16b(params + (uint32_t)idx*2, (uint16_t)val); }catch(...){}
         if(getenv("ADSETLOG")) fprintf(stderr,"[adhost68k] live SET controlValues[%d]=%d\n",idx,val);
-      } else ad_input_line(line.c_str());   // addm 574: KEY/CAPS/MOUSE
+      } else ad_input_line(line.c_str());   // KEY/CAPS/MOUSE
     }
   };
-  // ---- addm 571: ZERO-COPY SHARED-MEMORY TRANSPORT (ADSHM + ADSHMNAME) --------
+  // ---- Zero-copy shared-memory transport (ADSHM + ADSHMNAME) ------------------
   // Strict request-response lockstep, no tearing by construction. The app creates
   // and sizes a POSIX shm object [64-byte header {'ADSM',w,h,seq,format} + 768-byte
   // palette + w*h index bytes]; we shm_open + mmap it, then each frame BLOCK on a
@@ -13576,7 +12158,7 @@ int main(int argc, char** argv){
         memcpy(g_shm,"ADSM",4);
         *(uint32_t*)(g_shm+4)=(uint32_t)C.fb_w; *(uint32_t*)(g_shm+8)=(uint32_t)C.fb_h;
         *(uint32_t*)(g_shm+12)=0; *(uint32_t*)(g_shm+16)=8;   // seq=0, format=8(indexed)
-        // addm 793: FD_CLOEXEC so a Duration re-exec does not leak this descriptor. The
+        // FD_CLOEXEC so a Duration re-exec does not leak this descriptor. The
         // restore at the execv site dup2()s it onto fd 1, and dup2 clears CLOEXEC on the copy,
         // so the transport survives execv exactly once — as fd 1 — instead of once per generation.
         int afd=dup(1); if(afd>=0){ fcntl(afd,F_SETFD,FD_CLOEXEC); g_ackf=fdopen(afd,"wb"); freopen("/dev/null","w",stdout); }
@@ -13598,18 +12180,18 @@ int main(int argc, char** argv){
         if(sscanf(line.c_str(),"SET %d %d",&idx,&val)==2 && idx>=0 && idx<4){
           try{ mem->write_u16b(params + (uint32_t)idx*2, (uint16_t)val); }catch(...){}
           if(getenv("ADSETLOG")) fprintf(stderr,"[adhost68k] live SET controlValues[%d]=%d\n",idx,val);
-        } else ad_input_line(line.c_str());   // addm 574: KEY/CAPS/MOUSE
+        } else ad_input_line(line.c_str());   // KEY/CAPS/MOUSE
       }
       char tmp[512]; ssize_t rn=read(0,tmp,sizeof(tmp));   // BLOCKING (stdin left blocking in shm mode)
       if(rn<=0) return false;
       g_gobuf.append(tmp,(size_t)rn);
     }
   };
-  // ---- addm 573: AUTHENTIC PER-MODULE DRAW PACING + WALL-CLOCK TIME (stream/lockstep) -------------------
-  // Under ADSHM/ADSTREAM the app sends a GO (or drains the pipe) at up to 60fps, and the old loop advanced
-  // the module once per GO -> animation ran at DISPLAY fps (Draw Morph / Photon / Spiral Gyra / Zot "too
-  // fast"). Decouple: advance the module only every pace-interval wall-ms; a GO that arrives early RE-SENDS
-  // the previous frame (we skip the plain module DRAW, leaving g_fb unchanged, so present() re-emits it).
+  // ---- Per-module draw pacing + wall-clock time (stream/lockstep) -------------------------------------
+  // Under ADSHM/ADSTREAM the app sends a GO (or drains the pipe) at up to 60fps; advancing the module once
+  // per GO would run the animation at DISPLAY fps (Draw Morph / Photon / Spiral Gyra / Zot "too fast").
+  // Decouple: advance the module only every pace-interval wall-ms; a GO that arrives early RE-SENDS the
+  // previous frame (skip the plain module DRAW, leaving g_fb unchanged, so present() re-emits it).
   // 68K modules carry no authored per-module rate, so the default is 33ms (~30fps, the classic ADTICKRATE=2
   // cadence: 2 ticks @ 60.15Hz); ADPACEMS / ADPACEHZ override (per-module catalog env). The delicate
   // substep/CA renderers (Dominoes/Bugs/Boris/DD/Slow Burn) NEED every call to composite their frame, so
@@ -13621,61 +12203,58 @@ int main(int argc, char** argv){
   if(getenv("ADPACEMS")) g_pace_ms = atof(getenv("ADPACEMS"));
   else if(getenv("ADPACEHZ")){ double hz=atof(getenv("ADPACEHZ")); if(hz>0) g_pace_ms=1000.0/hz; }
   if(g_pace_ms<0.0) g_pace_ms=0.0;
-  // addm 581: init-exemption state — REPLACES the addm-580 fb-uniformity check with a first-CHANGE
-  // check against a baseline hash captured before the first draw (the addm-580 uniformity test broke
-  // whenever blank/seed left a non-uniform screen: the exemption "engaged" instantly and slow-init
-  // modules were throttled anyway). ADNOINITEXEMPT disables the exemption (pace from frame 0).
+  // Init-exemption state: a first-CHANGE check against a baseline hash captured before the first draw. A
+  // plain fb-uniformity test would not do — it engages instantly whenever blank/seed leaves a non-uniform
+  // screen, throttling slow-init modules anyway. ADNOINITEXEMPT disables the exemption (pace from frame 0).
   bool g_first_drawn = false;
   uint64_t g_pace_basehash = 0; bool g_pace_base_init = false;
   const bool g_initexempt = !getenv("ADNOINITEXEMPT");
   auto pace_now=[&]()->double{ struct timeval tv; gettimeofday(&tv,nullptr); return (double)tv.tv_sec*1000.0+(double)tv.tv_usec*1e-3; };
   const double g_pace_t0=pace_now(); double g_pace_last=-1e18;
-  // Wall-clock Mac time in stream mode (68K port of the PPC addm-549/550 fix): the app inherits the census
-  // ADTICKRATE=120, so the OLD per-frame +120 tick step ran the 68K time sources ~120x realtime -> clocks
-  // and any Ticks-gated saver flew. In stream mode advance Ticks (0x16A) from REAL elapsed wall time at the
-  // true 60.15Hz every DISPLAY frame (so self-paced modules that read Ticks between draws run authentic),
-  // and advance Secs (0x20C) once per ADVANCE frame — NOT wall-quantized: LIFE/Frost&Fire gate their
-  // generation step on 0x20C CHANGING frame-to-frame (addm 552), so a 1s-granularity real clock would
-  // freeze them; +1/advance keeps them stepping. Headless (no ADSTREAM) keeps the fixed per-frame step.
+  // Wall-clock Mac time in stream mode: the app inherits the census ADTICKRATE=120, so a per-frame +120
+  // tick step would run the 68K time sources ~120x realtime and any Ticks-gated saver would fly. In
+  // stream mode advance Ticks (0x16A) from REAL elapsed wall time at the true 60.15Hz every DISPLAY frame
+  // (so self-paced modules that read Ticks between draws run authentic), and advance Secs (0x20C) once
+  // per ADVANCE frame — NOT wall-quantized: LIFE/Frost&Fire gate their generation step on 0x20C CHANGING
+  // frame-to-frame, so a 1s-granularity real clock would freeze them; +1/advance keeps them stepping.
+  // Headless (no ADSTREAM) keeps the fixed per-frame step.
   const bool g_wallclock = getenv("ADSTREAM") && !getenv("ADNOWALLCLOCK");
   const uint32_t g_ticks_base=g_ticks;
-  // ---- addm 578: IDLE TICK CATCH-UP (wall-clock Ticks-starvation fix) --------------------------------
-  // The addm-573 wall-clock port runs Ticks(0x16A) at REAL 60.15Hz, but the census/app recipe relied on
+  // ---- Idle tick catch-up (wall-clock Ticks-starvation fix) -----------------------------------------
+  // The wall-clock path runs Ticks(0x16A) at REAL 60.15Hz, but the census/app recipe relied on
   // ADTICKRATE=120/frame (~120x realtime) for the Ticks-DEADLINE-gated savers: Nonsense waits its "Delay"
-  // ticks before each phrase (573-regression: fully black, "spinning on Random" = its idle poll), Punch Out
-  // schedules each punch ticks ahead (28-px stub then apparent freeze). Pure wall time starves them for an
-  // entire session. FIX: when an ADVANCE frame's draw leaves the framebuffer UNCHANGED (the module provably
+  // ticks before each phrase (fully black, "spinning on Random" = its idle poll), Punch Out schedules
+  // each punch ticks ahead (28-px stub then apparent freeze). Pure wall time starves them for an entire
+  // session. So: when an ADVANCE frame's draw leaves the framebuffer UNCHANGED (the module provably
   // idled — wall time is the only input it is waiting on), start fast-forwarding: after ADIDLEFFAFTER
   // consecutive idle advances (default 15 ~= 0.5s at 30fps, so authentic sub-half-second pauses stay real),
   // add an escalating boost (base ADIDLEFFTICKS, default 120 = the census cadence; doubling per further idle
   // frame, capped at x64) to a persistent monotonic offset on top of the wall-derived Ticks. ANY fb change
   // resets the streak, so actively-drawing modules (Spin Brush's smear, Snake/Photon/Spiral Gyra authentic
-  // rates, Fish World) never see boosted time — the addm-573 pacing wins hold by construction; Messages 4.0
-  // keeps strokes-with-pauses (pauses compress to ~0.5s; still 0 restarts). Gated to wall-clock stream mode
+  // rates, Fish World) never see boosted time — the pacing wins hold by construction; Messages 4.0 keeps
+  // strokes-with-pauses (pauses compress to ~0.5s; still 0 restarts). Gated to wall-clock stream mode
   // + paceable modules (substep renderers keep their own per-substep tick stepping); headless census
   // (no ADSTREAM) is untouched. ADNOIDLEFF opts out; ADIDLEFFLOG traces.
   const bool g_idleff_on = g_wallclock && g_paceable && !getenv("ADNOIDLEFF");
   const uint32_t g_idleff_base = getenv("ADIDLEFFTICKS") ? (uint32_t)strtoul(getenv("ADIDLEFFTICKS"),0,0) : 120;
   const int g_idleff_after = getenv("ADIDLEFFAFTER") ? atoi(getenv("ADIDLEFFAFTER")) : 15;
   uint32_t g_idleff_accum = 0; uint64_t g_idleff_lasthash = 0; int g_idleff_streak = 0; bool g_idleff_init = false;
-  if(g_pace_on) fprintf(stderr,"[adhost68k] addm573 pacing module DRAW to %.1f ms (%.1f fps)%s\n",g_pace_ms,g_pace_ms>0?1000.0/g_pace_ms:0.0, g_paceable?"":" [module non-paceable: substep renderer]");
-  // S4 inter-shot rebuild state (Addendum 636). A CompoundSequence module that self-disposes its
-  // singleton ("shot finished") faults the next draw through the nulled object; the real ADgm engine
-  // reconstructs the shot. Reproduce generally: on a draw fault that FOLLOWS a clean draw, re-send
-  // init(+blank) to rebuild. Rate-limited (ADRESHOTCOOL frames) so a broken module cannot fault-loop the
-  // CPU; the addm-600 process cycle timer remains the coarse backstop. Default-ON; ADNORESHOT opts out.
+  if(g_pace_on) fprintf(stderr,"[adhost68k] pacing module DRAW to %.1f ms (%.1f fps)%s\n",g_pace_ms,g_pace_ms>0?1000.0/g_pace_ms:0.0, g_paceable?"":" [module non-paceable: substep renderer]");
+  // Inter-shot rebuild state. A CompoundSequence module that self-disposes its singleton ("shot
+  // finished") faults the next draw through the nulled object; the real ADgm engine reconstructs the
+  // shot. Reproduce generally: on a draw fault that FOLLOWS a clean draw, re-send init(+blank) to
+  // rebuild. Rate-limited (ADRESHOTCOOL frames) so a broken module cannot fault-loop the CPU; the
+  // process cycle timer remains the coarse backstop. Default-ON; ADNORESHOT opts out.
   const bool g_reshot_on = !getenv("ADNORESHOT");
   const int  g_reshot_cool = getenv("ADRESHOTCOOL") ? atoi(getenv("ADRESHOTCOOL")) : 3;
   int  g_reshot_last = -100000; long g_reshot_n = 0; bool g_ever_drew_ok = false;
   for(int fN=0; fN<frames; fN++){
-    // [pf perf] EXECUTION-ISLAND PROBE EARLY-EXIT. addm 695 established that the islands materialise by
-    // frame 1 and bounded the child with a fixed 30-frame budget plus a 12s wall-clock alarm. For every
-    // module whose island set is EMPTY (measured: Super Guy, Slow Burn) the child therefore ran the full
-    // budget to report nothing — 12.0s of pure serialised startup cost, which for Slow Burn was ~100% of
-    // its time to first frame (12.60s probe + 0.61s of actual init). Stop as soon as the SIGNAL ITSELF is
-    // stable: once the executed-island set has not grown for ADSFPROBESTABLE consecutive frames we have
-    // the same set the full budget would have produced, so dump it and exit. This changes only WHEN the
-    // child stops, never WHAT it reports — verified by diffing the island files against a full-budget run.
+    // Execution-island probe early-exit. The islands materialise by frame 1, so a fixed frame/wall-clock
+    // budget makes every module with an EMPTY island set (Super Guy, Slow Burn) run the full budget to
+    // report nothing — pure serialised startup cost, ~100% of Slow Burn's time to first frame. Stop as
+    // soon as the SIGNAL ITSELF is stable: once the executed-island set has not grown for
+    // ADSFPROBESTABLE consecutive frames it is the same set the full budget would have produced, so dump
+    // it and exit. This changes only WHEN the child stops, never WHAT it reports.
     if(g_sfx && fN>0){
       size_t n=g_sfxSlots.size();
       if(n==g_sfx_lastN) g_sfx_stable++; else { g_sfx_stable=0; g_sfx_lastN=n; }
@@ -13687,15 +12266,15 @@ int main(int argc, char** argv){
         break;
       }
     }
-    if(g_shm_on){ if(!wait_go()) break; }   // addm 571: block for the app's GO (SET applied inline)
-    else poll_set();               // addm 569: apply any live "SET idx val" before this frame's draw
-    ad_poll_real_caps();           // addm 797: ADREALCAPS=1 -> fold real caps state in (inert unless armed)
-    // addm 573: pacing decision — should the module advance this display frame? (else re-send prev frame)
+    if(g_shm_on){ if(!wait_go()) break; }   // block for the app's GO (SET applied inline)
+    else poll_set();               // apply any live "SET idx val" before this frame's draw
+    ad_poll_real_caps();           // ADREALCAPS=1 -> fold real caps state in (inert unless armed)
+    // Pacing decision — should the module advance this display frame? (else re-send prev frame)
     bool g_advance = (!g_pace_on || !g_paceable);
-    // addm 581: INIT EXEMPTION (replaces addm 580) — advance freely until the module's draw first
-    // CHANGES the framebuffer vs the pre-first-draw baseline; slow-init modules (l40 Art Critic
-    // ~140s of init spread across DRAW calls) must not be init-throttled. Baseline-change (not
-    // uniformity) so a non-uniform post-blank/seeded screen doesn't defeat the exemption.
+    // Init exemption — advance freely until the module's draw first CHANGES the framebuffer vs the
+    // pre-first-draw baseline; slow-init modules (Art Critic: ~140s of init spread across DRAW calls)
+    // must not be init-throttled. Baseline-change (not uniformity) so a non-uniform post-blank/seeded
+    // screen doesn't defeat the exemption.
     if(!g_advance && g_initexempt && !g_first_drawn){
       uint64_t h=1469598103934665603ULL;
       for(int i=0;i<C.fb_w*C.fb_h;i+=64){ h=(h ^ mem->read_u8(C.g_fb+(uint32_t)i))*1099511628211ULL; }
@@ -13703,31 +12282,30 @@ int main(int argc, char** argv){
       if(h!=g_pace_basehash) g_first_drawn=true; else g_advance=true;
     }
     if(!g_advance){ double n=pace_now(); if((n-g_pace_last)>=g_pace_ms){ g_pace_last=n; g_advance=true; } }
-    // addm 574: mirror the live KeyMap into the classic low-memory KeyMap global at
+    // Mirror the live KeyMap into the classic low-memory KeyMap global at
     // 0x174 (16 bytes) each frame, for any AD-engine/module code that reads it directly
     // (GetKeys just copies this region). Gated on g_input_seen so a no-input run never
-    // writes here -> byte-identical to the pre-574 host. ADTESTCAPS/ADTESTKEY inject
-    // state headlessly (no app) so the interaction can be A/B'd from a decoded stream.
+    // writes here. ADTESTCAPS/ADTESTKEY inject state headlessly (no app) so the
+    // interaction can be A/B'd from a decoded stream.
     if(fN==0){
       if(getenv("ADTESTCAPS")){ g_caps=true; ad_km_set(kCapsKeycode,true); g_input_seen=true;
         if(!g_pf_hook_installed && g_pf_install_hook) g_pf_install_hook(); }
       if(const char* tk=getenv("ADTESTKEY")){ ad_km_set(atoi(tk),true); g_input_seen=true;
         if(!g_pf_hook_installed && g_pf_install_hook) g_pf_install_hook(); }
     }
-    // addm 802: ADTESTCAPSAFTER=N raises caps at FRAME N instead of frame 0 -- a real
-    // caps-off -> caps-on EDGE mid-run. The 68K twin of the PPC lever at adhost.cc:2029, which
-    // 68K never had; without it a mid-run edge can only be driven through the stdin transport,
-    // which needs ADSTREAM free-run mode, where these modules are wall-clock nondeterministic
-    // (measured: two Nirvana controls diverge at frame 52 and end 683 frames apart). Assigns
+    // ADTESTCAPSAFTER=N raises caps at FRAME N instead of frame 0 -- a real
+    // caps-off -> caps-on EDGE mid-run. Without it a mid-run edge can only be driven through the
+    // stdin transport, which needs ADSTREAM free-run mode, where these modules are wall-clock
+    // nondeterministic (two Nirvana controls diverge at frame 52 and end 683 frames apart). Assigns
     // only the same three variables ad_input_line already assigns; unset -> no byte changes.
     if(const char* tca=getenv("ADTESTCAPSAFTER")){ int thr=atoi(tca);
       if(thr>0 && fN==thr && !g_caps){ g_caps=true; ad_km_set(kCapsKeycode,true); g_input_seen=true;
         if(!g_pf_hook_installed && g_pf_install_hook) g_pf_install_hook();
         if(getenv("ADINPUTLOG")) fprintf(stderr,"[input] TESTCAPSAFTER edge at frame %d\n",fN); } }
     if(g_input_seen) for(int i=0;i<16;i++) try{ mem->write_u8(0x174+i, g_km[i]); }catch(...){}
-    // ==== addm 598: Rodger Dodger authentic shell-input drive (msg7 / AD Channel) ====
-    // RE (this addendum): RD is a fully event-driven AD 4.0 C++ game. It reads NO OS input trap
-    // and NO low-mem KeyMap (confirming addm 574). Its entire input surface is delivered by the AD
+    // ==== Rodger Dodger authentic shell-input drive (msg7 / AD Channel) ====
+    // Rodger Dodger is a fully event-driven AD 4.0 C++ game. It reads NO OS input trap
+    // and NO low-mem KeyMap. Its entire input surface is delivered by the AD
     // SHELL through module_main MESSAGE 7 — the Channel/user-message dispatch — which our direct
     // BLANK/DRAW host (msg 0/2/3 only) never sends. module_main @0x0104504C: selector switch handles
     // 0,1,2,3,4,5,7 (6->default); msg7 @0x010451AA calls the Channel gate [A5+0x61E8] (@0x01021DFA,
@@ -13754,11 +12332,11 @@ int main(int argc, char** argv){
       call_module(7, "rdinput");
       if(getenv("ADRDLOG")) fprintf(stderr,"[rdinput] fN=%d ch=%08X code=%d\n",fN,ch,code);
     }
-    // ==== end addm 598 ====
-    // Frame-loop stub-census flush (addm 537): runs even when a module fault-storms or
+    // ==== end Rodger Dodger input drive ====
+    // Frame-loop stub-census flush: runs even when a module fault-storms or
     // runs few traps/frame, so a SIGKILL'd soak still leaves the last complete table.
     if(g_stubcensus_on && fN>0 && (fN % 2000)==0){ fprintf(stderr,"[stubcensus-flush frame=%d traps=%llu]\n",fN,(unsigned long long)traps); adstub_flush(); }
-    // Time-based flush (addm 537): every ~3s wall clock, so slow-paced lanes (l40 ADSECSRATE=1
+    // Time-based flush: every ~3s wall clock, so slow-paced lanes (ADSECSRATE=1
     // ~1 frame/s) and early-derail fault storms still leave data before the soak SIGKILL.
     if(g_stubcensus_on){ static time_t sc_last=time(0); time_t sc_now=time(0);
       if(sc_now-sc_last>=3){ sc_last=sc_now; fprintf(stderr,"[stubcensus-flush t=%ld traps=%llu]\n",(long)sc_now,(unsigned long long)traps); adstub_flush(); } }
@@ -13780,40 +12358,38 @@ int main(int argc, char** argv){
       for(int i=0;i<8;i++) mem->write_u8(U+0x0C+i,(uint8_t)rnd(256));
     }
     // Advance the Mac Ticks global so time-scheduled savers progress. Default ~2 ticks/frame
-    // (~1/30 s of simulated time per drawn frame); ADTICKRATE overrides. addm 573: in stream mode derive
+    // (~1/30 s of simulated time per drawn frame); ADTICKRATE overrides. In stream mode derive
     // Ticks from REAL elapsed wall time at 60.15Hz (every display frame, so self-paced modules see true
     // time even on re-send frames); advance Secs only on ADVANCE frames (LIFE/Frost&Fire need 0x20C to
-    // change each generation — see the addm-573 header note above).
-    // addm 581: SUBSTEP (non-paceable) modules keep the LEGACY monotonic tick step even in stream
-    // mode — the addm-573 wall-clock recompute (g_ticks = base + wall) silently ERASED the per-substep
-    // ADTICKRATE increments each display frame (time ran backward across frames), starving the
-    // tick-scheduled substep renderers (Bugs 2 distinct/62s, Daredevil Dan 5): their l40 recipe
-    // ADTICKRATE=120 acceleration is the authored cadence (pre-573 app era: +ADTICKRATE per frame AND
-    // per substep, monotonic). ADSUBWALL=1 restores the wall-clock recompute for substep modules (A/B).
+    // change each generation — see the wall-clock header note above).
+    // SUBSTEP (non-paceable) modules keep the monotonic tick step even in stream mode: the wall-clock
+    // recompute (g_ticks = base + wall) erases the per-substep ADTICKRATE increments each display frame
+    // (time runs backward across frames), starving the tick-scheduled substep renderers (Bugs, Daredevil
+    // Dan). Their ADTICKRATE=120 acceleration is the authored cadence: +ADTICKRATE per frame AND per
+    // substep, monotonic. ADSUBWALL=1 restores the wall-clock recompute for substep modules (A/B).
     static const bool g_subwall = getenv("ADSUBWALL")!=nullptr;
     if(g_wallclock && (g_paceable || g_subwall)){   // tick-tied savers are paceable -> hit this branch
       double el=(pace_now()-g_pace_t0)/1000.0;
-      // addm 613: ADTICKTIEDMULT scales the wall-clock TickCount rate for the tick-tied ambient savers
-      // (Boris/Can of Worms/Clocks). Default 1.0 => byte-identical to main. See the g_ticktied block for
-      // the full rationale: at literal real-time their per-tick pixel motion is sub-pixel so they only
-      // yield ~2-4 distinct frames/s (authentic-but-slow); a moderate boost restores a watchable cadence
-      // in line with sibling savers, WITHOUT the pre-573 ~120x frenzy. Only g_ticks (TickCount) is scaled;
-      // g_secs / ADREALCLOCK (GetDateTime, the clock face's time-of-day) is untouched so Clocks stays
-      // time-accurate while its drift smooths. Opt-in (default 1x); ADNOTICKTIED disables the class.
+      // ADTICKTIEDMULT scales the wall-clock TickCount rate for the tick-tied ambient savers
+      // (Boris/Can of Worms/Clocks). Default 1.0. See the g_ticktied block for the full rationale:
+      // at literal real-time their per-tick pixel motion is sub-pixel so they only yield ~2-4 distinct
+      // frames/s (authentic-but-slow); a moderate boost restores a watchable cadence in line with
+      // sibling savers. Only g_ticks (TickCount) is scaled; g_secs / ADREALCLOCK (GetDateTime, the
+      // clock face's time-of-day) is untouched so Clocks stays time-accurate while its drift smooths.
+      // Opt-in (default 1x); ADNOTICKTIED disables the class.
       double hz = (g_ticktied ? 60.14985*g_ttmul : 60.14985);
-      g_ticks = g_ticks_base + g_idleff_accum + (uint32_t)(el*hz);   // addm 578: + idle catch-up offset
+      g_ticks = g_ticks_base + g_idleff_accum + (uint32_t)(el*hz);   // + idle catch-up offset
       if(g_advance) g_secs += getenv("ADSECSRATE") ? (uint32_t)strtoul(getenv("ADSECSRATE"),0,0) : 1;
     } else {
       g_ticks += getenv("ADTICKRATE") ? (uint32_t)strtoul(getenv("ADTICKRATE"),0,0) : 2;
       g_secs  += getenv("ADSECSRATE") ? (uint32_t)strtoul(getenv("ADSECSRATE"),0,0) : 1;
     }
     mem->write_u32b(0x16A, g_ticks);
-    // addm 585: opt-in real local clock (see the seed block above). Recompute the time-of-day global
-    // 0x20C from real wall time each frame so Clocks reads the current local time-of-day and advances
-    // 1:1 (1s granularity). This overrides ONLY the absolute epoch; the synthetic-epoch/+ADSECSRATE
-    // computation just above still runs for the tick RATE bookkeeping and is fully preserved when the
-    // flag is off. ADFAKEEPOCH pins the value for deterministic gate renders. Default (no ADREALCLOCK):
-    // this branch is skipped -> byte-identical to main.
+    // Opt-in real local clock (ADREALCLOCK). Recompute the time-of-day global 0x20C from real wall time
+    // each frame so Clocks reads the current local time-of-day and advances 1:1 (1s granularity). This
+    // overrides ONLY the absolute epoch; the synthetic-epoch/+ADSECSRATE computation just above still
+    // runs for the tick RATE bookkeeping and is fully preserved when the flag is off. ADFAKEEPOCH pins
+    // the value for deterministic gate renders. Default: this branch is skipped.
     if(g_realclock) g_secs = ad_real_mac_secs();
     mem->write_u32b(0x20C, g_secs);
     bool memdiff=getenv("ADMEMDIFF")!=nullptr;
@@ -13822,7 +12398,7 @@ int main(int argc, char** argv){
     if(memdiff){ md_pre.resize(md_hi-md_lo);
       for(uint32_t i=0;i<md_hi-md_lo;i++){ try{ md_pre[i]=mem->read_u8(md_lo+i); }catch(...){ md_pre[i]=0; } } }
     // ADCANVASFIX experiment: the dll# canvas object has baseAddr(+8)=g_fb but zero dimension fields and an
-    // OVERWRITTEN backing handle (+0x1E=0xFFFF, addendum 179). Try populating candidate dim/backing fields
+    // OVERWRITTEN backing handle (+0x1E=0xFFFF). Try populating candidate dim/backing fields
     // before draw so the AD3_Canvas pixel-write loop (if bounded by them) has non-zero extent. ADCANVASFIX=
     // "off:val,off:val,..." patches canvas+off = val (val 'fb'/'bs'/'w'/'h'/'rb' are symbolic; else hex).
     if(getenv("ADCANVASFIX") && g_dll_canvasobj){ char buf[160]; strncpy(buf,getenv("ADCANVASFIX"),159); buf[159]=0;
@@ -13835,7 +12411,7 @@ int main(int argc, char** argv){
           fprintf(stderr,"[canvasfix] canvas+0x%X <- %08X\n",off,v); } } }
     { int bbframe = getenv("ADBBTRACEFRAME") ? atoi(getenv("ADBBTRACEFRAME")) : 0;
       if(getenv("ADBBTRACE") && fN==bbframe){ g_bbtrace_fp=fopen(getenv("ADBBTRACE"),"w"); g_bbtrace_on=true; g_bbtrace_last=0; g_bbtrace_n=0; } }
-    // Dominoes layout accelerator (addm 457): run extra draw sub-steps per captured frame so the ~127-draw
+    // Dominoes layout accelerator: run extra draw sub-steps per captured frame so the ~127-draw
     // silent layout phase completes and the board composite (CopyBits) + topple animation become visible
     // within the 8 captured frames. Advance the Ticks clock per sub-step so any time-scheduled internal
     // state also progresses. Name-gated (dom_substep==0 for every non-Dominoes module -> no behaviour change).
@@ -13847,7 +12423,7 @@ int main(int argc, char** argv){
     if(getenv("ADDOMTR") && fN==(getenv("ADDOMTRFRAME")?atoi(getenv("ADDOMTRFRAME")):0)){
       g_domtr_fp=fopen(getenv("ADDOMTR"),"w"); g_domtr_on=true; g_domtr_last=0; g_domtr_n=0; }
     bool s4_drew_ok = true;
-    // S4 first-visual warmup is OPT-IN (ADWARMUP=N, default OFF). A frame-0 "fb unchanged after the draw"
+    // First-visual warmup is OPT-IN (ADWARMUP=N, default OFF). A frame-0 "fb unchanged after the draw"
     // test cannot distinguish a genuine SILENT LAYOUT (Dominoes: 127 inert draws) from a TICK-GATED saver
     // that just hasn't advanced this tick (Snake/Mandelbrot); draw_ops doesn't separate them (Snake=1 but
     // Mandelbrot draws raw, =0). Defaulting it ON would break byte-identity for tick-gated savers, and the
@@ -13858,7 +12434,7 @@ int main(int argc, char** argv){
     auto s4_fbhash=[&]()->uint64_t{ uint64_t h=1469598103934665603ULL;
       for(int i=0;i<C.fb_w*C.fb_h;i++){ h=(h ^ mem->read_u8(C.g_fb+(uint32_t)i))*1099511628211ULL; } return h; };
     uint64_t s4_warm_base = s4_warmup ? s4_fbhash() : 0;
-    // *** addm 740: the module's OWN instance slot is the engine's re-construction signal. ***
+    // The module's OWN instance slot is the engine's re-construction signal.
     // The classic AD module ABI (the same contract the dll# lane already documents): the engine hands
     // the module a persistent storage block whose first long IS the module instance — 0 means "no
     // instance, construct one". A module that finishes a cycle tears itself down and writes 0 back
@@ -13877,7 +12453,7 @@ int main(int argc, char** argv){
         if(!getenv("ADNOBLANK")) call_module(blankMsg,"cycle-blank");
         if(g_s4log) fprintf(stderr,"[cycle] fN=%d module cleared its instance slot -> re-init\n",fN);
       } }
-    if(g_advance) s4_drew_ok = call_module(drawMsg, "draw");   // addm 573: skip the plain draw on re-send frames (g_fb held)
+    if(g_advance) s4_drew_ok = call_module(drawMsg, "draw");   // skip the plain draw on re-send frames (g_fb held)
     if(s4_warmup && s4_drew_ok && s4_fbhash()==s4_warm_base){   // frame-0 draw was visually INERT (silent layout)
       int wn=0;
       for(; wn<s4_warmup_cap; wn++){
@@ -13889,7 +12465,7 @@ int main(int argc, char** argv){
       if(g_s4log && wn>0) fprintf(stderr,"[s4-warmup] fN0: %d extra draws to first visual\n",wn);
     }
     if(s4_drew_ok && g_advance) g_ever_drew_ok = true;   // module constructed + a draw completed cleanly at least once
-    // S4 inter-shot rebuild: a faulted draw AFTER a clean one = the module dispatched through a
+    // Inter-shot rebuild: a faulted draw AFTER a clean one = the module dispatched through a
     // self-disposed singleton ("shot finished", Super Guy D4=1 class). Re-send init(+blank) so the next
     // draw runs on a fresh object. Gated on a prior clean draw so a module that faults from the start
     // (never rendered) never churns — it stays static exactly like the plain drive.
@@ -13899,18 +12475,16 @@ int main(int argc, char** argv){
       if(!getenv("ADNOBLANK")) call_module(blankMsg,"reshot-blank");
       if(g_s4log) fprintf(stderr,"[s4-reshot] fN=%d rebuild #%ld (draw faulted -> re-init)\n",fN,g_reshot_n);
     }
-    // addm 578: idle detection for the tick catch-up — sampled fb hash (stride 4) after each ADVANCE draw.
-    // *** PRESENTED-IMAGE LIVENESS (field-test fix: Tunnel) ***: hash the index plane AND the CLUT, i.e.
-    // exactly what snap_p8 presents. CLUT-ANIMATION savers (addm 627 documents Tunnel as precisely this
-    // class: it paints its rings ONCE into indices 2..101 and "flies" the tunnel by SetEntries-rotating
-    // that gradient every frame) never touch a single framebuffer BYTE after their first two frames. An
-    // index-plane-only hash therefore reads them as permanently idle, the streak grows without bound, and
-    // the catch-up injects up to base<<6 ticks EVERY frame — running Tunnel's rotation clean off the end of
-    // its cycle into an all-black CLUT (measured: palette indices 2..101 all black from ~frame 240 onward,
-    // never recovering) while the module itself keeps issuing ~7 correct, BRIGHT SetEntries per frame.
-    // The idle detector must use the presenter's definition of "the frame changed"; 256 CLUT entries is
-    // ~0.5% the cost of the fb sample it already takes. ADNOIDLEFF still disables the whole mechanism;
-    // ADIDLEFFNOCLUT restores the index-plane-only hash for A/B.
+    // Idle detection for the tick catch-up — sampled fb hash (stride 4) after each ADVANCE draw, over the
+    // index plane AND the CLUT, i.e. exactly what snap_p8 presents. CLUT-ANIMATION savers (Tunnel paints
+    // its rings ONCE into indices 2..101 and "flies" the tunnel by SetEntries-rotating that gradient every
+    // frame) never touch a single framebuffer BYTE after their first two frames. An index-plane-only hash
+    // reads them as permanently idle, the streak grows without bound, and the catch-up injects up to
+    // base<<6 ticks EVERY frame — running Tunnel's rotation clean off the end of its cycle into an
+    // all-black CLUT while the module keeps issuing correct, BRIGHT SetEntries. The idle detector must
+    // use the presenter's definition of "the frame changed"; 256 CLUT entries is ~0.5% the cost of the fb
+    // sample it already takes. ADNOIDLEFF disables the whole mechanism; ADIDLEFFNOCLUT restores the
+    // index-plane-only hash for A/B.
     if(g_idleff_on && g_advance){
       uint64_t ih=1469598103934665603ULL;
       for(int i=0;i<C.fb_w*C.fb_h;i+=4){ ih=(ih ^ mem->read_u8(C.g_fb+(uint32_t)i))*1099511628211ULL; }
@@ -13931,11 +12505,11 @@ int main(int argc, char** argv){
           auto sc=[&](uint32_t a)->long{ long c=0; for(uint32_t i=0;i<0x31000;i+=4){uint32_t v=0;try{v=mem->read_u32b(a+i);}catch(...){} if(v)c++;} return c; };
           fprintf(stderr,"[efn k=%d] board nz=%ld acc nz=%ld\n",k,sc(bd),sc(ac)); }
         call_func(0x01040056, g_sb_ubobj); } call_module(drawMsg,"draw"); }
-    // addm 494 (decisive CA test lever ADSBCA=N): drive the CA primitives DIRECTLY — DoInfect(obj)@0x0103F500
+    // ADSBCA=N: drive the CA primitives DIRECTLY — DoInfect(obj)@0x0103F500
     // then UpdateBoard(obj)@0x0103F64C — N times per captured frame, bypassing the spinning EachFrame
     // coroutine (@0x01040056 longjmps to a scheduler we don't provide). Tests whether the CA spreads/animates
     // when given many clean generations. Logs board nonzero-count + max positive cell value.
-    // addm 494: robust BogSim-object capture. The PaletteMusher scheduler only opens the gate (where
+    // Robust BogSim-object capture. The PaletteMusher scheduler only opens the gate (where
     // g_sb_ubobj is normally captured) after ~100+ palette-crossfade draws, which is slow to reach. Scan the
     // module heap for the BogSim's signature instead: side=[+0x8] in 1..512, dim=[+0xC]==20, revive=[+0x10]==-10,
     // and acc[+0x28]==board[+0x24]+side*side*4 (the two contiguous CA boards). Host-side object discovery only.
@@ -13955,7 +12529,7 @@ int main(int argc, char** argv){
       fprintf(stderr,"[sbcc] a5=%08X cache@%08X [0..23]= %s | obj+0x56=%08X +0x5A=%08X +0x5E=%08X\n",a5,cache,b,d56,d5a,d5e); }
     if(getenv("ADSBCA") && g_sb_ubobj){ int n=getenv("ADSBCA")?atoi(getenv("ADSBCA")):6;
       auto stat=[&](uint32_t base,long&nz,uint32_t&mxpos,long&neg)->void{ nz=0;mxpos=0;neg=0; for(uint32_t i=0;i<0x31000;i+=4){uint32_t v=0;try{v=mem->read_u32b(base+i);}catch(...){} if(v){nz++; if(v&0x80000000u)neg++; else if(v>mxpos)mxpos=v;}} };
-      // addm 494: host re-ignition. The module seeds the board only inside InitInfection/EachFrame, which
+      // Host re-ignition. The module seeds the board only inside InitInfection/EachFrame, which
       // needs the palette-crossfade scheduler (inert headless). Inject S fresh hot seeds into the accumulator
       // [obj+0x28] each frame (the "continuous re-ignition" a self-sustaining burn front needs) so DoInfect
       // has live fuel to spread. This is host-driving the module's own re-seed step (authorized), NOT a byte
@@ -13984,7 +12558,7 @@ int main(int argc, char** argv){
           if(accpos[0]) fprintf(stderr," |%s",accpos);
           fprintf(stderr,"\n"); }
       }
-      // addm 494: DIRECT PRESENT — rasterize the fire board via the module's own DisplayPop8, then blit
+      // DIRECT PRESENT — rasterize the fire board via the module's own DisplayPop8, then blit
       // its indexed dest buffer to g_fb + reflect the module palette. Host-driving the module's own render
       // (same class as the Bugs/Dominoes/DD substep present), NOT a module byte-patch.
       if(getenv("ADSBPRESENT")){
@@ -14020,8 +12594,8 @@ int main(int argc, char** argv){
     if(g_bbtrace_on){ g_bbtrace_on=false; if(g_bbtrace_fp){ fclose(g_bbtrace_fp); g_bbtrace_fp=nullptr; } }
     // Lunacy-guided PRESENT (ADAUTOPRESENT): AD modules draw to a SCREEN BITMAP in emulated memory (their
     // screen-port baseAddr) via QD AND raw byte/CopyBits stores; the real engine SYNCS that bitmap -> display
-    // each frame (Lunacy Area 1, the "runs QD but blank" unblocker). If after the draw the current port's
-    // pixmap is an OFFSCREEN (base != g_fb), blit it -> g_fb so raw/CopyBits content surfaces.
+    // each frame. If after the draw the current port's pixmap is an OFFSCREEN (base != g_fb), blit it ->
+    // g_fb so raw/CopyBits content surfaces.
     if(getenv("ADAUTOPRESENT")){
       uint32_t cp = C.cur_port ? C.cur_port : C.g_port;
       if(cp){
@@ -14105,19 +12679,14 @@ int main(int argc, char** argv){
         }
       }
     }
-    // SLOW BURN Gate B (addm 481): host-side CLUT reflection. Slow Burn animates by palette-cycling
-    // (TwiddlePalette) over a static indexed board; the module rewrites its OWN 256-entry ColorSpec
-    // palette every frame (located below) but installs it via LIB510 dispatch that never reaches the
-    // host g_clut (ZERO SetEntries traps), so snap_ppm's index->RGB never cycles. Reflect the module's
-    // LIVE palette into g_clut so the presented framebuffer uses the current twiddled colours. Gated
-    // (default OFF) + name-scoped to Slow Burn -> byte-identical for every other module. This is the
-    // reflection the reframe allows (mirror the module's palette writes into the host CLUT), not a
-    // module byte-patch. NOTE (corrected, addm 781): the old claim here — "Slow Burn's board is
-    // never rasterised to g_fb (Gate A, DisplayPop8 never runs)" — was FALSE. DisplayPop8 runs once per
-    // captured frame; it was writing to a garbage base because QDExtensions selector 15 went unserved.
-    // With that fixed the module's own UpdateScreen CopyBits carries the board to g_fb and its own palette
-    // reaches g_clut through the normal path, so this reflection is not needed for the render and stays
-    // default-OFF/opt-in as a diagnostic.
+    // Slow Burn host-side CLUT reflection. Slow Burn animates by palette-cycling (TwiddlePalette) over a
+    // static indexed board; the module rewrites its OWN 256-entry ColorSpec palette every frame (located
+    // below) but installs it via LIB510 dispatch that issues ZERO SetEntries traps, so reflecting that
+    // palette into g_clut is what would make the presented framebuffer use the current twiddled colours.
+    // Gated (default OFF) + name-scoped to Slow Burn -> byte-identical for every other module. Not needed
+    // for the normal render: DisplayPop8 runs once per captured frame and, with QDExtensions selector 15
+    // served, the module's own UpdateScreen CopyBits carries the board to g_fb and its palette reaches
+    // g_clut through the normal path. Kept default-OFF as a diagnostic.
     if(g_slowburn_reflect){
       // Locate the module's live ColorSpec palette: a 256-entry table (8 bytes each: value.w r.w g.w b.w)
       // whose value fields form an ascending ramp (entry[i].value == base+i). Scan the module heap.
@@ -14132,11 +12701,11 @@ int main(int argc, char** argv){
     }
     if(getenv("ADSBHITS")) fprintf(stderr,"[sbhits f%d] DisplayPop8=%ld UpdateScreen=%ld EachFrame=%ld DoInfect=%ld UpdateBoard=%ld\n",
       fN,g_sb_displaypop,g_sb_updscr,g_sb_drawfn,g_sb_dirtygate,g_sb_dirtytrue);
-    g_curframe=fN;   // addm 561: current frame index for the ADBORDUMP screen-write tracer
-    g_white_idx = C.rgb_to_index(0xFFFF,0xFFFF,0xFFFF);   // addm 708b: this palette's white = the sprite matte
+    g_curframe=fN;   // current frame index for the ADBORDUMP screen-write tracer
+    g_white_idx = C.rgb_to_index(0xFFFF,0xFFFF,0xFFFF);   // this palette's white = the sprite matte
     if(dumpdir){ char pth[512]; snprintf(pth,sizeof(pth),"%s/frame%d.ppm",dumpdir,fN); C.snap_ppm(pth); }
     if(getenv("ADSATLOG")) fprintf(stderr,"SATFRAME %d\n",fN);
-    // addm 535: ADSTREAM=1 — stream concatenated P6 frames over stdout (NO filesystem writes;
+    // ADSTREAM=1 — stream concatenated P6 frames over stdout (NO filesystem writes;
     // the modern-app preview reads the pipe). One-time init dups the real stdout to a private
     // stream and points fd 1 at /dev/null so stray printf()s can never corrupt the frame stream.
     // Pipe backpressure throttles the render loop to the consumer's pace, and a closed pipe
@@ -14144,13 +12713,13 @@ int main(int argc, char** argv){
     static FILE* g_streamf = nullptr; static bool g_stream_init=false; static bool g_stream_idx=false;
     if(!g_stream_init){ g_stream_init=true; g_stream_idx=getenv("ADSTREAMIDX")!=nullptr;
       if(getenv("ADSTREAM") && !g_shm_on){
-        // *** addm 758 ***: the throttle quoted above is the PIPE's. Redirect the same stream to a
-        // REGULAR FILE and there is no backpressure at all: the host writes frames as fast as it can
-        // render them (~1.4 GB/s measured, addm 748) and fills the disk in about a minute. That is a
-        // foot-gun with no legitimate default — a capture wants a bounded consumer (`| head -c`, a
-        // named pipe, a ppm splitter), not an unbounded file. Refuse it and name the fix; a caller who
-        // really does want the raw file sets ADSTREAMFORCE=1. Pipes, sockets and ttys are untouched
-        // (the app's path is a pipe), and so is ADSHM, which never reaches here.
+        // The throttle quoted above is the PIPE's. Redirect the same stream to a REGULAR FILE and there
+        // is no backpressure at all: the host writes frames as fast as it can render them (~1.4 GB/s)
+        // and fills the disk in about a minute. That is a foot-gun with no legitimate default — a
+        // capture wants a bounded consumer (`| head -c`, a named pipe, a ppm splitter), not an unbounded
+        // file. Refuse it and name the fix; a caller who really does want the raw file sets
+        // ADSTREAMFORCE=1. Pipes, sockets and ttys are untouched (the app's path is a pipe), and so is
+        // ADSHM, which never reaches here.
         struct stat sst;
         bool isreg = (fstat(1,&sst)==0) && S_ISREG(sst.st_mode);
         if(isreg && !getenv("ADSTREAMFORCE")){
@@ -14160,20 +12729,20 @@ int main(int argc, char** argv){
         } else {
           if(isreg) fprintf(stderr,"[adhost] ADSTREAMFORCE: streaming to a regular file with NO "
                                    "backpressure (~1.4 GB/s) — watch your disk.\n");
-          int sfd=dup(1); if(sfd>=0){ fcntl(sfd,F_SETFD,FD_CLOEXEC); g_streamf=fdopen(sfd,"wb"); freopen("/dev/null","w",stdout); }   // addm 793: see the ack dup above
+          int sfd=dup(1); if(sfd>=0){ fcntl(sfd,F_SETFD,FD_CLOEXEC); g_streamf=fdopen(sfd,"wb"); freopen("/dev/null","w",stdout); }   // see the ack dup above
         }
       } }
-    // *** addm 699 BANNER OVERLAY present-time composite ***: for the first g_banner_nframes frames, paint the
-    // captured banner ONTO the presented frame (saving the underlying g_fb rect), so every consumer (shm/stream/
-    // fbhash) sees the transient banner; restore g_fb after present so the module's next frame is never polluted
-    // (and the banner never entered the sprite bg — it was suppressed at its draw site). After the timeout the
-    // banner simply stops being composited = the authentic timed clear. N = ADBANNERSECS(3.0) * ADBANNERFPS(15).
-    // AUTHORED DEFAULT, not reverse-engineered: the exact fun-fact duration is NOT in any bits we have — the
-    // faceplates are pure artwork and the AD4 control panel's timers are sub-second UI debounces / cycle
-    // durations; the banner clear lived in the fullscreen-blanker engine (the faceless component this host
-    // REPLACES), absent from every disk image (faceplate extraction, addm 698 supp). ~3s (2-5s defensible)
-    // matches the please-wait feel. The real clear is DESTRUCTIVE overdraw (the library does NO save-under —
-    // it draws straight to screen and returns), which is exactly this overlay: draw for N frames, then stop.
+    // Banner overlay, present-time composite: for the first g_banner_nframes frames, paint the captured
+    // banner ONTO the presented frame (saving the underlying g_fb rect), so every consumer (shm/stream/
+    // fbhash) sees the transient banner; restore g_fb after present so the module's next frame is never
+    // polluted (and the banner never entered the sprite bg — it was suppressed at its draw site). After
+    // the timeout the banner simply stops being composited = the authentic timed clear.
+    // N = ADBANNERSECS(3.0) * ADBANNERFPS(15). The duration is an AUTHORED DEFAULT, not reverse-
+    // engineered: the exact fun-fact duration is in no bits we have — the faceplates are pure artwork,
+    // the AD4 control panel's timers are sub-second UI debounces / cycle durations, and the banner clear
+    // lived in the fullscreen-blanker engine this host replaces. ~3s matches the please-wait feel. The
+    // real clear is DESTRUCTIVE overdraw (the library does NO save-under — it draws straight to screen
+    // and returns), which is exactly this overlay: draw for N frames, then stop.
     static int g_banner_nframes = getenv("ADBANNERFRAMES") ? atoi(getenv("ADBANNERFRAMES"))
         : (int)((getenv("ADBANNERSECS")?atof(getenv("ADBANNERSECS")):3.0) * (getenv("ADBANNERFPS")?atof(getenv("ADBANNERFPS")):15.0) + 0.5);
     std::vector<uint8_t> _bsave; int _bx0=0,_by0=0,_bx1=0,_by1=0; bool _bpaint=false;
@@ -14198,17 +12767,16 @@ int main(int argc, char** argv){
         if(getenv("ADBANNERLOG") && fN==0) fprintf(stderr,"[banner] compositing \"%s\" rect[%d,%d,%d,%d] for %d frames\n",g_banner_text.c_str(),_bx0,_by0,_bx1,_by1,g_banner_nframes);
       }
     }
-    if(g_shm_on){                  // addm 571: zero-copy present into the mmap'd slot + one 'F' ack byte
+    if(g_shm_on){                  // zero-copy present into the mmap'd slot + one 'F' ack byte
       C.snap_p8_shm(g_shm_pal, g_shm_idx);
       __sync_synchronize();        // publish pixels before the seq bump the app may observe
       *(uint32_t*)(g_shm+12)=(uint32_t)(fN+1);
       fputc('F', g_ackf); fflush(g_ackf);
     } else if(g_streamf){ if(g_stream_idx) C.snap_p8_stream(g_streamf); else C.snap_ppm_stream(g_streamf); }
-    // addm 527: DISK-FREE motion metric. ADFBHASH=1 -> per-frame FNV-1a checksum of g_fb printed to
-    // stderr ("[fbhash] <frame> <hash>"). A 60s soak then needs ZERO frame files on disk: motion =
-    // distinct hashes over wall-clock, read straight from the log. Added after two soak-census disk-fill
-    // incidents (5-way and 2-way frame-dump censuses outran the prune loop and took the volume to 100%,
-    // wedging the whole session). Purely a harness observability lever — no module-visible behavior.
+    // Disk-free motion metric. ADFBHASH=1 -> per-frame FNV-1a checksum of g_fb printed to stderr
+    // ("[fbhash] <frame> <hash>"). A 60s soak then needs ZERO frame files on disk: motion = distinct
+    // hashes over wall-clock, read straight from the log. Purely a harness observability lever — no
+    // module-visible behavior.
     static const bool g_fbhash = getenv("ADFBHASH") != nullptr;
     if(g_fbhash){
       uint64_t h=1469598103934665603ULL;
@@ -14223,9 +12791,9 @@ int main(int argc, char** argv){
         if(b!=g_sffp_base[i]) g_sffp_touch[i]=1; }
       g_sffp_snaps++;
     }
-    // BLANK-ORDERING RE evidence lever: ADFBHASHRGB hashes the CLUT-DECODED (displayed) RGB instead of the
-    // index plane, so an index-cosmetic change (e.g. idx255-black vs idx0-black, same displayed colour) hashes
-    // IDENTICAL while a genuine display change differs. Classifies the ADFORCEBLANKALL DIFFER set.
+    // ADFBHASHRGB hashes the CLUT-DECODED (displayed) RGB instead of the index plane, so an
+    // index-cosmetic change (e.g. idx255-black vs idx0-black, same displayed colour) hashes IDENTICAL
+    // while a genuine display change differs. Classifies the ADFORCEBLANKALL DIFFER set.
     if(getenv("ADFBHASHRGB")){
       uint64_t h=1469598103934665603ULL;
       uint16_t lut[256][3];
@@ -14236,48 +12804,45 @@ int main(int argc, char** argv){
         for(int c=0;c<3;c++){ h^=(lut[v][c]>>8)&0xFF; h*=1099511628211ULL; } }
       fprintf(stderr,"[fbhashrgb] %d %016llx\n",fN,(unsigned long long)h);
     }
-    // addm 699: restore g_fb under the banner overlay after present+hash — the banner never persists in the
+    // Restore g_fb under the banner overlay after present+hash — the banner never persists in the
     // module's framebuffer (it is a present-time composite only), so the module's next frame is byte-clean.
     if(_bpaint){ size_t idx=0; for(int yy=_by0; yy<_by1; yy++) for(int xx=_bx0; xx<_bx1; xx++){ try{ mem->write_u8(C.g_fb+(uint32_t)(yy*C.fb_w+xx), _bsave[idx]); }catch(...){} idx++; } }
-    // addm 700: AUTHENTIC single-saver semantics — DEFAULT = run the selected module CONTINUOUSLY, cycle only
-    // on explicit opt-in. This supersedes the addm-595/600 first-draw-anchored FRESHNESS-GATED timer.
+    // Single-saver semantics: the DEFAULT is to run the selected module CONTINUOUSLY and cycle only on
+    // explicit opt-in.
     //
-    // CONTROL-PANEL RE (After Dark 4.0 top-level file, res fork 510 KB — cdev + ADCP CODE; scratchpad/cp_dump).
-    // The engine cycled the active module(s) on a wall-clock "Duration" timer. The exact table is in resources:
+    // CONTROL-PANEL RE (After Dark 4.0 top-level file, res fork 510 KB — cdev + ADCP CODE).
+    // The engine cycled the active module(s) on a wall-clock "Duration" timer. The table is in resources:
     //   sUnt 500/503 = the Duration popup labels; rsVl 503 = the label->SECONDS map (menu-value word, long secs):
     //     15s,30s,1m(60),2m(120),5m(300),10m(600),30m(1800),45m(2700),1h(3600),1.5h(5400),2h(7200),6h(21600),
     //     and "Forever!" = 0xFFFFFFFF (never cycle). sVal 503 "Default Duration" = 0x3C = 60 => factory default
     //   is ONE MINUTE. At each Duration boundary the engine tore the module down (DoClose) and re-initialized
     //   the next pick from the Randomizer; with ONE module enabled the "next" pick is the SAME module, i.e. an
-    //   UNCONDITIONAL re-init every Duration. There was NO framebuffer-freshness gate — the engine never watched
+    //   UNCONDITIONAL re-init every Duration. There is NO framebuffer-freshness gate — the engine never watched
     //   the fb; a still-animating saver (Vertigo) was re-init'd at the boundary just the same.
     // Two authentic run modes existed: (a) the fullscreen blanker = the Duration cycle above; (b) the control-
     // panel PREVIEW pane = the selected module run CONTINUOUSLY with NO cycling (you are configuring one saver).
     // Our single-module viewer maps most naturally to (b): the user picked one saver and watches it run. So the
     // DEFAULT is continuous. The Duration cycle (a) is retained as an explicit A/B opt-in (ADCYCLE).
     //
-    // FINITE-CLUSTER RE (Q2, scratchpad/cyc_selfloop.sh, ADNOCYCLE, 30 K-frame headless windows):
-    //   Tunnel   — SELF-PACED: keeps redrawing throughout (Ticks-gated phase, low-mem 0x16A); the addm-596
-    //              "single-shot" verdict was a SHORT-window artifact. Needs no restart.
+    // FINITE-CLUSTER RE (30 K-frame headless windows):
+    //   Tunnel   — SELF-PACED: keeps redrawing throughout (Ticks-gated phase, low-mem 0x16A). Needs no restart.
     //   Nocturnes— CONTINUOUS: changes ~every frame; never freezes. Needs no restart.
     //   Confetti Factory — TERMINAL by design: bursts confetti ~158 frames then the particles settle static.
     //   Dominoes — TERMINAL: draws its faces (~4 frames) then static (the known offscreen-composite gap).
     // So only 2 of the 4 genuinely reach a static end-state, and neither SELF-LOOPS internally — they are the
-    // authentic terminal/settled state the PREVIEW pane also showed. The freshness-gated restart was papering
-    // over Confetti's by-design settle and Dominoes' incomplete composite; it is retired, not reproduced. A user
-    // who wants the finite savers to REPLAY arms the authentic Duration cycle (ADCYCLE) which re-inits them.
+    // authentic terminal/settled state the PREVIEW pane also showed. A user who wants the finite savers to
+    // REPLAY arms the authentic Duration cycle (ADCYCLE), which re-inits them.
     //
-    // NET: DEFAULT (no ADCYCLE) does NO cycling at all -> EVERY module is byte-identical to the un-armed base,
-    // including the finite cluster (they run their natural course). ADAUTORESTART no longer arms a cycle (it
-    // used to trigger the inauthentic 45 s freshness gate; the app sets it, so decoupling here makes the app
-    // continuous with no app change). The app's own terminationHandler already respawns modules that self-EXIT,
-    // which is orthogonal to this in-process cycle.
+    // NET: with no ADCYCLE there is NO cycling at all -> EVERY module is byte-identical to the un-armed base,
+    // including the finite cluster (they run their natural course). ADAUTORESTART does not arm a cycle. The
+    // app's own terminationHandler already respawns modules that self-EXIT, which is orthogonal to this
+    // in-process cycle.
     //
     // Levers: ADCYCLE=1 arms the authentic Duration cycle (UNCONDITIONAL re-init, default 60 s = sVal 503);
     // ADCYCLESECS=n overrides the period (real menu values 15..21600, or a large value ~= "Forever!"); ADNOCYCLE
     // forces off; ADCYCLELOG traces; ADAR_GEN counts generations across execv. LEGACY A/B: ADCYCLEFRESH=1
-    // restores the addm-595 freshness gate (default period 45 s, static-confirm ADCYCLEGRACE=8 s, sampler
-    // ADFRESHMS=500 ms) for regression comparison. The idle-FF (addm 578) is an orthogonal virtual-TIME fix.
+    // restores the freshness gate (default period 45 s, static-confirm ADCYCLEGRACE=8 s, sampler
+    // ADFRESHMS=500 ms) for regression comparison. The idle-FF is an orthogonal virtual-TIME fix.
     static const bool g_cycle_fresh = getenv("ADCYCLEFRESH");      // legacy freshness-gated A/B path
     static const bool g_cycle_on = getenv("ADCYCLE") && !getenv("ADNOCYCLE");
     if(g_cycle_on){
@@ -14287,8 +12852,8 @@ int main(int argc, char** argv){
       static bool cyc_armed=false; static double cyc_start=0;
       // FIRST-DRAW ANCHOR (both paths): the Duration clock starts when the module first paints, not at launch,
       // so a slow-initializing module (Super Guy: ~40 s init under emulation) gets its full init before the
-      // clock arms and can never be re-init'd mid-init. g_first_drawn = addm-581 signal; the low-freq sampler
-      // (2 Hz stride-64) supplies fr_seen_change for non-paceable substep modules AND feeds the legacy gate.
+      // clock arms and can never be re-init'd mid-init. The low-freq sampler (2 Hz stride-64) supplies
+      // fr_seen_change for non-paceable substep modules AND feeds the legacy gate.
       double samp_ms = getenv("ADFRESHMS") ? atof(getenv("ADFRESHMS")) : 500.0;
       if((now-fr_last_sample)*1000.0 >= samp_ms){
         uint64_t sh=1469598103934665603ULL;
@@ -14298,7 +12863,7 @@ int main(int argc, char** argv){
         fr_last_sample=now;
       }
       if(!cyc_armed && (g_first_drawn || fr_seen_change)){ cyc_armed=true; cyc_start=now; }
-      // Authentic default Duration = 60 s (sVal 503). Legacy freshness path keeps its former 45 s default.
+      // Authentic default Duration = 60 s (sVal 503). The legacy freshness path keeps a 45 s default.
       double cyc_secs  = getenv("ADCYCLESECS")  ? atof(getenv("ADCYCLESECS"))  : (g_cycle_fresh ? 45.0 : 60.0);
       double cyc_grace = getenv("ADCYCLEGRACE") ? atof(getenv("ADCYCLEGRACE")) : 8.0;
       if(cyc_armed && cyc_secs>0 && (now-cyc_start)>=cyc_secs){
@@ -14312,20 +12877,18 @@ int main(int argc, char** argv){
           const char* g=getenv("ADAR_GEN"); int gen=g?atoi(g):0;
           fprintf(stderr,"[ADCYCLE] Duration boundary at frame %d gen %d (%.1fs elapsed since first draw) -> re-init module (authentic teardown+re-init)\n",
             fN, gen, now-cyc_start);
-          // addm 537: flush the stub census BEFORE the execv wipes this process image.
+          // Flush the stub census BEFORE the execv wipes this process image.
           if(g_stubcensus_on){ fprintf(stderr,"[stubcensus-flush prerestart traps=%llu]\n",(unsigned long long)traps); adstub_flush(); }
-          // addm 581 + addm 793: RESTORE THE REAL STDOUT ONTO fd 1 BEFORE execv.
-          // addm 581 did this for the P6 stream only. BOTH transports move the app-facing
-          // stdout to a PRIVATE dup and point fd 1 at /dev/null (see the two `dup(1)` sites
-          // above), and the re-exec'd process rebuilds its transport from `dup(1)` — so a
-          // stale fd 1 makes the new generation dup /dev/null and write every frame/ack into
-          // it, while the app's real pipe survives only as an anonymous inherited descriptor
-          // nobody looks at. Under ADSHM that is a DEADLOCK, not just a lost frame: the app
-          // blocks waiting for the per-frame ack byte and the host blocks in wait_go() waiting
-          // for the next GO, so the saver freezes at the first Duration boundary. ADSHM
-          // (g_ackf) — the transport the app uses by default — was the missing case.
-          // stdout is flushed FIRST, while fd 1 is still /dev/null, so nothing buffered for
-          // the bit bucket can land in the transport we are about to restore.
+          // RESTORE THE REAL STDOUT ONTO fd 1 BEFORE execv. BOTH transports move the
+          // app-facing stdout to a PRIVATE dup and point fd 1 at /dev/null (see the two
+          // `dup(1)` sites above), and the re-exec'd process rebuilds its transport from
+          // `dup(1)` — so a stale fd 1 makes the new generation dup /dev/null and write every
+          // frame/ack into it, while the app's real pipe survives only as an anonymous
+          // inherited descriptor nobody looks at. Under ADSHM that is a DEADLOCK, not just a
+          // lost frame: the app blocks waiting for the per-frame ack byte and the host blocks
+          // in wait_go() waiting for the next GO, so the saver freezes at the first Duration
+          // boundary. stdout is flushed FIRST, while fd 1 is still /dev/null, so nothing
+          // buffered for the bit bucket can land in the transport we are about to restore.
           fflush(stdout);
           FILE* outf = g_streamf ? g_streamf : g_ackf;
           if(outf){ fflush(outf); dup2(fileno(outf), 1); }
@@ -14338,31 +12901,28 @@ int main(int argc, char** argv){
         }
       }
     }
-    // addm 521: ADAPTIVE RE-SEED for distortion savers (Down the Drain / Spotlight / Spin Brush, and any
-    // CopyBits-from-screen distortion saver the auto-detect flagged). The real After Dark engine drives a
-    // distortion module against the LIVE screen and re-grabs it whenever the effect has consumed its source;
-    // our host seeds the source image ONCE (the pre-init seed), so after the effect drains /
-    // wipes / smears the seed down to a near-uniform screen the module keeps drawing (index advances) but its
-    // output is frozen (drained-black / wiped-white / solid-smear — the addm-509 "motion dies late" cluster).
-    // Detect that terminal near-uniform state and re-seed a FRESH source image, exactly the engine's re-grab,
-    // so the effect runs its distortion again -> continuous motion for the full soak. This is host-driving the
-    // module's own effect (same authorized class as the one-time auto-seed + the Bugs/Dominoes substep drive),
-    // NOT a module byte-patch.
-    // addm 718: the gate is no longer the retired wantSeed (name list + read-path detector) but g_seed_kept —
-    // whether the module's OWN DoBlankScreen left the pre-init seed on the screen. Same population, derived
-    // from the module's behaviour instead of from a classification: an additive saver erases the seed in its
-    // blank and never re-seeds (byte-inert for every canary), a screen transformer keeps it and re-grabs when
-    // it has consumed it. The g_spot_reveal exclusion is gone too: Spotlight darkens the screen in its own
-    // blank, so it measures as erased and is excluded structurally. ADNORESEED opts out; ADRESEEDPCT
-    // overrides the uniform threshold; ADRESEEDLOG traces. Checked every 8 frames (cheap) on a 1/16 pixel sample.
-    // addm 573: in paced/stream mode the re-seed cadence is WALL-TIME + PROGRESS, not every-8-frames.
-    // At the app's 60fps display "(fN&7)==0" fired ~7.5x/s; a fast-draining effect (Spin Brush) re-grabbed
-    // its source almost every check -> "keeps flashing the entire view". Instead check at most every
-    // ADRESEEDMS (default 2s) of wall time AND require the effect to have actually RUN since the last
-    // re-seed (the framebuffer changed -> it consumed the fresh source), so a fresh seed is left to smear
-    // for its full ~2s before the next re-grab. (The wall-clock ticks fix is the primary cure — the flash
-    // was driven by ADTICKRATE=120 spinning the brush ~120x too fast into instant uniform; this gate is the
-    // secondary cap.) Headless census (g_pace_on=false) keeps the exact every-8-frames behavior.
+    // ADAPTIVE RE-SEED for distortion savers (Down the Drain / Spotlight / Spin Brush and the like). The
+    // real After Dark engine drives a distortion module against the LIVE screen and re-grabs it whenever
+    // the effect has consumed its source; the host seeds the source image ONCE (the pre-init seed), so
+    // after the effect drains / wipes / smears the seed down to a near-uniform screen the module keeps
+    // drawing (index advances) but its output is frozen (drained-black / wiped-white / solid-smear).
+    // Detect that terminal near-uniform state and re-seed a FRESH source image, exactly the engine's
+    // re-grab, so the effect runs its distortion again -> continuous motion for the full soak. This is
+    // host-driving the module's own effect (same authorized class as the substep drives), NOT a module
+    // byte-patch.
+    // The gate is g_seed_kept — whether the module's OWN DoBlankScreen left the pre-init seed on the
+    // screen — so the population is derived from the module's behaviour rather than from a
+    // classification: an additive saver erases the seed in its blank and never re-seeds (byte-inert for
+    // every canary), a screen transformer keeps it and re-grabs when it has consumed it. Spotlight
+    // darkens the screen in its own blank, so it measures as erased and is excluded structurally.
+    // ADNORESEED opts out; ADRESEEDPCT overrides the uniform threshold; ADRESEEDLOG traces. Checked
+    // every 8 frames (cheap) on a 1/16 pixel sample.
+    // In paced/stream mode the re-seed cadence is WALL-TIME + PROGRESS, not every-8-frames: at the app's
+    // 60fps display "(fN&7)==0" fires ~7.5x/s and a fast-draining effect (Spin Brush) re-grabs its source
+    // almost every check, flashing the entire view. Instead check at most every ADRESEEDMS (default 2s)
+    // of wall time AND require the effect to have actually RUN since the last re-seed (the framebuffer
+    // changed -> it consumed the fresh source), so a fresh seed is left to smear for its full ~2s before
+    // the next re-grab. Headless census (g_pace_on=false) keeps the exact every-8-frames behavior.
     bool reseed_due;
     static double rs_last=-1e18; static uint64_t rs_seedhash=0;
     if(g_pace_on){
@@ -14419,7 +12979,7 @@ int main(int argc, char** argv){
   for(size_t i=0;i<v.size()&&i<25;i++){ const char* nm=trap_name(v[i].first);
     fprintf(stderr,"  A%03X %-16s %llu\n", v[i].first&0xFFF, nm?nm:"???",(unsigned long long)v[i].second); }
   if(g_stubcensus_on){ fprintf(stderr,"[stubcensus-final traps=%llu tags_hit=%zu]\n",(unsigned long long)traps,g_stubhits.size()); adstub_flush(); }
-  // addm 669: region-mask consumer census. Nonzero on any axis => this module drives the mask path.
+  // Region-mask consumer census. Nonzero on any axis => this module drives the mask path.
   if(getenv("ADRGNCOUNT"))
     fprintf(stderr,"[rgncount] %s combine=%ld fillmask=%ld cbmask=%ld nonrect=%ld framemask=%ld ptmask=%ld rirmask=%ld xor=%ld polymask=%ld consumer=%d\n",
       g_audit_mod, g_rgnc_combine, g_rgnc_fillmask, g_rgnc_cbmask,

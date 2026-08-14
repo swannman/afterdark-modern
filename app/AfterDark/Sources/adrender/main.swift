@@ -188,7 +188,7 @@ if moduleId == "--verify-emulation" {
         allFramesOK = allFramesOK && ok
         print("\(id) [\(m.family.rawValue)]: framesConsumed=\(n) \(ok ? "OK" : "FAIL")")
     }
-    // addm 571: zero-copy shm transport smoke. With shm ON the host must ack 'F'
+    // Zero-copy shm transport smoke. With shm ON the host must ack 'F'
     // (shmActive) and deliver frames; with shm forced OFF the P8/P6 stdout fallback
     // must still deliver frames. Both run through the SAME EmulatedHost path.
     print("=== zero-copy shm transport (ADSHM) vs P8 stdout fallback ===")
@@ -203,7 +203,7 @@ if moduleId == "--verify-emulation" {
             + "  p8-fallback frames=\(off.consumed) \(ok ? "OK" : "FAIL")")
     }
 
-    // addm 569: live control-channel smoke. Send a control SET mid-stream and assert
+    // Live control-channel smoke. Send a control SET mid-stream and assert
     // the host keeps producing frames WITHOUT a respawn (PID unchanged) and no leak.
     // (Runs in the default shm-on mode, so it also exercises SET interleaved with GO.)
     print("=== live control channel (SET mid-stream) ===")
@@ -217,10 +217,10 @@ if moduleId == "--verify-emulation" {
             + "pidStable=\(r.pidStable) \(ok ? "OK" : "FAIL")")
     }
 
-    // addm 702: 68K popup smoke — the mirror assertion. A 68K module reads its controls
+    // 68K popup smoke — the mirror assertion. A 68K module reads its controls
     // once at init, so a popup change MUST respawn (new PID) and the chosen value must
-    // ride in ADCVSET on the new process. Modern Art's Style popup is the field-reported
-    // case ("only Mondrian works"); this proves the app half of that path.
+    // ride in ADCVSET on the new process. Modern Art's Style popup is the canonical
+    // case; this proves the app half of that path.
     print("=== 68K popup respawn (init-only controls) ===")
     var popupOK = true
     for id in ["68k-modern-art"] {
@@ -340,7 +340,7 @@ if moduleId == "--verify-dedupe" {
     exit(0)
 }
 
-// --measure-shm [seconds] [moduleId ...]: app-side A/B of the addm-571 zero-copy
+// --measure-shm [seconds] [moduleId ...]: app-side A/B of the zero-copy
 // shm transport vs the P8 stdout stream. For each module runs `seconds` with shm
 // ON then OFF, reporting this-process (consumer) CPU via getrusage and achieved
 // fps (framesConsumed/seconds). Host CPU is measured separately by the C harness.
@@ -399,8 +399,7 @@ if moduleId == "--verify" {
     exit(0)
 }
 
-// addm 806: the legacy SpriteKit scene renderer is gone — every module runs the real
-// emulated code, so there is no scene to render offscreen. The real modes are above
-// (--smoke, --verify, --verify-emulation, ...).
+// Every module runs the real emulated code; there is no scene to render offscreen.
+// The real modes are above (--smoke, --verify, --verify-emulation, ...).
 FileHandle.standardError.write("adrender: unknown mode. Use --smoke <module> <secs>, --verify, or --verify-emulation.\n".data(using: .utf8)!)
 exit(2)

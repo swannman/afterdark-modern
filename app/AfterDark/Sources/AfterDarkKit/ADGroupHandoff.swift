@@ -2,15 +2,15 @@ import Foundation
 
 // Publishes the resolved ABSOLUTE asset/shared-lib/host paths to a shared app-group
 // UserDefaults suite so the companion AfterDark.saver can find the downloaded
-// modules. addm 705.
+// modules.
 //
 // WHY this is needed: a macOS screen saver runs inside legacyScreenSaver.appex,
 // whose $HOME is redirected to the appex's own sandbox container. So the saver
 // CANNOT compute ~/Library/Application Support/AfterDarkModern/assets the way the
 // app does (ADPaths) — that path resolves inside the wrong home. The whole-filesystem
-// READ exception the appex carries (LIB510_STATE addm 704) means the saver CAN
-// open()/read() any ABSOLUTE path once it knows it; the app group is how it learns
-// the absolute path. Both processes derive the same suite from the same group id.
+// READ exception the appex carries means the saver CAN open()/read() any ABSOLUTE
+// path once it knows it; the app group is how it learns the absolute path. Both
+// processes derive the same suite from the same group id.
 //
 // The saver reads these back and feeds them to ADPaths via the AD_ASSETS_DIR /
 // AD_SHARED_DIR / AD_HOST_DIR environment overrides before it builds its catalog.
@@ -26,12 +26,12 @@ public enum ADGroupHandoff {
     public static let kSharedLibsRoot = "sharedLibsRoot"
     public static let kHostsDir       = "hostsDir"
     public static let kUpdatedAt      = "updatedAt"
-    // addm 796: the global Duration preference rides along on the SAME two
-    // channels as the paths. It has to: the saver runs in another process whose
-    // defaults domain is its own (ScreenSaverDefaults inside legacyScreenSaver.appex),
-    // so it cannot read the app's UserDefaults.standard — but it already reads this
-    // sidecar by absolute path, and that is the channel proven to work in the real
-    // appex. Carried as a STRING to keep the sidecar's [String: String] shape.
+    // The global Duration preference rides along on the SAME two channels as the
+    // paths. It has to: the saver runs in another process whose defaults domain is
+    // its own (ScreenSaverDefaults inside legacyScreenSaver.appex), so it cannot
+    // read the app's UserDefaults.standard — but it already reads this sidecar by
+    // absolute path, and that is the channel proven to work in the real appex.
+    // Carried as a STRING to keep the sidecar's [String: String] shape.
     public static let kDurationSeconds = "durationSeconds"
 
     // Fixed absolute path (under the app-support dir, i.e. the parent of assetsRoot)
@@ -39,8 +39,8 @@ public enum ADGroupHandoff {
     // channel: codesign cannot attach an application-groups entitlement to an
     // MH_BUNDLE (a .saver), so inside legacyScreenSaver.appex the app-group suite
     // resolves to the WRONG (appex) container. The saver instead computes the real
-    // user home via getpwuid() and reads THIS file through the appex's whole-file-
-    // system READ exception (LIB510_STATE addm 704) — no entitlement required.
+    // user home via getpwuid() and reads THIS file through the appex's whole-
+    // filesystem READ exception — no entitlement required.
     public static func sidecarPath() -> String {
         let dir = (ADPaths.assetsRoot as NSString).deletingLastPathComponent
         return dir + "/saver-handoff.json"
@@ -51,8 +51,8 @@ public enum ADGroupHandoff {
     // in the real appex). Idempotent; safe to call repeatedly (on launch when assets
     // are already present, and after a download finishes).
     public static func publish() {
-        // addm 796: read straight from defaults rather than taking a parameter,
-        // so every existing publish() call site keeps the saver's copy current for free.
+        // Read straight from defaults rather than taking a parameter, so every
+        // existing publish() call site keeps the saver's copy current for free.
         let duration = ADDuration.sanitize(UserDefaults.standard.object(forKey: ADDuration.defaultsKey) as? Int)
         if let d = UserDefaults(suiteName: suiteName) {
             d.set(ADPaths.assetsRoot,     forKey: kAssetsRoot)

@@ -2,7 +2,7 @@ import Foundation
 import CoreGraphics
 import ImageIO
 import Darwin
-import ADCShim  // adshm_open_create: ABI-correct variadic shm_open(O_CREAT) wrapper   // addm 571: shm_open/mmap/munmap/ftruncate/poll for the shm transport
+import ADCShim  // adshm_open_create: ABI-correct variadic shm_open(O_CREAT) wrapper
 
 // Drives an emulation host (adhost / adhost68k) for one module: spawns the
 // process with ADSTREAM=1 so it writes CONCATENATED P6 frames to stdout, reads
@@ -16,24 +16,24 @@ import ADCShim  // adshm_open_create: ABI-correct variadic shm_open(O_CREAT) wra
 // values. This class is UI-agnostic (no SwiftUI/SpriteKit) so it can be driven
 // headless from adrender for verification.
 public final class EmulatedHost {
-    // addm 569: master switch for duplicate-frame suppression (default on). Flipped
+    // Master switch for duplicate-frame suppression (default on). Flipped
     // off only by the adrender --verify-dedupe A/B to measure the CPU it saves.
     public static var dedupeEnabled = true
 
-    // addm 571: master switch for the zero-copy shared-memory transport (default on).
+    // Master switch for the zero-copy shared-memory transport (default on).
     // When true the host is spawned with ADSHM=1 + ADSHMNAME and driven in strict
     // GO/F lockstep over shared memory; the P8/P6 stdout stream is kept as a
     // transparent fallback (old host, or shm setup failure). Flipped off by
     // adrender --verify-emulation's P8-fallback pass to exercise the stdout path.
     public static var shmEnabled = true
 
-    // addm 796: the user's Duration preference, in seconds, or
+    // The user's Duration preference, in seconds, or
     // ADDuration.forever for "Forever!" (never cycle). Applied by _buildEnv to every
     // spawn from this point on.
     //
     // nil means "nobody expressed a preference" and leaves the shipped behaviour
-    // exactly as addm 744 set it (ADCYCLE=1, host default period 60 s). This is what
-    // keeps the HEADLESS paths out of it BY CONSTRUCTION: only the app (ADDurationStore)
+    // as-is (ADCYCLE=1, host default period 60 s). This is what keeps the HEADLESS
+    // paths out of it BY CONSTRUCTION: only the app (ADDurationStore)
     // and the saver (ADSaverView.resolveSelection) ever assign this, so adrender and the
     // verification harnesses — which build EmulatedHost directly and never touch it —
     // spawn byte-identical environments to before this change.
@@ -55,7 +55,7 @@ public final class EmulatedHost {
     private var watchdog: DispatchSourceTimer?
     private var restarting = false
 
-    // addm 569: live control channel. The host's stdin is a pipe; on a settings
+    // Live control channel. The host's stdin is a pipe; on a settings
     // change we write "SET <idx> <val>\n" lines to it and the host applies them to
     // the SAME control-value slots the ADCTRL/ADCVSET env seeds (see poll_set in the
     // hosts). No process respawn — same PID, seamless frames. Respawn is kept only as
@@ -71,7 +71,7 @@ public final class EmulatedHost {
     // is stale, so a killed process's reader can't publish into a new one.
     private var generation = 0
 
-    // addm 571: shared-memory transport state for the current spawn (written on
+    // Shared-memory transport state for the current spawn (written on
     // `queue` in _spawnProcess, read once by the reader, munmap+unlink'd in
     // _killProcess). shmPtr==nil => this spawn uses the stdout stream path.
     private var shmPtr: UnsafeMutableRawPointer?
@@ -86,7 +86,7 @@ public final class EmulatedHost {
     // Written on `queue`; read after stop() (which drains `queue`).
     public private(set) var framesConsumed = 0
 
-    // addm 569: frames dropped by the duplicate-frame suppressor (identical content
+    // Frames dropped by the duplicate-frame suppressor (identical content
     // to the previously displayed frame -> decode + layer update skipped entirely).
     public private(set) var framesSkipped = 0
 
@@ -113,7 +113,7 @@ public final class EmulatedHost {
             guard let self else { return }
             let old = self.settings
             self.settings = s
-            // addm 630: dll#/AD3-family 68K modules read their control values ONCE at
+            // dll#/AD3-family 68K modules read their control values ONCE at
             // init (Modern Art proven: live SET lands in the slot but the module never
             // re-reads; an in-process re-init is not re-entrant). A POPUP change on a
             // 68K module therefore RESPAWNS with the new ADCVSET so init re-reads it —
@@ -124,7 +124,7 @@ public final class EmulatedHost {
                 if case .popup = $0.kind { return (old[$0.id] ?? $0.defaultValue) != (s[$0.id] ?? $0.defaultValue) }
                 return false
             }
-            // addm 569: otherwise control-value changes go over the live SET channel
+            // Otherwise control-value changes go over the live SET channel
             // (no respawn -> same PID, uninterrupted frames). Fall back to a respawn
             // only if the stdin pipe isn't there (process gone / never started).
             if !popupChanged, self.running, self.process?.isRunning == true, self.stdinHandle != nil {
@@ -181,14 +181,14 @@ public final class EmulatedHost {
             if p.isRunning { kill(p.processIdentifier, SIGKILL) }
         }
         process = nil
-        // addm 571: promptly remove the shm NAME (RAM is freed by the reader's
+        // Promptly remove the shm NAME (RAM is freed by the reader's
         // munmap on its exit — it owns the mapping). Clearing our copies means a
         // subsequent spawn can't accidentally re-clean this generation's slot.
         if let nm = shmName { shm_unlink(nm) }
         shmPtr = nil; shmName = nil; shmSize = 0; shmActive = false
     }
 
-    // addm 569: push the current effective control values to the running host as
+    // Push the current effective control values to the running host as
     // "SET <idx> <val>\n" lines. idx = resourceId-1000 (the same index the host's
     // ADCTRL/ADCVSET seeding uses); 68K clamps to 0..3, PPC to 0..15. Only controls
     // with a valid index are sent. Runs on `queue`.
@@ -215,7 +215,7 @@ public final class EmulatedHost {
         }
     }
 
-    // MARK: - addm 574: live keyboard/mouse input channel
+    // MARK: - Live keyboard/mouse input channel
     // Forward real input to the running host over the SAME stdin pipe as SET/GO.
     // Protocol lines: "KEY <kc> <0|1>" (Mac virtual keycode down/up), "CAPS <0|1>"
     // (caps-lock STATE — macOS reports caps as a modifier state, not down/up),
@@ -225,9 +225,9 @@ public final class EmulatedHost {
     // they can't interleave with a concurrent GO/SET write to the same fd. No-op if
     // the host isn't running (stdin pipe gone) — input is best-effort, never fatal.
     public func sendKey(keycode: Int, down: Bool) { _sendInput("KEY \(keycode) \(down ? 1 : 0)\n") }
-    // addm 797: retained as part of the addm-574 input protocol, but the app no
-    // longer drives caps through it — the host reads the real key itself under ADREALCAPS
-    // (see _buildEnv), which needs no focus and works in the screen-saver appex too.
+    // Retained as part of the input protocol, but the app no longer drives caps
+    // through it — the host reads the real key itself under ADREALCAPS (see
+    // _buildEnv), which needs no focus and works in the screen-saver appex too.
     public func sendCaps(_ on: Bool) { _sendInput("CAPS \(on ? 1 : 0)\n") }
     public func sendMouse(x: Int, y: Int, button: Bool) { _sendInput("MOUSE \(x) \(y) \(button ? 1 : 0)\n") }
     private func _sendInput(_ line: String) {
@@ -266,7 +266,7 @@ public final class EmulatedHost {
         p.arguments = args
         var env = _buildEnv(recipe)
 
-        // addm 571: set up the zero-copy shm slot for THIS spawn. Geometry comes
+        // Set up the zero-copy shm slot for THIS spawn. Geometry comes
         // from the same ADSCREENW/H the host reads (so the app-sized slot always
         // matches the host framebuffer). On any failure we simply don't pass
         // ADSHM and the host uses the P8/P6 stdout stream (env already has
@@ -288,7 +288,7 @@ public final class EmulatedHost {
         // ADHOSTERR=1 (debug): surface the host's stderr instead of discarding it.
         p.standardError = ProcessInfo.processInfo.environment["ADHOSTERR"] != nil
             ? FileHandle.standardError : FileHandle.nullDevice
-        // addm 569: give the host a stdin pipe for the live control channel. The
+        // Give the host a stdin pipe for the live control channel. The
         // host polls it non-blocking each frame for "SET idx val" lines.
         let inPipe = Pipe()
         p.standardInput = inPipe
@@ -307,7 +307,7 @@ public final class EmulatedHost {
         do {
             try p.run()
             process = p
-            stdinHandle = inPipe.fileHandleForWriting   // addm 569: live SET sink
+            stdinHandle = inPipe.fileHandleForWriting   // live SET sink
             lastFrameAt = Date()
             awaitingFirstFrame = true
             generation &+= 1
@@ -324,7 +324,7 @@ public final class EmulatedHost {
             thread.start()
         } catch {
             process = nil
-            // addm 571: no reader will run, so free the shm slot we just created.
+            // No reader will run, so free the shm slot we just created.
             if let ptr = shmPtr { munmap(ptr, shmSize) }
             if let nm = shmName { shm_unlink(nm) }
             shmPtr = nil; shmName = nil; shmSize = 0
@@ -354,44 +354,38 @@ public final class EmulatedHost {
         // indexed CGImage (no per-pixel work). A host that predates P8 simply emits
         // P6 and the reader auto-detects it per frame, so this is compat-safe.
         env["ADSTREAM"] = "1"
-        // addm 797: let the host read the REAL Caps-Lock key itself, once per
-        // frame. 19 catalog modules document a caps behaviour (Time Flies changes the clock
+        // Let the host read the REAL Caps-Lock key itself, once per frame. Several
+        // catalog modules document a caps behaviour (Time Flies changes the clock
         // type, Magic Turtle opens its edit window, Mandelbrot/Satori/Psycho Deli/Swirling
         // Magic recolour); they poll it through the shared library's GetCapsLockChange(),
-        // which reads the low-memory Mac KeyMap the host already maintains. The host was
-        // always able to serve it — nothing was ever telling it what caps was doing.
+        // which reads the low-memory Mac KeyMap the host already maintains.
         //
         // Host-side polling rather than an app->host input channel, because it needs no
         // focus, no first responder, and no event delivery — so it works identically in the
         // app pane and inside the screen-saver appex, and it survives host respawns and
         // module cycling for free. The host uses CGEventSourceFlagsState's alphaShift bit,
-        // which is a modifier-state read: it triggers NO permission prompt (verified from a
-        // fresh binary path — zero com.apple.TCC log entries; see capslock_evidence.md).
-        // Default-off in the host, so headless/census runs stay byte-deterministic.
+        // which is a modifier-state read: it triggers no permission prompt. Default-off
+        // in the host, so headless/census runs stay byte-deterministic.
         env["ADREALCAPS"] = "1"
-        // addm 801: seed the AD4 library's lagged-Fibonacci RNG per launch, the way a real
+        // Seed the AD4 library's lagged-Fibonacci RNG per launch, the way a real
         // Mac did — modules seed themselves with SRand(GetMilliseconds()) and real
         // Microseconds() counted from BOOT (varied every launch); our virtual clock counts
-        // from process start (a constant), which made every "Random" pick identical across
-        // launches. App/saver only; headless and census paths never set this, so byte-exact
-        // baselines are untouched.
+        // from process start (a constant), which would otherwise make every "Random" pick
+        // identical across launches. App/saver only; headless and census paths never set
+        // this, so byte-exact baselines are untouched.
         env["ADLIBRNGSEED"] = "random"
         env["ADSTREAMIDX"] = "1"
         // Static recipe env.
         for (k, v) in recipe.env { env[k] = v }
-        // addm 744: arm the authentic Duration-cycle safety net on BOTH hosts.
-        // ADAUTORESTART is dead in the 68K host as of addm 701 (see adhost68k.cc
-        // ~line 12848: "ADAUTORESTART no longer arms a cycle"); the real lever is
-        // ADCYCLE (adhost68k.cc ~line 12859, adhost.cc ~line 3354 — both hosts read
-        // it). Without this, a module that faults to black (e.g. Flying Toasters,
-        // P0-1 in the visual census) stays black forever in the app. Unconditional
-        // for both viewer and saver, PPC and 68K.
+        // Arm the Duration-cycle safety net on BOTH hosts. ADAUTORESTART is dead in
+        // the 68K host; the real lever is ADCYCLE (both hosts read it). Without this,
+        // a module that faults to black (e.g. Flying Toasters) stays black forever
+        // in the app. Unconditional for both viewer and saver, PPC and 68K.
         env["ADCYCLE"] = "1"
-        // addm 796: ...and let the user set the PERIOD, the way the real
-        // control panel did. The hosts read ADCYCLESECS (adhost.cc ~3478,
-        // adhost68k.cc ~14328) and gate the whole cycle on ADNOCYCLE (adhost.cc ~3463,
-        // adhost68k.cc ~14308), so "Forever!" is expressed by disarming the cycle
-        // outright rather than by a huge period. Left alone (nil) the host keeps its
+        // ...and let the user set the PERIOD, the way the real control panel did.
+        // The hosts read ADCYCLESECS and gate the whole cycle on ADNOCYCLE, so
+        // "Forever!" is expressed by disarming the cycle outright rather than by a
+        // huge period. Left alone (nil) the host keeps its
         // own 60 s, which IS the factory default (sVal 503), so this is a no-op for a
         // user who never touches the slider. The preference deliberately overrides an
         // inherited ADCYCLESECS/ADNOCYCLE the same way the ADCYCLE=1 above already
@@ -467,7 +461,7 @@ public final class EmulatedHost {
             // Pad unbacked slots with 0, not 50: real After Dark's GetControlValue
             // returns 0 for indices beyond a module's control resources, and some
             // modules GATE features on that (Time Flies caps clock-swap reads slot 3
-            // == 0; addm 623). The host now zero-clamps too; keep the two in accord.
+            // == 0). The host zero-clamps too; keep the two in accord.
             var seed = [Int](repeating: 0, count: 16)
             if let s = recipe.env["ADCTRL"] {
                 let nums = s.split(separator: ",").compactMap { Int($0) }
@@ -508,7 +502,7 @@ public final class EmulatedHost {
     }
 
     // MARK: - Reader dispatch (dedicated thread)
-    // addm 571: if a shm slot was set up for this spawn, drive the GO/F lockstep
+    // If a shm slot was set up for this spawn, drive the GO/F lockstep
     // over shared memory. The first ack byte confirms the shm path (host wrote
     // 'F'); anything else means an old/non-shm host is P8/P6-streaming on stdout,
     // so we fall back transparently, seeding the byte we already read.
@@ -665,7 +659,7 @@ public final class EmulatedHost {
             // autoreleasepool: decodeP8 autoreleases CG/CF objects on this raw
             // Thread; without a per-frame drain they accumulate and the deferred
             // bulk release stalls the reader ~165ms every ~0.5s — the user-visible
-            // periodic hitch (host ack latency is uniform; addm 613/618).
+            // periodic hitch (host ack latency is uniform).
             autoreleasepool {
                 if let img = Self.decodeP8(body, width: shm.w, height: shm.h) { onFrame(img) }
             }
@@ -684,7 +678,7 @@ public final class EmulatedHost {
         // stays cheap (<8ms) we read at 60fps, otherwise 30. The cap paces reads;
         // pipe backpressure then paces the host to match.
         var costEMA = 0.020
-        // addm 569: duplicate-frame suppression state (last DISPLAYED frame's hash).
+        // Duplicate-frame suppression state (last DISPLAYED frame's hash).
         var lastBody: Data? = nil
         while true {
             // Stop promptly if we've been superseded/stopped.
@@ -710,7 +704,7 @@ public final class EmulatedHost {
             guard consumed > 0, let (body, w, h, tag) = latest else { continue }
             if !state(gen).alive { break }
             let n = consumed
-            // addm 569: duplicate-frame suppression. A cheap FNV-1a hash over every
+            // Duplicate-frame suppression. A cheap FNV-1a hash over every
             // 64th body byte + length; if identical to the last frame we DISPLAYED,
             // skip decode + CALayer update entirely (a static/slow module produces
             // byte-identical frames). Hashing the full P8 body (palette + indices)
@@ -813,13 +807,7 @@ public final class EmulatedHost {
         return (i + 1, w, h, tag)
     }
 
-    // addm 569: cheap 64-bit FNV-1a over every 64th body byte + length. Used by the
-    // reader's duplicate-frame suppressor to detect a byte-identical frame without a
-    // full compare. Sampling 1/64 of the plane keeps it ~free while still catching any
-    // real motion (an unchanged frame samples identically; a changed one almost never
-    // collides at 64 bits).
-
-    // addm 569: palette/colorspace cache. Building an indexed CGColorSpace from the
+    // Palette/colorspace cache. Building an indexed CGColorSpace from the
     // 768-byte CLUT every frame is pure waste when the palette is unchanged (the common
     // case — only CLUT-animation savers rotate it). Cache the last palette + its indexed
     // colour space and reuse until the palette CONTENT actually changes (Data == is a
@@ -882,7 +870,7 @@ public final class EmulatedHost {
         return ctx.makeImage()
     }
 
-    // MARK: - Shared-memory slot (addm 571)
+    // MARK: - Shared-memory slot
     // Monotonic suffix so each spawn's shm name is unique (macOS shm names are
     // capped at ~31 chars, so keep it short: "/ad<pid>_<n>").
     private static let shmCounterLock = NSLock()
@@ -941,7 +929,7 @@ public final class EmulatedHost {
         return n
     }
 
-    // addm 571: shm-transport smoke. Runs the pipeline for `seconds` and reports
+    // Shm-transport smoke. Runs the pipeline for `seconds` and reports
     // frames consumed, whether the zero-copy shm path actually engaged (host acked
     // 'F'), and the PID (stable => no respawn). Set `shm` false to force the P8
     // stdout fallback (leaves the global toggle as the caller found it).
@@ -960,7 +948,7 @@ public final class EmulatedHost {
         return ShmSmoke(consumed: c, shmActive: active, pid: pid)
     }
 
-    // addm 569: run the pipeline for `seconds` and report frames produced + frames
+    // Run the pipeline for `seconds` and report frames produced + frames
     // dropped by the duplicate-frame suppressor (skip rate = skipped/consumed).
     public static func smokeMeasure(module: ADModule, seconds: Double) -> (consumed: Int, skipped: Int) {
         let host = EmulatedHost(module: module, settings: [:]) { _ in }
@@ -971,7 +959,7 @@ public final class EmulatedHost {
         return (c, s)
     }
 
-    // addm 569: live-control smoke. Runs the host for `seconds`, sends a control SET
+    // Live-control smoke. Runs the host for `seconds`, sends a control SET
     // at the halfway point, and reports frames before/after, the PID before/after (to
     // prove NO respawn), and the dedup skip count. Used by adrender --verify-emulation.
     public struct ControlSmoke {
@@ -1002,12 +990,12 @@ public final class EmulatedHost {
                             pidStable: pid0 != nil && pid0 == pid1)
     }
 
-    // addm 702: the MIRROR of smokeControlTest for 68K popups. A 68K module reads its
-    // control values once at init (addm 630), so a popup change must RESPAWN the host —
+    // The MIRROR of smokeControlTest for 68K popups. A 68K module reads its
+    // control values once at init, so a popup change must RESPAWN the host —
     // the opposite assertion from the live-SET path: the PID must CHANGE and frames must
-    // keep coming. Modern Art's Style popup is the canonical case (field report: "only
-    // Mondrian works"), so this pins the app half of that path: popup change -> respawn
-    // -> the new value actually rides in ADCVSET on the new process.
+    // keep coming. Modern Art's Style popup is the canonical case, so this pins the app
+    // half of that path: popup change -> respawn -> the new value actually rides in
+    // ADCVSET on the new process.
     public struct PopupSmoke {
         public let before: Int
         public let after: Int
@@ -1039,7 +1027,7 @@ public final class EmulatedHost {
 
     // The control env var (ADCVSET/ADCTRL) the next spawn would carry for the current
     // settings — lets a smoke assert the chosen value actually reaches the host.
-    // addm 796: the cycle levers the NEXT spawn would carry, straight out of
+    // The cycle levers the NEXT spawn would carry, straight out of
     // the real _buildEnv — so a check can assert the Duration preference actually
     // becomes host environment rather than assuming the plumbing works. Empty ADCYCLESECS
     // + ADCYCLE=1 is the untouched-preference (host-default 60 s) state.

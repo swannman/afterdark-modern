@@ -130,7 +130,7 @@ final class SettingsTests: XCTestCase {
     }
 }
 
-// addm 796: pins the Duration ladder to the After Dark 4.0 control panel's
+// Pins the Duration ladder to the After Dark 4.0 control panel's
 // own resources (AD40_engine.rsrc: sUnt 500/503 labels, rsVl 503 pos->seconds map,
 // sVal 503 "Default Duration:" = 0x3C). These are RE'd values, not design choices —
 // a diff here means someone edited the ladder, not that a preference moved.

@@ -28,7 +28,7 @@ struct AfterDarkApp: App {
             }
             // Publish the resolved asset/shared-lib/host paths to the shared app
             // group whenever the tree is ready (present at launch, or just downloaded),
-            // so the companion AfterDark.saver can locate the modules. addm 705.
+            // so the companion AfterDark.saver can locate the modules.
             .onChange(of: firstRun.stage) { _ in
                 if case .ready = firstRun.stage { ADGroupHandoff.publish() }
             }
@@ -43,7 +43,7 @@ struct MainWindow: View {
     @State private var showInspector = true
     @State private var search = ""
     @StateObject private var settings = ADSettingsStore()
-    @StateObject private var duration = ADDurationStore()   // addm 796
+    @StateObject private var duration = ADDurationStore()
 
     private var ppc: [ADModule] { AD_MODULES.filter { $0.family == .ppc } }
     private var k68: [ADModule] { AD_MODULES.filter { $0.family == .k68 } }
@@ -63,17 +63,17 @@ struct MainWindow: View {
                 .frame(minWidth: 230)
                 .searchable(text: $search, placement: .sidebar,
                             prompt: "Search modules")
-                // addm 796: Duration sat in the MAIN control-panel window
-                // alongside the module list, not in a Setup sub-dialog — so it lives
-                // under the module list here, not in the per-module inspector.
+                // Duration sits in the main control-panel window alongside the
+                // module list, not in a Setup sub-dialog, so it lives under the
+                // module list here rather than in the per-module inspector.
                 .safeAreaInset(edge: .bottom) { DurationBar(duration: duration) }
             } detail: {
                 if let m = selection {
                     ModuleDetail(module: m, settings: settings)
-                        // addm 796: a new Duration has to reach the host's
-                        // environment, which it only reads at spawn — so fold it into
-                        // the view identity and let the existing onAppear/onDisappear
-                        // lifecycle restart the preview, exactly as switching module does.
+                        // A new Duration has to reach the host's environment, which
+                        // it only reads at spawn, so fold it into the view identity
+                        // and let the existing onAppear/onDisappear lifecycle restart
+                        // the preview, exactly as switching module does.
                         .id("\(m.id)|\(duration.seconds)")
                         .navigationTitle(m.name)
                         .ignoresSafeArea()
@@ -120,11 +120,11 @@ struct MainWindow: View {
     }
 }
 
-// addm 796: the control panel's Duration slider. Same shape as the app's
-// per-module sVal sliders (ControlRow's .slider case: "Label: value" over a step-1
-// Slider) because Duration WAS an sVal-family slider — 13 discrete stops, drawn by
-// the "Slider CDEF" (CNTL 129). Positions are stop indices; the seconds behind them
-// come from rsVl 503. See ADDuration for the resource provenance.
+// The control panel's Duration slider. Same shape as the app's per-module sVal
+// sliders (ControlRow's .slider case: "Label: value" over a step-1 Slider), since
+// Duration is itself an sVal-family slider with 13 discrete stops. Positions are
+// stop indices; the seconds behind them come from ADDuration. See ADDuration for
+// the resource provenance.
 struct DurationBar: View {
     @ObservedObject var duration: ADDurationStore
     @State private var pos: Double = 0
@@ -160,9 +160,8 @@ struct DurationBar: View {
     }
 }
 
-// Every module runs the REAL emulated After Dark code — there is no native or
-// placeholder rendering path (the last one, a bespoke Flying Toasters scene, was
-// deleted at addm 737; the SpriteKit machinery it rode on was removed at addm 806).
+// Every module runs the real emulated After Dark code; there is no native or
+// placeholder rendering path.
 struct ModuleDetail: View {
     let module: ADModule
     @ObservedObject var settings: ADSettingsStore

@@ -37,7 +37,7 @@ static const uint32_t BASE_M = 0x30000000;   // the module
 static const uint32_t SENT_BASE = 0xE0000000;// import code sentinels (PC markers)
 static const uint32_t RET_SENT  = 0xE1000000;// "top-level call returned" marker
 
-// ===================== STUB CENSUS INSTRUMENTATION (addm 538) ===============
+// ===================== STUB CENSUS INSTRUMENTATION =========================
 // Zero-overhead when ADSTUBCENSUS is unset (g_census stays false; ADSTUB is a
 // single branch on a global bool that is never taken). When set, every host
 // STUB/PARTIAL-fallback site that returns a hardcoded constant / no-ops where a
@@ -53,19 +53,18 @@ static const uint32_t RET_SENT  = 0xE1000000;// "top-level call returned" marker
 #include <csignal>
 #include <unistd.h>
 #include <fcntl.h>
-#include <sys/mman.h>   // addm 571: shm_open/mmap for zero-copy shared-memory transport
+#include <sys/mman.h>   // shm_open/mmap for the zero-copy shared-memory transport
 #include <sys/stat.h>
 #include <chrono>
 #include <ctime>
-#include <cerrno>         // addm 595: errno/strerror for the timed-cycle execv fallback
-#include <mach-o/dyld.h>  // addm 595: _NSGetExecutablePath for execv(self) on the timed re-init cycle
-// *** addm 549 WALL-CLOCK TIME (stream mode) ***: in ADSTREAM (live app) mode, virtual Mac time sources
-// (TickCount / Microseconds / GetDateTime) must advance at the REAL wall-clock rate, not a fixed step
-// PER CALL. The per-call model makes on-screen clocks (Time Flies) run ~5x fast: the module reads a time
-// source once per DRAW and each read jumped ADTICKSTEP=10 ticks, so at the stream consumer's ~30 fps that
-// is ~300 ticks/s vs the true 60.15 Hz. Deriving from monotonic wall time makes clocks run true. Headless
-// census runs (no ADSTREAM) keep the per-call step (they intentionally run faster than realtime). Opt-out
-// ADNOWALLCLOCK.
+#include <cerrno>         // errno/strerror for the timed-cycle execv fallback
+#include <mach-o/dyld.h>  // _NSGetExecutablePath for execv(self) on the timed re-init cycle
+// WALL-CLOCK TIME (stream mode): in ADSTREAM (live app) mode the virtual Mac time sources
+// (TickCount / Microseconds / GetDateTime) advance at the REAL wall-clock rate, not a fixed step
+// PER CALL. A per-call step makes on-screen clocks (Time Flies) run fast: the module reads a time
+// source once per DRAW, so at the stream consumer's ~30 fps an ADTICKSTEP=10 step is ~300 ticks/s
+// against the true 60.15 Hz. Headless census runs (no ADSTREAM) keep the per-call step — they
+// intentionally run faster than realtime. Opt-out ADNOWALLCLOCK.
 static double ad_wall_elapsed(){
   static const auto t0 = std::chrono::steady_clock::now();
   return std::chrono::duration<double>(std::chrono::steady_clock::now()-t0).count();
@@ -74,29 +73,27 @@ static bool ad_wallclock_on(){
   static const bool on = getenv("ADSTREAM") && !getenv("ADNOWALLCLOCK");
   return on;
 }
-// addm 581: IDLE TICK CATCH-UP boost (port of the 68K addm-578 mechanism). Wall-clock time (addm 549)
-// starves tick-deadline-gated module phases the census recipes drove with accelerated per-call steps
-// (ADTICKSTEP=10): measured, PPC Art Critic's init needs BOTH ~900 unpaced DRAW calls AND stepped
+// IDLE TICK CATCH-UP boost. Wall-clock time starves tick-deadline-gated module phases that need
+// accelerated virtual time: Art Critic's init needs BOTH ~900 unpaced DRAW calls AND stepped
 // virtual time (1.8s with both; distinct=1 over 62s if either wall-clock or pacing throttles it).
 // The frame loop accrues this monotonic offset while the module provably idles (advance draws leave
 // the fb unchanged); TickCount/Microseconds add it on top of wall time. 0 unless the loop accrues.
 static uint32_t g_adff_ticks = 0;
-// *** addm 699 BANNER OVERLAY (task #14) *** — PPC side, symmetric with the 68K host. The shared-library
-// (adxpl510) DoUserMessage banner [BASE_A+0xEB34,+0xEC80) was previously PERMANENTLY suppressed (addm 622
-// proxy: never shown). The real engine composited it as a TIMED OVERLAY: drawn over the animation, cleared
-// on a timeout, never baked into the sprite background. We now capture it at the (still-suppressed) draw
-// site and composite it onto the PRESENTED frame for the first N frames, then clear — the authentic behavior.
+// BANNER OVERLAY — PPC side, symmetric with the 68K host. The real engine composites the shared
+// library's (adxpl510) DoUserMessage banner [BASE_A+0xEB34,+0xEC80) as a TIMED OVERLAY: drawn over the
+// animation, cleared on a timeout, never baked into the sprite background. The host captures it at the
+// (suppressed) draw site and composites it onto the PRESENTED frame for the first N frames, then clears.
 static bool g_banner_have=false; static std::string g_banner_text; static int g_banner_x=0, g_banner_y=0; static uint8_t g_banner_fg=0;
 static std::map<std::string,uint64_t> g_stubhits;   // tag -> hit count
 static bool g_census = false;                        // set from ADSTUBCENSUS
 static volatile sig_atomic_t g_dump_now = 0;         // set by alarm handler
 #define ADSTUB(tag) do{ if(g_census) g_stubhits[tag]++; }while(0)
 
-// ---- addm 574: live keyboard/mouse input from the app (stdin line protocol) -----
+// ---- live keyboard/mouse input from the app (stdin line protocol) ---------------
 // Same channel as SET/GO: "KEY <kc> <0|1>", "CAPS <0|1>", "MOUSE <x> <y> <btn>".
-// Live Mac KeyMap (flat 16-byte order), caps + mouse state. Starts in the exact
-// pre-574 "headless-zero" state (all keys up, caps off, mouse (0,0) up) and is only
-// mutated by app protocol lines -> every input-less run is BYTE-IDENTICAL to pre-574.
+// Live Mac KeyMap (flat 16-byte order), caps + mouse state. Starts headless-zero (all
+// keys up, caps off, mouse (0,0) up) and is only mutated by app protocol lines, so an
+// input-less run behaves exactly as if there were no input channel at all.
 static uint8_t g_km[16] = {0};
 static bool    g_caps   = false;
 static int     g_msx=0, g_msy=0;
@@ -105,22 +102,22 @@ static bool    g_input_seen = false;
 static const int kCapsKeycode = 57;
 static inline void ad_km_set(int kc,bool dn){ if(kc<0||kc>127) return;
   uint8_t m=(uint8_t)(1u<<(kc&7)); if(dn) g_km[kc>>3]|=m; else g_km[kc>>3]&=(uint8_t)~m; }
-// ---- addm 607: Rodger Dodger PPC keypump (port of the 68K addm-601 feed) ----------
+// ---- Rodger Dodger PPC keypump ---------------------------------------------------
 // The shared AD 4.0 library (ADShared40.pef = adxpl510) exports the UserInput class; its
 // buffered key path is a global circular ring of static members addressed r2(TOC)-relative:
 //   theirKeyPressed@TOC+0x448 (flag,w), theirKeyWrite@+0x44A (head,w), theirKeyRead@+0x44C
 //   (tail,w), theirKeyBufferSize@+0x44E (w), theirKeyBuffer@+0x450 (4-byte KeyType slots).
-// AddKey(KeyType) (disasm code 0x1002D8B0): buffer[write*4]=key; write=(write+1)%size; if
-// read==write read=(read+1)%size; pressed=1.  (PPC increments write by +1, unlike the 68K
-// build's +2.)  The real AD shell called AddKey on each keyDown; our BLANK/DRAW host never
-// did, so the ring stayed empty and RD polled 0.  We reproduce AddKey from the host.
+// AddKey(KeyType) (code 0x1002D8B0): buffer[write*4]=key; write=(write+1)%size; if
+// read==write read=(read+1)%size; pressed=1.  (PPC increments write by +1; the 68K build
+// uses +2.)  The real AD shell called AddKey on each keyDown; this host's BLANK/DRAW drive
+// never reaches it, so the host reproduces AddKey itself.
 static int g_rd_dir = 0;   // currently-held RD KeyType (0 = none)
 // Map a Mac virtual keycode -> RD KeyType (the four values RD's KeyToMove recognises:
 // 0x26/0x68->dir1(up) 0x27/0x66->dir2(right) 0x28/0x62->dir3(down) 0x25/0x64->dir4(left)).
 static int ad_rd_keytype(int kc){
-  // addm 609: KeyType is {short keycode; short mods} big-endian and every reached consumer
-  // reads the HIGH halfword (lha at the word base) — the keycode goes in the TOP 16 bits
-  // (addm 608 proved the low-half form is invisible to the module).
+  // KeyType is {short keycode; short mods} big-endian and every reached consumer reads the
+  // HIGH halfword (lha at the word base), so the keycode goes in the TOP 16 bits; a keycode
+  // packed into the low half is invisible to the module.
   switch(kc){
     case 0x7E: case 0x0D: return 0x260000; // Up arrow    / W
     case 0x7D: case 0x01: return 0x280000; // Down arrow  / S
@@ -142,7 +139,7 @@ static bool ad_input_line(const char* s){
   return false;
 }
 
-// ---- addm 801: OPT-IN SEEDING OF THE adxpl510 LIBRARY RNG ---------
+// ---- OPT-IN SEEDING OF THE adxpl510 LIBRARY RNG ----------------------------------
 // WHAT THE RNG IS. A module's "Random" option does not roll Toolbox Random. It
 // cross-TOC-calls the shared library's own export RandInt__FUl (adxpl510
 // @1002A1C4), whose core @1002A140 is a 55-lag ADDITIVE LAGGED-FIBONACCI
@@ -168,13 +165,12 @@ static bool ad_input_line(const char* s){
 // ADUSPERCALL) and 0x00000000 with the wall clock on (<1 ms elapsed at INIT).
 // Same seed, same stream, same picks, every launch. It is a host-clock-ORIGIN
 // artefact; neither the module nor the library is doing anything wrong.
-// (This also explains the negative sweeps already on file: ADFAKEEPOCH and
-// ADREALCLOCK move GetDateTime and ADRANDSEED moves InterfaceLib:Random — three
-// different generators, none of them this one.)
+// (ADFAKEEPOCH and ADREALCLOCK move GetDateTime and ADRANDSEED moves
+// InterfaceLib:Random — three different generators, none of them this one.)
 //
-// THE LEVER. Opt-in, because the determinism is LOAD-BEARING: every byte-exact
-// PPC census baseline was recorded against that constant seed. Unset, not one
-// instruction below runs and output is byte-identical.
+// THE LEVER. Opt-in, because the determinism is LOAD-BEARING: the byte-exact PPC
+// census baselines are recorded against that constant seed. Unset, not one
+// instruction below runs.
 //     ADLIBRNGSEED=<hex>   fixed reproducible seed (RE, bisecting a roll)
 //     ADLIBRNGSEED=random  true per-launch randomisation (arc4random)
 //     ADLIBRNGSEED=probe   report the RNG state, seed nothing (read-only)
@@ -184,35 +180,31 @@ static bool ad_input_line(const char* s){
 //   (1) a host call to SRand(seed) before main(selector=0), which covers modules
 //       that never seed the library themselves; and
 //   (2) an argument override on the module's own SRand call. Point (2) is what
-//       actually decides the render: seeding earlier is overwritten by the
-//       module's INIT-time SRand, and seeding after INIT is too late for the
-//       first style pick — both measured, six seed values each, no change.
+//       decides the render: seeding earlier is overwritten by the module's own
+//       INIT-time SRand, and seeding after INIT is too late for the first style
+//       pick.
 static bool     g_librng_armed = false;
 static uint32_t g_librng_seed  = 0;
 static uint32_t g_librng_srand_pc = 0;   // adxpl510 SRand__FUi code entry, resolved at load
 
-// ---- addm 797: OPT-IN REAL HARDWARE CAPS-LOCK POLLING (ADREALCAPS=1) ------
-// The modules were already polling; the app just never told the host what caps was doing.
+// ---- OPT-IN REAL HARDWARE CAPS-LOCK POLLING (ADREALCAPS=1) -----------------------
 // The consumer is PortableModule::GetCapsLockChange() in the AD 4.0 shared library, which
-// reads the low-memory Mac KeyMap (68K: 0x174 directly; PPC: via the TOC pointer, addm 612)
-// and edge-detects it. So the host only has to keep g_caps truthful and everything already
-// wired downstream fires. Instead of routing the state app->stdin, the host can simply ask
-// the OS what caps is doing right now — which also works when there is no app at all.
+// reads the low-memory Mac KeyMap (68K: 0x174 directly; PPC: via the TOC pointer) and
+// edge-detects it. The host only has to keep g_caps truthful and everything wired
+// downstream fires. Instead of routing the state app->stdin, the host can ask the OS what
+// caps is doing right now — which also works when there is no app at all.
 //
-// WHICH API, AND WHY NOT THE OBVIOUS ONE (measured on this machine, not assumed):
+// WHICH API, AND WHY NOT THE OBVIOUS ONE (measured):
 //   CGEventSourceKeyState(state, 0x39 /*kVK_CapsLock*/) DOES NOT WORK for caps. Caps-Lock is
 //   a LOCKING modifier: the physical key is not held down while the lock is engaged, so the
-//   per-key state read returns 0 even with caps ON. Verified by toggling caps via
-//   IOHIDSetModifierLockState and re-reading: keystate stayed 0 across the toggle.
-//   CGEventSourceFlagsState(...) & kCGEventFlagMaskAlphaShift IS correct and tracked the
+//   per-key state read returns 0 even with caps ON.
+//   CGEventSourceFlagsState(...) & kCGEventFlagMaskAlphaShift IS correct and tracks the
 //   toggle exactly (flags 0x00000100 -> 0x00010100 -> 0x00000100).
 //
-// NO PERMISSION PROMPT (a hard user requirement; verified, not assumed): a modifier-FLAGS
-// read is not an event tap and is not a per-key query, so it does not engage the Input
-// Monitoring (kTCCServiceListenEvent) gate. Probed from a FRESH, never-before-run binary
-// path (TCC is keyed per-binary, so a fresh path is the case that would prompt):
-// zero entries in the com.apple.TCC subsystem log across both probes, no dialog, exit 0.
-// See scratchpad/capstcc/ (capsprobe.c, capstoggle.c) and capslock_evidence.md.
+// NO PERMISSION PROMPT: a modifier-FLAGS read is not an event tap and is not a per-key
+// query, so it does not engage the Input Monitoring (kTCCServiceListenEvent) gate.
+// Confirmed from a fresh, never-before-run binary path (TCC is keyed per-binary, so a
+// fresh path is the case that would prompt): no TCC log entries, no dialog.
 //
 // DECLARED BY HAND, NOT #included: pulling in <ApplicationServices/...> would drag the real
 // Mac Rect/Point/GrafPort typedefs into a file that defines its OWN emulated versions of
@@ -224,11 +216,10 @@ static const uint64_t kADCGFlagMaskAlphaShift   = 0x00010000ULL; // kCGEventFlag
 
 // Poll the real caps state and fold any CHANGE into exactly the state the "CAPS <0|1>"
 // stdin line sets. INERT BY CONSTRUCTION, three ways:
-//   1. off unless ADREALCAPS is set (the ADREALCLOCK pattern) -> census/headless untouched;
+//   1. off unless ADREALCAPS is set -> census/headless untouched;
 //   2. even when armed, if the polled level equals g_caps NOTHING is written — so a run
 //      with caps off never sets g_input_seen, and with g_input_seen false the host never
-//      writes the KeyMap mirror. An armed run with caps off is byte-identical to an
-//      unarmed one;
+//      writes the KeyMap mirror;
 //   3. it only ever assigns the same three variables ad_input_line already assigns.
 static void ad_poll_real_caps(){
   static const bool armed = getenv("ADREALCAPS")!=nullptr;
@@ -238,7 +229,7 @@ static void ad_poll_real_caps(){
   g_caps = rc; ad_km_set(kCapsKeycode, rc); g_input_seen = true;
   if(getenv("ADINPUTLOG")) fprintf(stderr,"[input] REALCAPS=%d\n", rc?1:0);
 }
-// addm 607: UserInput ring globals, resolved once at startup from the AddKey TVector's TOC
+// UserInput ring globals, resolved once at startup from the AddKey TVector's TOC
 // (== the r2 the library methods use). 0 until resolved / until the module imports UserInput.
 static bool     g_keypump_on = false;      // gated on RD + ring resolved + !ADNOKEYPUMP
 static uint32_t g_ui_pressed=0,g_ui_write=0,g_ui_read=0,g_ui_size=0,g_ui_buffer=0;
@@ -298,11 +289,10 @@ struct Host {
   int cur_file = 0;                                 // index into res_files
   map<pair<uint32_t,int16_t>,uint32_t> res_handle;  // (type,id) -> emulated Handle
   map<uint32_t,pair<uint32_t,int16_t>> handle_res;  // Handle -> (type,id)
-  int16_t last_res_err = 0;                          // ResError: result of last Resource Mgr call (addm 540)
-  // Memory Manager handle state byte (addm 540): handle -> flags. bit7(0x80)=locked,
+  int16_t last_res_err = 0;                          // ResError: result of the last Resource Mgr call
+  // Memory Manager handle state byte: handle -> flags. bit7(0x80)=locked,
   // bit6(0x40)=purgeable (Inside Macintosh: Memory). HGetState reads it; HLock/HUnlock/
-  // HPurge/HNoPurge/HSetState maintain it. Was a no-op that left the HANDLE in r3 as
-  // the "state" (low byte of a heap address) — nondeterministic lock-bit tests.
+  // HPurge/HNoPurge/HSetState maintain it.
   unordered_map<uint32_t,uint8_t> h_flags;
 
   uint32_t page_align(uint32_t a){ uint32_t p=mem->get_page_size(); return (a+p-1)&~(p-1); }
@@ -338,7 +328,7 @@ int main(int argc, char** argv){
   auto mem = H.mem;
   if(argc>=4) H.max_calls = strtoull(argv[3],nullptr,0);
 
-  // ---- STUB CENSUS: arm counting + pre-KILL self-alarm (addm 538) ----------
+  // ---- STUB CENSUS: arm counting + pre-KILL self-alarm ---------------------
   if(getenv("ADSTUBCENSUS")){
     g_census = true;
     // Number of STATIC ADSTUB(...) call sites instrumented in do_import. The
@@ -441,20 +431,13 @@ int main(int argc, char** argv){
   };
   if(const char* rp = getenv("ADRSRC")) load_rf(rp,"module fork");
   else if(!getenv("ADNORSRCAUTO")){
-    // adhost_re (addm 524): Points of View AND Rock Paper Scissors render STATIC in
-    // the PPC soak census for ONE reason — the recipe left ADRSRC unset, so the
-    // Resource Manager is empty and the module's OWN resource fork (its cel bitmaps,
-    // source photos, and palettes) never loads. With no source resources POV projects
-    // an empty field (g_fb stays blank, distinct=1) and RPS's DoInitialize returns -1
-    // and draws nothing. Proven by a same-dir A/B (only ADRSRC differs):
-    //   POV  noRSRC -> distinct=1 blank / RSRC -> distinct=10..48 RENDER (sustained)
-    //   RPS  noRSRC -> INIT r3=-1 static  / RSRC -> 40/40 distinct, 3 GWorlds, 32 CopyBits
-    // This is NOT a host-code bug and NOT a module-internal freeze; it is a harness
-    // recipe omission. Make the host robust to it: when ADRSRC is unset, auto-load the
-    // module's macOS resource named-fork <argv[2]>/..namedfork/rsrc. Opt-out ADNORSRCAUTO.
-    // (Preferred fix remains the recipe: pass ADRSRC=<module>/..namedfork/rsrc, and for
-    // RPS also DROP the stale ADMAINCODE=300074F4 — that is POV's dispatcher; RPS's real
-    // main auto-detects at 3001C680, whereas 300074F4 in RPS is a no-op entry.)
+    // With ADRSRC unset the Resource Manager is empty and the module's OWN resource fork
+    // (cel bitmaps, source photos, palettes) never loads: Points of View then projects an
+    // empty field and Rock Paper Scissors' DoInitialize returns -1 and draws nothing. So
+    // when ADRSRC is unset, auto-load the module's macOS resource named-fork
+    // <argv[2]>/..namedfork/rsrc. Opt-out ADNORSRCAUTO. Passing ADRSRC explicitly is still
+    // preferred. Note ADMAINCODE is per-module: 300074F4 is Points of View's dispatcher and
+    // is a no-op entry in Rock Paper Scissors, whose real main auto-detects at 3001C680.
     std::string rf = std::string(argv[2]) + "/..namedfork/rsrc";
     fprintf(stderr,"[adhost_re] ADRSRC unset — auto-loading module resource fork %s\n",rf.c_str());
     load_rf(rf.c_str(),"module fork (auto)");
@@ -524,9 +507,9 @@ int main(int argc, char** argv){
   };
   // Emulated stack at a FIXED high base (0x60000000) clear of the engine (0x10000000),
   // modules (0x30000000+), and all other host allocations (0x50000000 region: canvas,
-  // frame, GWorlds). Previously the stack could land adjacent to the frame and a
-  // module's stwu would corrupt frame/GMParamBlock fields (PoV's DoInitialize read a
-  // stack-clobbered flag -> -1; Magic-Turtle-class overlap). Fallback to hi_alloc.
+  // frame, GWorlds). A stack adjacent to the frame lets a module's stwu corrupt
+  // frame/GMParamBlock fields (Points of View's DoInitialize then reads a clobbered flag
+  // and returns -1). Fallback to hi_alloc.
   uint32_t stack;
   try { mem->allocate_at(0x60000000, 0x80000); stack = 0x60000000 + 0x38000; }
   catch(const exception&){ stack = hi_alloc(0x40000, 0x50000000) + 0x38000; }
@@ -637,10 +620,9 @@ int main(int argc, char** argv){
         fprintf(stderr,"[line%d] (%d,%d)->(%d,%d) idx=%d base=%08X toFb=%u toGw=%u toOther=%u idxseen=%08X\n",
           n,x0,y0,x1,y1,idx,base,toFb,toGw,toOther,idxmask); }
     int dx=abs(x1-x0),dy=-abs(y1-y0),sx=x0<x1?1:-1,sy=y0<y1?1:-1,err=dx+dy;
-    // Pen size (PenSize) was unimplemented, so every line was 1px regardless of the
-    // module's requested thickness. Honor pen_w/pen_hgt by stamping a small filled box
-    // at each step (only when >1, so the default 1px path — and all modules that never
-    // call PenSize — is byte-identical to before).
+    // Honor pen_w/pen_hgt by stamping a small filled box at each step; only when >1, so
+    // the default 1px pen (and every module that never calls PenSize) takes the cheap
+    // single-pixel path.
     int pw=H.pen_w>1?H.pen_w:1, ph=H.pen_hgt>1?H.pen_hgt:1;
     for(int guard=0;guard<20000;guard++){
       if(pw==1&&ph==1) qd_px(x0,y0,idx);
@@ -649,8 +631,8 @@ int main(int argc, char** argv){
       if(e2>=dy){err+=dy;x0+=sx;} if(e2<=dx){err+=dx;y0+=sy;} }
   };
   // Filled/framed ellipse inside a Rect (PaintOval/FrameOval/EraseOval). Midpoint
-  // scan: for each row, x-extent from the ellipse equation. Was unimplemented, so
-  // Art Critic's oval-brush strokes (105/run) drew nothing.
+  // scan: for each row, x-extent from the ellipse equation. Art Critic paints its
+  // brush strokes as ovals.
   auto qd_oval=[&](int t,int l,int b,int rr,uint8_t idx,bool frame){
     int w=rr-l,h=b-t; if(w<=0||h<=0)return;
     double cx=(l+rr)/2.0, cy=(t+b)/2.0, ax=w/2.0, ay=h/2.0;
@@ -678,53 +660,43 @@ int main(int argc, char** argv){
 
   // ---- 5. Memory Manager + trace hook -------------------------------------
   PPC32Emulator emu(mem);
-  // Per-item opt-out levers (addm 540): each set reverts ONE implemented item to its
-  // pre-540 behavior, for isolated A/B on this copy. Cached once (some sit in hot paths,
-  // e.g. HGetState 1.8M calls). ADNOCUP (item 1) is still read inline at its lower-freq site.
-  static const bool NOHSTATE   = getenv("ADNOHSTATE");   // item 2: HGetState/HSetState/H* flags
-  static const bool NORESERR   = getenv("ADNORESERR");   // item 3: ResError last-error
-  static const bool NOGESTERR  = getenv("ADNOGESTERR");  // item 4: Gestalt undef-selector err
-  static const bool NORGN      = getenv("ADNORGN");      // item 5: region bbox model
-  static const bool NOUSERESFIX= getenv("ADNOUSERESFIX");// item 6: UseResFile dead-branch fix
-  static const bool NOFCB      = getenv("ADNOFCB");      // item 7: PBGetFCBInfoSync real block
-  static const bool NODEVATTR  = getenv("ADNODEVATTR");  // item 8: TestDeviceAttribute real bits
-  static const bool NOINDPAT   = getenv("ADNOINDPAT");   // item 9: GetIndPattern real PAT#
-  // addm 611/616 (bug #1): Flying Toasters' one-shot "Flying Toasters!:  <fun fact>" title
-  // persists in the top-left. RE (addm 622) traced the DRAW: it is NOT FT's own code — it is
-  // the shared library's (adxpl510) init-time USER-MESSAGE banner. During the module's
+  // Per-item opt-out levers: each reverts ONE implemented Toolbox item to a plain stub,
+  // for isolated A/B. Cached once because some sit in hot paths (HGetState runs ~1.8M
+  // times). ADNOCUP is still read inline at its lower-frequency site.
+  static const bool NOHSTATE   = getenv("ADNOHSTATE");   // HGetState/HSetState/H* flags
+  static const bool NORESERR   = getenv("ADNORESERR");   // ResError last-error
+  static const bool NOGESTERR  = getenv("ADNOGESTERR");  // Gestalt undef-selector err
+  static const bool NORGN      = getenv("ADNORGN");      // region bbox model
+  static const bool NOUSERESFIX= getenv("ADNOUSERESFIX");// UseResFile remap
+  static const bool NOFCB      = getenv("ADNOFCB");      // PBGetFCBInfoSync real block
+  static const bool NODEVATTR  = getenv("ADNODEVATTR");  // TestDeviceAttribute real bits
+  static const bool NOINDPAT   = getenv("ADNOINDPAT");   // GetIndPattern real PAT#
+  // Flying Toasters' one-shot "Flying Toasters!:  <fun fact>" title is NOT FT's own drawing —
+  // it is the shared library's (adxpl510) init-time USER-MESSAGE banner. During the module's
   // DoInitialize (message 0) the library routine at BASE_A+0xEB34 loads FT's fun-fact resource
   // (GetResource 0x55F0), builds "<sceneName>:  <fact>", MoveTo(pen+15,+25), and DrawStrings it
   // to the SCREEN port (caller lr == BASE_A+0xEC3C). Then — STILL inside message 0 — FT's sprite
   // engine captures the screen into its background page (CopyBits screen->003D8000, lib fn
   // BASE_A+0xCCAC), baking the banner into the sprite bg. No screen erase runs between the two,
-  // so NO post-init "engine blank" can remove it (the bg is already captured); the addm-611
-  // "engine blanks after DoInitialize, before the snapshot" timing is refuted — the snapshot is
-  // INTRA-message-0. On a real Mac these DoUserMessage banners are ENGINE-COMPOSITED TIMED
-  // OVERLAYS (drawn over the animation each frame, cleared on timeout, never in a module's
-  // sprite background); that overlay/timeout logic lives in the un-extracted faceplate engine
-  // app. Our host has no overlay layer, so the banner leaks into the captured background.
-  // FIX (addm 622): replace the FT-name FABRICATION with a mechanism-grounded gate — suppress
-  // the DrawString iff the CALLER is the library's DoUserMessage banner routine
-  // [BASE_A+0xEB34, BASE_A+0xEC80). This targets the shared banner mechanism for ALL AD4 PPC
-  // modules, not the string "Flying Toasters" (byte-identical to the addm-616 FTSUPPRESS result
-  // on FT, and additionally clears the same-class banner on other modules e.g. Fish World).
-  // Default ON; opt-out ADNOMSGBANNER. (legacy-cleanup addm 679: the ADFTSUPPRESS=1 A/B revert to the
-  // old addm-611 FT-name gate — superseded by MSGBANNERFIX — is retired; dead by default in main.)
+  // so no post-init "engine blank" can remove it: the snapshot is INTRA-message-0. On a real Mac
+  // these DoUserMessage banners are ENGINE-COMPOSITED TIMED OVERLAYS (drawn over the animation
+  // each frame, cleared on timeout, never in a module's sprite background); that overlay/timeout
+  // logic lives in the un-extracted faceplate engine app, so without an overlay layer the banner
+  // leaks into the captured background. The gate is therefore mechanism-grounded rather than
+  // name-based: suppress the DrawString iff the CALLER is the library's DoUserMessage banner
+  // routine [BASE_A+0xEB34, BASE_A+0xEC80), which covers the same-class banner in every AD4 PPC
+  // module (e.g. Fish World). Default ON; opt-out ADNOMSGBANNER.
   static const uint32_t MSGBANNER_LO = BASE_A + 0xEB34, MSGBANNER_HI = BASE_A + 0xEC80;
   static const bool MSGBANNERFIX = !getenv("ADNOMSGBANNER");
-  // Psycho Deli REAL palette animation (addm 693: the fabricated HSV hue-wheel synth is
-  // REMOVED; the module's own DoDrawFrame palette-cycle is now the SOLE path). PD's
-  // psychedelic CLUT cycle is computed by its OWN per-frame DoDrawFrame step (which
-  // advances the module's float palette at objSub+0x58 and re-installs it via SetEntries).
-  // Our GM drive historically called only DoBlank each frame — a per-frame CONSTANT
-  // palette — so PD was static and the host faked motion with an HSV synth (addm 520).
-  // The real fix (in the GM loop): reproduce the store the module's own StyleDispatch
-  // first case performs (seed its per-style element-draw callback at DoDrawFrame-TOC+0x64c
-  // from the seed TVector at +0xf0, normally installed by an un-sent setup message) and
-  // drive DoDrawFrame each frame. Arming is keyed STRUCTURALLY on that null-callback
-  // signal (GM module whose DoDrawFrame TOC+0x64c is NULL with an in-module seed at +0xf0),
-  // NOT on the module name — the strstr("Psycho Deli") gate is dissolved. Measured robust:
-  // 0 DoDrawFrame faults over 300 frames; real palette cycles (distinct=300).
+  // Psycho Deli's psychedelic CLUT cycle is computed by its OWN per-frame DoDrawFrame step,
+  // which advances the module's float palette at objSub+0x58 and re-installs it via
+  // SetEntries. A GM drive that calls only DoBlank each frame therefore yields a constant
+  // palette and a static module. The GM loop instead reproduces the store the module's own
+  // StyleDispatch first case performs (seed its per-style element-draw callback at
+  // DoDrawFrame-TOC+0x64c from the seed TVector at +0xf0, normally installed by a setup
+  // message this drive never sends) and drives DoDrawFrame each frame. Arming is keyed
+  // STRUCTURALLY on that null-callback signal (GM module whose DoDrawFrame TOC+0x64c is NULL
+  // with an in-module seed at +0xf0), not on the module name.
   auto do_import = [&](PPC32Emulator& e, uint32_t idx)->void{
     if(g_dump_now){ census_dump(); fflush(NULL); _exit(0); }   // census alarm fired
     auto& r = e.registers();
@@ -748,10 +720,8 @@ int main(int argc, char** argv){
     } else if(nm=="InterfaceLib:HLock"||nm=="InterfaceLib:HUnlock"||nm=="InterfaceLib:HLockHi"||
               nm=="InterfaceLib:MoveHHi"||nm=="InterfaceLib:HNoPurge"||nm=="InterfaceLib:HPurge"||
               nm=="InterfaceLib:HGetState"||nm=="InterfaceLib:HSetState"){
-      // Real handle state-byte model (addm 540). r3 = Handle. bit7(0x80)=locked,
-      // bit6(0x40)=purgeable. Was a no-op leaving r3 (the handle) as HGetState's
-      // "state" -> low byte of a heap address; lock-bit tests branched on allocator layout.
-      if(NOHSTATE){ ADSTUB(string("STUB:")+nm); }   // opt-out: pre-540 no-op
+      // Real handle state-byte model. r3 = Handle. bit7(0x80)=locked, bit6(0x40)=purgeable.
+      if(NOHSTATE){ ADSTUB(string("STUB:")+nm); }   // opt-out: no-op
       else {
         uint32_t h=r.r[3].u;
         if(nm=="InterfaceLib:HLock"||nm=="InterfaceLib:HLockHi") H.h_flags[h]|=0x80;
@@ -763,7 +733,7 @@ int main(int argc, char** argv){
         // MoveHHi: relocation hint only (our blocks never move) — no flag change.
       }
     } else if(nm=="InterfaceLib:DisposePtr"||nm=="InterfaceLib:DisposeHandle"){
-      // leak-by-design: the bump arena has no free list (INAPPLICABLE, addm 538).
+      // leak-by-design: the bump arena has no free list.
       ADSTUB(string("STUB:")+nm);
     } else if(nm=="InterfaceLib:GetHandleSize"||nm=="InterfaceLib:GetPtrSize"){
       auto it=H.block_size.find(r.r[3].u); ret(it!=H.block_size.end()?it->second:0);
@@ -782,10 +752,9 @@ int main(int argc, char** argv){
       ADSTUB(string("STUB:")+nm);   // constant noErr (all our allocations succeed)
       ret(0);
     } else if(nm=="InterfaceLib:ResError"){
-      // Real last-error (addm 540): a failed Get*Resource sets resNotFound(-192); a
-      // successful resource call sets noErr. Was constant noErr, so a module distinguishing
-      // "missing" from "OK" via ResError (the addm-534 pattern) always saw success.
-      if(NORESERR){ ADSTUB(string("STUB:")+nm); ret(0); }   // opt-out: pre-540 constant noErr
+      // Real last-error: a failed Get*Resource sets resNotFound(-192); a successful
+      // resource call sets noErr. Modules distinguish "missing" from "OK" this way.
+      if(NORESERR){ ADSTUB(string("STUB:")+nm); ret(0); }   // opt-out: constant noErr
       else ret((uint32_t)(int32_t)H.last_res_err);
     } else if(nm=="InterfaceLib:p2cstr"){
       uint32_t s=r.r[3].u; if(s){ uint8_t len=mem->read_u8(s);
@@ -809,7 +778,7 @@ int main(int argc, char** argv){
       ret(gw ? mem->read_u32b(gw+0x02) : H.g_pmh);
     } else if(nm=="InterfaceLib:NewRoutineDescriptor"){
       // NewRoutineDescriptor(ProcPtr theProc, ProcInfo, ISA) -> UniversalProcPtr.
-      // On native PPC a UPP is just the proc's TVector, so return r3 unchanged; else
+      // On native PPC a UPP is just the proc's TVector, so return r3 unchanged; otherwise
       // the module's draw-proc UPP is null and calling it faults at pc=0 (Psycho Deli).
       if(getenv("ADNRDLOG")){ static int n=0; if(n++<20)
         fprintf(stderr,"[nrd] proc=%08X procInfo=%08X lr=%08X\n",r.r[3].u,r.r[4].u,r.lr); }
@@ -818,14 +787,12 @@ int main(int argc, char** argv){
       ADSTUB(string("STUB:")+nm);
       ret(0);
     } else if(nm=="InterfaceLib:CallUniversalProc" && !getenv("ADNOCUP")){
-      // CallUniversalProc(UniversalProcPtr upp, ProcInfo, args...): actually DISPATCH
-      // the proc. addm 540: made the DEFAULT (was gated on ADGM/ADCUP; opt-out ADNOCUP).
-      // 17 modules invoked 4,663 real UPP callbacks that the non-GM path silently
-      // swallowed as ret(0) — the Marbles-class shape writ large: module code a real Mac
-      // RUNS never executed. GraphicsModules route real drawing through UPPs; a no-op stub
-      // meant Psycho Deli's pattern never drew). On PPC a UPP is the proc's TVector.
-      // Redirect emulation INTO the proc: it returns (blr) to r.lr = the module caller,
-      // so this trap effectively becomes the call. Args shift by 2 (skip upp, procInfo).
+      // CallUniversalProc(UniversalProcPtr upp, ProcInfo, args...): actually DISPATCH the
+      // proc (opt-out ADNOCUP). Modules make real UPP callbacks — GraphicsModules route
+      // drawing through them — so a ret(0) stub swallows module code a real Mac runs.
+      // On PPC a UPP is the proc's TVector. Redirect emulation INTO the proc: it returns
+      // (blr) to r.lr = the module caller, so this trap effectively becomes the call.
+      // Args shift by 2 (skip upp, procInfo).
       uint32_t upp=r.r[3].u;
       if(getenv("ADCBLOG")){ static int n=0; if(n++<24){
         uint32_t pi=r.r[4].u, a1=r.r[5].u, a2=r.r[6].u;
@@ -840,20 +807,18 @@ int main(int argc, char** argv){
       else ret(0);
     } else if(nm=="InterfaceLib:PBGetFCBInfoSync"){
       // PBGetFCBInfo(FCBPBPtr pb, Boolean async): describe an open file control block.
-      // addm 540: real fill for our virtual open resource forks (was noErr + UNTOUCHED
-      // param block -> garbage FCB fields; a module enumerating open files read junk).
+      // A module enumerating open files reads these fields, so fill them for real.
       // Our only "open files" are the loaded resource forks (res_files); OpenResFile maps
       // file index i -> refNum i+2. FCBPBRec offsets (Inside Macintosh: Files):
       //   ioResult@16 ioNamePtr@18 ioVRefNum@22 ioRefNum@24 ioFCBIndx@28
       //   ioFCBFlNm@32 ioFCBFlags@36 ioFCBEOF@40 ioFCBPLen@44 ioFCBCrPs@48 ioFCBVRefNum@52
-      if(NOFCB){ ADSTUB(string("STUB:")+nm); ret(0); }   // opt-out: pre-540 noErr + untouched block
+      if(NOFCB){ ADSTUB(string("STUB:")+nm); ret(0); }   // opt-out: noErr + untouched block
       else {
       // paramErr is returned ONLY to terminate a genuine index-walk past the last open
       // file (indx>N). For a specific refNum query, or an indeterminate/bogus param block,
-      // we answer noErr (superset-residency model, same justification as the resource
-      // no-ops in addm 538) — returning an error here steers the AD engine into a direct-
-      // FSRead path our host cannot back (measured: it derails Rodger Dodger). This is a
-      // DEVIATION from the addm-538 sketch's blanket paramErr, chosen by observed behavior.
+      // answer noErr (the superset-residency model the resource no-ops also use): an error
+      // here steers the AD engine into a direct-FSRead path this host cannot back, which
+      // derails Rodger Dodger.
       uint32_t pb=r.r[3].u;
       int32_t err=0; int fi=-1;
       if(pb){
@@ -890,10 +855,9 @@ int main(int argc, char** argv){
       else ADSTUB(string("STUB:")+nm);  // SetGDevice discard / CallUniversalProc under ADNOCUP
       ret(0);  // benign
     } else if(nm.rfind("MathLib:",0)==0){
-      // PowerPC FP ABI: double args in f1,f2; double result in f1. MathLib was all
-      // unimplemented (returned garbage), so modules doing trig-based motion (Magic
-      // Turtle's spiral, orbit paths) computed bad positions and faulted. Implement
-      // the common transcendental/rounding fns straight from libm.
+      // PowerPC FP ABI: double args in f1,f2; double result in f1. Modules compute
+      // trig-based motion (Magic Turtle's spiral, orbit paths) through MathLib, so the
+      // common transcendental/rounding fns come straight from libm.
       const string fn = nm.substr(8);
       double a = r.f[1].f, b = r.f[2].f, y = 0;
       if(fn=="sin") y=std::sin(a); else if(fn=="cos") y=std::cos(a);
@@ -929,22 +893,13 @@ int main(int argc, char** argv){
           mem->write_u16b(e+2, mem->read_u16b(cs+2));
           mem->write_u16b(e+4, mem->read_u16b(cs+4));
           mem->write_u16b(e+6, mem->read_u16b(cs+6)); }
-        // (addm 693: the fabricated HSV hue-wheel "synth" that used to live here — which
-        // overwrote the module's installed table with a rotating rainbow when PD's own
-        // palette computation looked all-zero / in GM mode — is REMOVED. PD's real
-        // DoDrawFrame path (armed structurally in the GM loop) computes and installs its
-        // OWN cycling palette here every frame, so the host installs exactly the module's
-        // colours and nothing else. The former ADPDPAL/ADNOPDPAL/ADPDSYNTH/ADPDDARKONLY
-        // levers are gone with it.)
       }
     } else if(nm=="InterfaceLib:GetKeys"){
-      // GetKeys(KeyMap theKeys) -> fill 16-byte keymap. Unimplemented left garbage,
-      // so modules polling "is any key down?" (Points of View gates its animation on
-      // this) saw phantom keypresses. Report NO keys down (all zero).
-      ADSTUB(string("STUB:")+nm);  // always reports NO keys down (constant zero keymap)
+      // GetKeys(KeyMap theKeys) -> fill the caller's 16-byte keymap. Modules poll "is any
+      // key down?" (Points of View gates its animation on it), so the map must be real.
+      ADSTUB(string("STUB:")+nm);  // no real hardware keyboard behind it
       if(getenv("ADINPUTLOG")){ static long n=0; if(++n<=60) fprintf(stderr,"    [input] GetKeys km=%08X lr=%08X\n", r.r[3].u, r.lr); }
-      // addm 574: copy the live KeyMap (g_km all-zero until the app sends input ->
-      // byte-identical to the old constant-zero fill for every input-less run).
+      // Copy the live KeyMap; g_km stays all-zero until the app sends input.
       uint32_t km=r.r[3].u; if(km){ for(int i=0;i<16;i++) mem->write_u8(km+i,g_km[i]); }
     } else if(nm=="InterfaceLib:HideCursor"||nm=="InterfaceLib:ShowCursor"||
               nm=="InterfaceLib:InitCursor"||nm=="InterfaceLib:ObscureCursor"||
@@ -954,18 +909,17 @@ int main(int argc, char** argv){
     } else if(nm=="InterfaceLib:Button"||nm=="InterfaceLib:StillDown"||nm=="InterfaceLib:WaitMouseUp"){
       ADSTUB(string("STUB:")+nm);  // constant 0: mouse button never down
       if(getenv("ADINPUTLOG")){ static long n=0; if(++n<=60) fprintf(stderr,"    [input] %s lr=%08X\n", nm.c_str(), r.lr); }
-      ret(g_msbtn?1:0); // addm 574: live mouse button (default up=0 -> byte-identical)
+      ret(g_msbtn?1:0); // live mouse button (default up = 0)
     } else if(nm=="InterfaceLib:GetMouse"){
-      // GetMouse(Point* mouseLoc) — fill the caller's Point (v,h)=(y,x). addm 574: live
-      // mouse pos, default (0,0). (ADShared40 imports GetMouse; the pre-574 host had no
-      // handler so it fell to the UNIMPL no-op; this is additive + default-inert.)
+      // GetMouse(Point* mouseLoc) — fill the caller's Point (v,h)=(y,x) with the live
+      // mouse position; default (0,0). ADShared40 imports GetMouse.
       ADSTUB(string("STUB:")+nm);
       if(getenv("ADINPUTLOG")){ static long n=0; if(++n<=60) fprintf(stderr,"    [input] GetMouse pt=%08X lr=%08X\n", r.r[3].u, r.lr); }
       uint32_t pt=r.r[3].u; if(pt){ mem->write_u16b(pt,(uint16_t)g_msy); mem->write_u16b(pt+2,(uint16_t)g_msx); }
     } else if(nm=="InterfaceLib:Color2Index"){
-      // Color2Index(const RGBColor* -> long index): nearest palette index for an RGB.
-      // Was unimplemented (returned 0=black) so modules building per-element colors
-      // (Swirling Magic's pixies) drew everything invisible. Map via the CLUT.
+      // Color2Index(const RGBColor* -> long index): nearest palette index for an RGB,
+      // mapped via the CLUT. Modules build per-element colors this way (Swirling Magic's
+      // pixies), so a constant return makes their drawing invisible.
       uint32_t cp=r.r[3].u;
       ret(cp ? rgb_to_index(mem->read_u16b(cp),mem->read_u16b(cp+2),mem->read_u16b(cp+4)) : 0);
     } else if(nm=="InterfaceLib:Index2Color"){
@@ -982,19 +936,14 @@ int main(int argc, char** argv){
         // (built from its SetEntries palette). Nearest-RGB match collapses the near-
         // identical dark ramp to one index (invisible), so we honor red-as-index instead.
         //
-        // Detect the convention STRUCTURALLY from the color itself (addm 700, replaces the
-        // ADGM/gmMode PD-proxy — the routing no longer depends on the ADGM flag or a module
-        // name): green == 0 AND red is a NONZERO value that fits in the low byte (R in
-        // [1,255], i.e. an index packed in red, high byte clear). By construction the 17
-        // true-RGB call_main modules never emit this — their green==0 colors are pure
-        // blues/blacks with red == 0 (e.g. {0000,0000,FFFF} blue, {0000,0000,0000} black),
-        // NEVER a nonzero small red. Measured corpus-wide (60-frame probe, ADRGBALL): PD
-        // emits G==0 & R∈[1,255] on every draw (49920) and NEVER R==0; all 17 emit ZERO
-        // such calls (their G==0 reds are all 0). So this fires for exactly PD's draws —
-        // the identical set the old `gmMode && G==0` routed (PD has no G==0 & R==0 draw) —
-        // and never for the corpus, keeping it byte-identical. The R<0x100 bound also makes
-        // this stricter than the old `G==0` (a real large red, high byte set, is left as a
-        // true colour). ADNOPDINDEX forces off; ADPDINDEX forces on for any path.
+        // Detect the convention STRUCTURALLY from the color itself, not from a module name
+        // or the ADGM flag: green == 0 AND red is a NONZERO value that fits in the low byte
+        // (R in [1,255], i.e. an index packed in red with the high byte clear). The 17
+        // true-RGB call_main modules never emit that — their green==0 colors are pure
+        // blues/blacks with red == 0 ({0000,0000,FFFF} blue, {0000,0000,0000} black), never
+        // a nonzero small red — while PD emits G==0 & R∈[1,255] on every draw and never
+        // R==0. The R<0x100 bound leaves a real large red (high byte set) as a true colour.
+        // ADNOPDINDEX forces off; ADPDINDEX forces on for any path.
         bool index_in_red = (G==0 && R!=0 && R<0x100);
         if(getenv("ADPDLOG")){ static int n=0; if(n++<16) fprintf(stderr,"    RGBForeColor R=%04X G=%04X B=%04X -> ix=%d\n",R,G,B,(int)(R&0xFF)); }
         if((getenv("ADPDINDEX") || index_in_red) && !getenv("ADNOPDINDEX")) ix=(uint8_t)(R & 0xFF);
@@ -1009,7 +958,6 @@ int main(int argc, char** argv){
       uint8_t ix=rgb_to_index(R,G,B); if(nm=="InterfaceLib:ForeColor")H.qd_fg=ix; else H.qd_bg=ix;
     } else if(nm=="InterfaceLib:PenSize"){
       // PenSize(short width, short height): set the pen dimensions used by Line/Frame.
-      // Was unimplemented (0-return), so thick-pen strokes drew as hairlines.
       H.pen_w=(int16_t)r.r[3].u; H.pen_hgt=(int16_t)r.r[4].u;
       if(H.pen_w<1)H.pen_w=1; if(H.pen_hgt<1)H.pen_hgt=1;
     } else if(nm=="InterfaceLib:PenMode"){ H.pen_mode=(int16_t)r.r[3].u; // tracked; no XOR path
@@ -1021,7 +969,7 @@ int main(int argc, char** argv){
     } else if(nm=="InterfaceLib:StringWidth"){
       // StringWidth(ConstStr255 s) -> pixel width. Our bitmap font advances 6px/char
       // (see qd_string), so report 6*len; text-layout code (Bad Dog) centers strings
-      // using this and previously got 0 (all text stacked at one x).
+      // with it.
       uint32_t s=r.r[3].u; int n=s?mem->read_u8(s):0; ret((uint32_t)(6*n));
     } else if(nm=="InterfaceLib:TextWidth"){
       // TextWidth(ptr, offset, len) -> width of len chars at 6px each.
@@ -1033,8 +981,8 @@ int main(int argc, char** argv){
         mem->write_u16b(p+4,6); mem->write_u16b(p+6,0); }
     } else if(nm=="InterfaceLib:SetOrigin"){
       // SetOrigin(short h, short v): move the port's coordinate origin. Modules call
-      // this constantly (843x) to re-home local coords; our software QD treats coords
-      // as pixmap-local so the default is identity. Track it and (opt-in ADSETORIGIN)
+      // this constantly to re-home local coords; our software QD treats coords as
+      // pixmap-local so the default is identity. Track it and (opt-in ADSETORIGIN)
       // apply as a pixel offset, and reflect it in the current port's portRect so a
       // module that reads the origin back sees the value it set.
       H.qd_org_h=(int16_t)r.r[3].u; H.qd_org_v=(int16_t)r.r[4].u;
@@ -1058,15 +1006,14 @@ int main(int argc, char** argv){
       uint32_t rp=r.r[3].u; if(rp){ int t=(int16_t)mem->read_u16b(rp),l=(int16_t)mem->read_u16b(rp+2),
         b=(int16_t)mem->read_u16b(rp+4),rr=(int16_t)mem->read_u16b(rp+6);
         uint8_t ix=(nm=="InterfaceLib:EraseRect")?H.qd_bg:H.qd_fg;
-        // *** addm 551 CLASS-B BACKDROP-BLACK (PPC) ***: the shared AD 4.0 engine (MacCanvas) erases its
-        // full-screen OFFSCREEN work buffer with its default background colour (a light engine global:
-        // white for Guernsey Madness, grey-238 for Rainforest) and then blits that buffer to the (correctly
-        // black) screen — so the light backdrop shows through as a big white/grey box behind the sprites.
-        // After Dark's backdrop is BLACK; the light value is the engine's shipped default bg. Mirror the 68K
-        // fix: a LARGE-area EraseRect (>=50% of the screen, top-left anchored) whose bg is (near-)white/light
-        // paints black instead, so the composited backdrop is black and sprites keep their colours. Small
-        // sprite-cell buffers and non-light erases are untouched (all 16 other PPC-corpus modules are
-        // byte-identical). Opt-out ADNOBLACKDROP=1.
+        // BACKDROP BLACK: the shared AD 4.0 engine (MacCanvas) erases its full-screen OFFSCREEN work
+        // buffer with its default background colour (a light engine global: white for Guernsey Madness,
+        // grey-238 for Rainforest) and then blits that buffer to the (correctly black) screen, so the
+        // light backdrop shows through as a big white/grey box behind the sprites. After Dark's backdrop
+        // is BLACK; the light value is only the engine's shipped default bg. So a LARGE-area EraseRect
+        // (>=50% of the screen, top-left anchored) whose bg is (near-)white/light paints black instead,
+        // keeping the composited backdrop black while sprites keep their colours. Small sprite-cell
+        // buffers and non-light erases are untouched. Opt-out ADNOBLACKDROP=1.
         if(nm=="InterfaceLib:EraseRect" && !getenv("ADNOBLACKDROP")){
           uint32_t e0=H.g_clut+8+(uint32_t)ix*8;
           bool light = mem->read_u16b(e0+2)>=0xE000 && mem->read_u16b(e0+4)>=0xE000 && mem->read_u16b(e0+6)>=0xE000;
@@ -1097,8 +1044,8 @@ int main(int argc, char** argv){
         H.qd_clip_b=(int16_t)mem->read_u16b(rp+4);H.qd_clip_r=(int16_t)mem->read_u16b(rp+6); }
     } else if(nm=="InterfaceLib:GetClip"){
       // GetClip(RgnHandle): store the current clip rect into the region's bbox so a
-      // module can save/restore it (paired with SetClip). Was 0-return -> restore later
-      // installed an all-zero (empty) clip and drawing vanished.
+      // module can save/restore it (paired with SetClip). An all-zero region restored
+      // later installs an empty clip and drawing vanishes.
       uint32_t rh=r.r[3].u; uint32_t rgn=rh?mem->read_u32b(rh):0;
       if(rgn){ mem->write_u16b(rgn,10); mem->write_u16b(rgn+2,(uint16_t)H.qd_clip_t);
         mem->write_u16b(rgn+4,(uint16_t)H.qd_clip_l); mem->write_u16b(rgn+6,(uint16_t)H.qd_clip_b);
@@ -1116,18 +1063,16 @@ int main(int argc, char** argv){
       if(getenv("ADTXTLOG")){ uint32_t sp=r.r[3].u; int n=sp?mem->read_u8(sp):0; std::string s;
         for(int k=0;k<n&&k<80;k++){ int c=mem->read_u8(sp+1+k); s+=(c>=0x20&&c<0x7F)?(char)c:'.'; }
         fprintf(stderr,"[txt] DrawString pen=(%d,%d) fg=%d port=%08X lr=%08X \"%s\"\n",H.pen_h,H.pen_v,H.qd_fg,H.cur_port,r.lr,s.c_str()); }
-      // addm 622: drop the shared library's init-time USER-MESSAGE banner (see MSGBANNERFIX) —
-      // the caller (r.lr) inside the library's DoUserMessage banner routine is the mechanism-
-      // grounded discriminator, replacing the addm-611 FT-name string gate. This is what leaks
-      // FT's "<name>: <fact>" title into the sprite background; on real hardware these banners
-      // are engine-composited transient overlays, never sprite-bg content.
+      // Drop the shared library's init-time USER-MESSAGE banner (see MSGBANNERFIX): the caller
+      // (r.lr) inside the library's DoUserMessage banner routine is the mechanism-grounded
+      // discriminator. That draw is what leaks FT's "<name>: <fact>" title into the sprite
+      // background; on real hardware these banners are engine-composited transient overlays,
+      // never sprite-bg content.
       bool ft_title=false;
       if(MSGBANNERFIX && r.lr>=MSGBANNER_LO && r.lr<MSGBANNER_HI) ft_title=true;
-      // (legacy-cleanup addm 679: the ADFTSUPPRESS legacy addm-611 FT-name + top-region string gate is
-      // deleted — dead by default in main, superseded by MSGBANNERFIX above.)
-      // addm 699: instead of merely dropping the banner, CAPTURE it (text/pen/fg) so the present-time overlay
-      // can show it briefly then clear — the authentic timed overlay. Suppressing the draw here still keeps it
-      // out of g_fb and the sprite background (the addm-622 fix); the overlay is a screen composite only.
+      // Rather than merely dropping it, CAPTURE it (text/pen/fg) so the present-time overlay can
+      // show it briefly then clear — the authentic timed overlay. Suppressing the draw here keeps
+      // it out of g_fb and the sprite background; the overlay is a screen composite only.
       if(ft_title && !getenv("ADNOBANNEROVL")){ uint32_t sp=r.r[3].u; if(sp){ int ln=mem->read_u8(sp);
         std::string s; for(int k=0;k<ln&&k<255;k++){ int c=0; try{c=mem->read_u8(sp+1+k);}catch(...){} s+=(char)c; }
         g_banner_text=s; g_banner_x=H.pen_h; g_banner_y=H.pen_v; g_banner_fg=H.qd_fg; g_banner_have=true;
@@ -1200,11 +1145,10 @@ int main(int argc, char** argv){
       // ours; simplest correct model for a single device: always 0 (no next).
       ret(0);
     } else if(nm=="InterfaceLib:TestDeviceAttribute"){
-      // TestDeviceAttribute(GDHandle gdh, short attribute) -> Boolean. addm 540: compute
-      // from the GDevice's actual gdFlags bits (@0x14) instead of a constant 1. Correct
-      // for screenDevice(13)/screenActive(15)/mainScreen(11)/gdDevType(0) = true and
-      // ramInit(10)/allInit(12)/noDriver(14) = false.
-      if(NODEVATTR){ ADSTUB(string("STUB:")+nm); ret(1); }   // opt-out: pre-540 constant 1
+      // TestDeviceAttribute(GDHandle gdh, short attribute) -> Boolean, computed from the
+      // GDevice's actual gdFlags bits (@0x14): screenDevice(13)/screenActive(15)/
+      // mainScreen(11)/gdDevType(0) = true, ramInit(10)/allInit(12)/noDriver(14) = false.
+      if(NODEVATTR){ ADSTUB(string("STUB:")+nm); ret(1); }   // opt-out: constant 1
       else {
         uint32_t gdh=r.r[3].u; uint32_t gd=gdh?mem->read_u32b(gdh):H.g_gdev;
         uint16_t flags = gd?mem->read_u16b(gd+0x14):0;
@@ -1251,13 +1195,13 @@ int main(int argc, char** argv){
               nm=="InterfaceLib:UnionRgn"||nm=="InterfaceLib:SectRgn"||
               nm=="InterfaceLib:DiffRgn"||nm=="InterfaceLib:XorRgn"||
               nm=="InterfaceLib:OffsetRgn"||nm=="InterfaceLib:EmptyRgn"){
-      // Real bounding-box region model (addm 540). We keep only the 10-byte
-      // {rgnSize, rgnBBox = top,left,bottom,right @ +2/+4/+6/+8} form (no scanline data)
-      // — a documented bbox-only model. Was a no-op that left every bbox {0,0,0,0}, so
-      // EqualRgn/EmptyRgn (which READ the bbox) fabricated "unchanged"/"empty", and any
-      // RectRgn+SetClip built a permanent empty clip. Sect/Union/Diff/Xor are exact for
-      // rectangles and documented upper-bound approximations for non-rect operands.
-      if(NORGN){ ADSTUB(string("STUB:")+nm); }   // opt-out: pre-540 no-op (EmptyRgn ret r3 unchanged)
+      // Real bounding-box region model: only the 10-byte {rgnSize, rgnBBox =
+      // top,left,bottom,right @ +2/+4/+6/+8} form, no scanline data. EqualRgn/EmptyRgn READ
+      // the bbox and RectRgn+SetClip must build a usable clip, so leaving every bbox
+      // {0,0,0,0} fabricates "unchanged"/"empty" and a permanently empty clip.
+      // Sect/Union/Diff/Xor are exact for rectangles and documented upper-bound
+      // approximations for non-rect operands.
+      if(NORGN){ ADSTUB(string("STUB:")+nm); }   // opt-out: no-op (EmptyRgn returns r3 unchanged)
       else {
       auto rgnOf=[&](uint32_t h)->uint32_t{ return h?mem->read_u32b(h):0; };
       auto getbb=[&](uint32_t rg,int16_t&t,int16_t&l,int16_t&b,int16_t&rr){
@@ -1311,13 +1255,13 @@ int main(int argc, char** argv){
       }   // end !NORGN
     } else if(nm=="InterfaceLib:DisposeRgn"||nm=="InterfaceLib:OpenRgn"||
               nm=="InterfaceLib:CloseRgn"){
-      // DisposeRgn: leak-by-design (bump arena has no free list, addm 538). OpenRgn/
+      // DisposeRgn: leak-by-design (the bump arena has no free list). OpenRgn/
       // CloseRgn: region path recording is not modelled in the bbox-only model — no-op.
       ADSTUB(string("STUB:")+nm);
     } else if(nm=="InterfaceLib:EqualRgn"){
       // EqualRgn(a,b) -> Boolean. Compare the two regions' 8-byte bounding boxes
-      // (rgn+2..+8). Was 0-return (always "not equal"), so a module gating work on
-      // "region unchanged" (Magic Turtle) always saw a change and never settled.
+      // (rgn+2..+8). Modules gate work on "region unchanged" (Magic Turtle), so a
+      // constant "not equal" means they never settle.
       uint32_t ah=r.r[3].u,bh=r.r[4].u; uint32_t ra=ah?mem->read_u32b(ah):0, rb=bh?mem->read_u32b(bh):0;
       bool eq=(ra&&rb); if(ra&&rb) for(int k=2;k<10;k+=2) if(mem->read_u16b(ra+k)!=mem->read_u16b(rb+k)) eq=false;
       ret(eq?1:0);
@@ -1429,9 +1373,8 @@ int main(int argc, char** argv){
       ret(H.g_gdh);
     } else if(nm=="InterfaceLib:SetResLoad"||
               nm=="InterfaceLib:HSetVol"||nm=="InterfaceLib:SetVol"){
-      // resource/file mgr residency hints — no-op (always-resident model). addm 540:
-      // UseResFile REMOVED from this group; it was swallowed here, leaving the real
-      // UseResFile impl (cur_file remap, further down) DEAD. Now reachable.
+      // resource/file mgr residency hints — no-op (always-resident model). UseResFile is
+      // deliberately NOT in this group: it has a real cur_file remap further down.
       ADSTUB(string("STUB:")+nm);
     } else if(nm=="InterfaceLib:Gestalt"){
       // r3 = selector, r4 = long* response. For the After Dark selector 'aYmm'
@@ -1446,16 +1389,16 @@ int main(int argc, char** argv){
         if(r.r[4].u) mem->write_u32b(r.r[4].u, H.ad_info);
         ret(0);   // noErr
       } else {
-        // Unknown selector (addm 540): a real Mac returns gestaltUndefSelectorErr(-5551)
-        // with response 0. Was noErr+0, which fakes "feature present, value 0".
+        // Unknown selector: a real Mac returns gestaltUndefSelectorErr(-5551) with response
+        // 0. noErr+0 would fake "feature present, value 0".
         if(r.r[4].u) mem->write_u32b(r.r[4].u, 0);
-        if(NOGESTERR){ ADSTUB("STUB:Gestalt_selector_absent"); ret(0); }  // opt-out: pre-540 noErr
+        if(NOGESTERR){ ADSTUB("STUB:Gestalt_selector_absent"); ret(0); }  // opt-out: noErr
         else ret((uint32_t)(int32_t)-5551);
       }
     } else if(nm=="InterfaceLib:Get1Resource"||nm=="InterfaceLib:GetResource"){
       // r3 = ResType, r4 = short id -> Handle (0 if absent)
       uint32_t h=H.handle_for(r.r[3].u, (int16_t)r.r[4].u);
-      H.last_res_err = h ? 0 : -192;   // resNotFound on a missing resource (addm 540)
+      H.last_res_err = h ? 0 : -192;   // resNotFound on a missing resource
       ret(h);
     } else if(nm=="InterfaceLib:Get1IndResource"||nm=="InterfaceLib:GetIndResource"){
       // r3 = ResType, r4 = short index (1-based) -> Handle (current file)
@@ -1490,7 +1433,7 @@ int main(int argc, char** argv){
         if(fi>=0) sz=(uint32_t)H.res_files[fi].get_resource(it->second.first,it->second.second)->data.size(); }
       ret(sz);
     } else if(nm=="InterfaceLib:UseResFile"){
-      if(NOUSERESFIX){ ADSTUB(string("STUB:")+nm); }   // opt-out: pre-540 dead no-op
+      if(NOUSERESFIX){ ADSTUB(string("STUB:")+nm); }   // opt-out: no-op
       else {
         H.cur_file = (int)((int16_t)r.r[3].u) - 2;   // refnum 2 -> file 0, 3 -> 1, ...
         if(H.cur_file<0||H.cur_file>=(int)H.res_files.size()) H.cur_file=0;
@@ -1519,26 +1462,24 @@ int main(int argc, char** argv){
       // the effective animation speed. ADUSPERCALL overrides it.
       static uint64_t us=0;
       static uint64_t step = getenv("ADUSPERCALL")? strtoull(getenv("ADUSPERCALL"),0,0) : 1000;
-      if(ad_wallclock_on()) us = (uint64_t)(ad_wall_elapsed()*1.0e6) + (uint64_t)((double)g_adff_ticks*16625.15);   // real elapsed us + addm-581 idle catch-up (ticks @60.15Hz -> us)
+      if(ad_wallclock_on()) us = (uint64_t)(ad_wall_elapsed()*1.0e6) + (uint64_t)((double)g_adff_ticks*16625.15);   // real elapsed us + idle catch-up (ticks @60.15Hz -> us)
       else us+=step;
       if(getenv("ADTICKLOG")){ static uint32_t nc=0; if((++nc & 0x3F)==0)
         fprintf(stderr,"[uslog] call=%u wall=%.2fs -> virt=%.2fs\n",nc,ad_wall_elapsed(),us/1.0e6); }
       if(r.r[3].u){ mem->write_u32b(r.r[3].u, us>>32); mem->write_u32b(r.r[3].u+4, us&0xFFFFFFFF); }
     } else if(nm=="InterfaceLib:GetDateTime"||nm=="InterfaceLib:ReadDateTime"){
-      // GetDateTime(unsigned long* secs): Mac seconds since 1904-01-01, LOCAL time.
-      // *** addm 552 ***: THIS coarse source (decoded by SecondsToDate) is the one Time Flies draws
-      // as its time-of-day. The old fixed epoch 0xB0000000 decodes to 19:26:56, which is why the app's
-      // clock ALWAYS started at ~7:29; and the per-call +1 advanced it one Mac-second EVERY call, so at
-      // the app's ~30 fps the displayed clock ran tens of x fast. addm 549 wall-clock only covered
-      // TickCount/Microseconds and (wrongly) assumed the "fast seconds" came from those — the visible
-      // clock face reads GetDateTime.
-      //   ADREALCLOCK (opt-IN, set in the catalog recipe for clock savers only): serve the REAL current
-      // local time so the clock starts == wall clock and ticks at true 1x. This is an opt-in and NOT the
-      // default because a real-time (1s-granularity) GetDateTime FREEZES modules whose animation/RNG spin
-      // on do{GetDateTime(&t)}while(t==start): Psycho Deli calls that loop EVERY frame, so a value that
-      // only changes once per real second drops it to ~1 fps. Those modules keep the per-call virtual
-      // epoch below (unchanged byte-for-byte -> zero regression). ADFAKEEPOCH forces a fixed value for
-      // deterministic reference renders (on-screen measurement only).
+      // GetDateTime(unsigned long* secs): Mac seconds since 1904-01-01, LOCAL time. THIS coarse
+      // source (decoded by SecondsToDate) is the one Time Flies draws as its time-of-day — not
+      // TickCount/Microseconds. The fixed epoch 0xB0000000 decodes to 19:26:56, and the per-call
+      // +1 advances one Mac-second EVERY call, so at the app's ~30 fps a displayed clock runs
+      // tens of x fast.
+      //   ADREALCLOCK (opt-IN, set in the catalog recipe for clock savers only): serve the REAL
+      // current local time so the clock starts == wall clock and ticks at true 1x. It is NOT the
+      // default because a real-time (1s-granularity) GetDateTime FREEZES modules whose
+      // animation/RNG spins on do{GetDateTime(&t)}while(t==start): Psycho Deli runs that loop
+      // EVERY frame, so a value that only changes once per real second drops it to ~1 fps. Those
+      // modules keep the per-call virtual epoch below. ADFAKEEPOCH forces a fixed value for
+      // deterministic reference renders.
       uint32_t secs;
       if(getenv("ADFAKEEPOCH")){
         secs = (uint32_t)strtoull(getenv("ADFAKEEPOCH"),0,0);
@@ -1556,15 +1497,15 @@ int main(int argc, char** argv){
       ret(0); // noErr for ReadDateTime
     } else if(nm=="InterfaceLib:TickCount"){
       static uint32_t t=0; static uint32_t step=getenv("ADTICKSTEP")?strtoul(getenv("ADTICKSTEP"),0,0):1;
-      uint32_t tv = ad_wallclock_on() ? (uint32_t)(ad_wall_elapsed()*60.14985) + g_adff_ticks : (t+=step);  // 60.15 Hz + addm-581 idle catch-up
+      uint32_t tv = ad_wallclock_on() ? (uint32_t)(ad_wall_elapsed()*60.14985) + g_adff_ticks : (t+=step);  // 60.15 Hz + idle catch-up
       if(getenv("ADTICKLOG")){ static uint32_t nc=0; if((++nc & 0x3F)==0)
         fprintf(stderr,"[ticklog] call=%u tick=%u wall=%.2fs -> virt=%.2fs\n",nc,tv,ad_wall_elapsed(),tv/60.14985); }
       ret(tv);
     } else if(nm=="InterfaceLib:Random"){
       // Toolbox Random(): randSeed = (randSeed*16807) mod (2^31-1); return LoWord as
-      // a signed 16-bit. Falling through to ret(0) made every call return 0, so
-      // modules that fill a field by rejection-sampling Random (Points of View spins
-      // ~4.5M Random/frame building its illusion) got a degenerate constant field.
+      // a signed 16-bit. Modules fill a field by rejection-sampling Random (Points of
+      // View spins ~4.5M Random/frame building its illusion), so a constant return
+      // degenerates the whole field.
       if(getenv("ADNORAND")){ ret(0); }
       else {
         // Seed lives in Host.rnd_seed so LMSetRndSeed can set the sequence (low-mem RndSeed).
@@ -1648,8 +1589,8 @@ int main(int argc, char** argv){
     } else if(nm=="InterfaceLib:FindFolder"){
       // FindFolder(vRefNum, folderType, createFolder, short* foundVRefNum, long* foundDirID)
       // No real filesystem here — report the folder can't be found so modules skip
-      // reading/writing prefs/temp files. Was a silent 0 (== noErr) which fooled callers
-      // into then trying to open a folder we don't have.
+      // reading/writing prefs/temp files. A silent 0 (== noErr) would send callers on to
+      // open a folder that does not exist.
       ADSTUB(string("STUB:")+nm);  // constant fnfErr (no folders)
       if(r.r[6].u) mem->write_u16b(r.r[6].u,(uint16_t)(int16_t)-1);
       if(r.r[7].u) mem->write_u32b(r.r[7].u,0);
@@ -1665,21 +1606,20 @@ int main(int argc, char** argv){
     } else if(nm=="InterfaceLib:SndDisposeChannel"||nm=="InterfaceLib:SndDoCommand"||
               nm=="InterfaceLib:SndDoImmediate"||nm=="InterfaceLib:SndPlay"||
               nm=="InterfaceLib:SndPlayDoubleBuffer"||nm=="InterfaceLib:SndControl"){
-      // Sound Manager: silent stub. These were 0-returns already (== noErr) but logged
-      // as unimplemented; make them explicit no-ops so the log is clean. No audio.
+      // Sound Manager: explicit silent no-ops (noErr). No audio in this host.
       ADSTUB(string("STUB:")+nm);  // constant noErr (no audio)
       ret(0);
     } else if(nm=="InterfaceLib:SndChannelStatus"){
-      // SndChannelStatus(chan, short len, SCStatus* status): report the channel as
-      // idle (scChannelBusy=false, all counters 0). A garbage status made modules that
-      // wait for "channel not busy" before queueing the next sound spin or stall.
+      // SndChannelStatus(chan, short len, SCStatus* status): report the channel as idle
+      // (scChannelBusy=false, all counters 0). Modules wait for "channel not busy" before
+      // queueing the next sound, so a garbage status stalls them.
       ADSTUB(string("STUB:")+nm);  // reports channel idle (all-zero status)
       uint32_t st=r.r[5].u, len=r.r[4].u; if(st) mem->memset(st,0,len?min<uint32_t>(len,0x40):0x18);
       ret(0);
     } else if(nm=="InterfaceLib:SecondsToDate"||nm=="InterfaceLib:Secs2Date"){
       // SecondsToDate(unsigned long secs, DateTimeRec* d): decode Mac epoch (1904-01-01)
-      // seconds into y/m/d/h/m/s + weekday. Was unimplemented (zeroed record), so clock
-      // savers (Time Flies) drew 00:00 fixed hands and calendar text was blank.
+      // seconds into y/m/d/h/m/s + weekday. Clock savers (Time Flies) draw their hands
+      // and calendar text from this record.
       uint32_t secs=r.r[3].u, d=r.r[4].u;
       if(d){
         long days=(long)(secs/86400UL); long rem=(long)(secs%86400UL);
@@ -1703,8 +1643,8 @@ int main(int argc, char** argv){
       ret(H.handle_for(0x53545220 /*'STR '*/, (int16_t)r.r[3].u));
     } else if(nm=="InterfaceLib:GetMBarHeight"){ ADSTUB(string("STUB:")+nm); ret(20); // standard menu-bar height
     } else if(nm=="InterfaceLib:RecoverHandle"){
-      // RecoverHandle(Ptr) -> Handle. We can't reverse-map a master pointer to its
-      // handle here; return 0 (only Messages 4.0, which is descoped, uses it).
+      // RecoverHandle(Ptr) -> Handle. A master pointer cannot be reverse-mapped to its
+      // handle here; return 0.
       ADSTUB(string("STUB:")+nm);  // constant NULL handle (cannot reverse-map)
       ret(0);
     } else if(nm=="InterfaceLib:TempHLock"||nm=="InterfaceLib:TempHUnlock"||
@@ -1715,12 +1655,12 @@ int main(int argc, char** argv){
         if(r.r[4].u) mem->write_u16b(r.r[4].u,0); } // OSErr* -> noErr
     } else if(nm=="InterfaceLib:GetIndPattern"){
       // GetIndPattern(Pattern* thePat, short patListID, short index): copy the 8-byte
-      // pattern #index (1-based) out of the 'PAT#' resource patListID. addm 540: read the
-      // REAL resource from the fork chain (was fabricated 50% gray). PAT# = count.w then
-      // count x 8-byte Pattern. Fall back to 50% gray only if genuinely absent.
+      // pattern #index (1-based) out of the real 'PAT#' resource patListID in the fork
+      // chain. PAT# = count.w then count x 8-byte Pattern. Fall back to 50% gray only if
+      // the resource is genuinely absent.
       uint32_t p=r.r[3].u; int16_t listID=(int16_t)r.r[4].u; int idx=(int16_t)r.r[5].u;
       bool served=false;
-      if(NOINDPAT){ ADSTUB(string("STUB:")+nm); if(p) for(int k=0;k<8;k++) mem->write_u8(p+k,(k&1)?0x55:0xAA); served=true; }  // opt-out: pre-540 gray
+      if(NOINDPAT){ ADSTUB(string("STUB:")+nm); if(p) for(int k=0;k<8;k++) mem->write_u8(p+k,(k&1)?0x55:0xAA); served=true; }  // opt-out: gray
       int fi=(served?-1:H.find_file(0x50415423 /*'PAT#'*/, listID));
       if(p && fi>=0){
         auto res=H.res_files[fi].get_resource(0x50415423, listID); const string& d=res->data;
@@ -1731,11 +1671,11 @@ int main(int argc, char** argv){
       }
       if(p && !served) for(int k=0;k<8;k++) mem->write_u8(p+k,(k&1)?0x55:0xAA); // gray fallback
     } else if(nm=="InterfaceLib:GetPattern"){
-      // GetPattern(short patID) -> PatHandle. addm 540: read the real 'PAT ' resource;
-      // fall back to a 50% gray pattern only if absent.
+      // GetPattern(short patID) -> PatHandle. Read the real 'PAT ' resource; fall back to
+      // a 50% gray pattern only if it is absent.
       int16_t patID=(int16_t)r.r[3].u;
       uint32_t p=mem->allocate(8); bool served=false;
-      int fi=(NOINDPAT?-1:H.find_file(0x50415420 /*'PAT '*/, patID));   // opt-out: pre-540 gray
+      int fi=(NOINDPAT?-1:H.find_file(0x50415420 /*'PAT '*/, patID));   // opt-out: gray
       if(fi>=0){ auto res=H.res_files[fi].get_resource(0x50415420, patID); const string& d=res->data;
         if(d.size()>=8){ for(int k=0;k<8;k++) mem->write_u8(p+k,(uint8_t)d[k]); served=true; } }
       if(!served) for(int k=0;k<8;k++) mem->write_u8(p+k,(k&1)?0x55:0xAA);
@@ -1756,9 +1696,9 @@ int main(int argc, char** argv){
       // (ctSize+1) x ColorSpec{value(2),r(2),g(2),b(2)}}. Points of View calls this once
       // per frame, ROTATES the returned entries, reinstalls them via SetEntries (which the
       // host reflects into g_clut -> the composited frame), then DisposeHandle()s it: a
-      // classic palette-cycle animation. A null return (prior unhandled ret(0)) left every
-      // frame identical (static dot field). Serve a FRESH handle each call (module mutates
-      // then disposes it). If the module/library ships 'clut' ctID, build from it; else
+      // classic palette-cycle animation, so a null return leaves every frame identical.
+      // Serve a FRESH handle each call (the module mutates then disposes it). If the
+      // module/library ships 'clut' ctID, build from it; else
       // (POV requests ctID 127, a System table we don't have) return a copy of the current
       // 256-entry color environment (g_clut) so the rotate animates the on-screen palette.
       int16_t ctID=(int16_t)r.r[3].u;
@@ -1793,8 +1733,7 @@ int main(int argc, char** argv){
     } else if(nm=="InterfaceLib:AddSearch"){
       // Color Manager AddSearch(SearchProcPtr): register a color-search proc. The host maps
       // the 8-bit fb through g_clut directly and never invokes module search procs, so this
-      // is a faithful no-op registration (Psycho Deli adds/deletes one per frame). Behavior
-      // identical to the prior unhandled fall-through; just removes it from the UNIMPL log.
+      // is a faithful no-op registration (Psycho Deli adds/deletes one per frame).
       ADSTUB(string("STUB:")+nm);  // registered but never invoked (host maps via g_clut)
       if(r.r[3].u) H.color_searches.push_back(r.r[3].u);
     } else if(nm=="InterfaceLib:DelSearch"){
@@ -1828,10 +1767,9 @@ int main(int argc, char** argv){
   };
 
   // Live snapshot of an 8-bit buffer -> color PPM via the CLUT (call any time,
-  // e.g. mid-animation before the module frees its offscreen buffers).
-  // Optimized: one bulk index read (row by row; rowBytes may exceed W) + a
-  // 256-entry CLUT LUT + one buffered fwrite, replacing per-pixel fputc/CLUT
-  // reads. Byte-identical stream output vs the old encoder.
+  // e.g. mid-animation before the module frees its offscreen buffers). One bulk
+  // index read (row by row; rowBytes may exceed W) + a 256-entry CLUT LUT + one
+  // buffered fwrite.
   auto snap_ppm_to=[&](FILE* f, uint32_t base, int W, int Hh, int rowBytes)->long{
     fprintf(f,"P6\n%d %d\n255\n",W,Hh);
     static std::vector<uint8_t> sidx, srgb; static uint8_t slut[256*3];
@@ -1876,10 +1814,9 @@ int main(int argc, char** argv){
   // pointed at /dev/null so stray prints can't corrupt frames. Pipe backpressure
   // throttles rendering to the consumer's pace; a closed pipe kills the host (SIGPIPE)
   // so an orphaned host cleans itself up by construction.
-  // addm 569: hoisted here (was declared just before the control-seeding block) so the
-  // addm-571 wait_go lambda below — defined ahead of the GM loop — can reference it.
+  // Declared here (ahead of the GM loop) so the wait_go lambda below can reference it.
   uint32_t g_ctrl_addr = 0;
-  // ---- addm 571: ZERO-COPY SHARED-MEMORY TRANSPORT (ADSHM + ADSHMNAME) --------
+  // ---- ZERO-COPY SHARED-MEMORY TRANSPORT (ADSHM + ADSHMNAME) ------------------
   // Strict request-response lockstep (see the 68K host for the full protocol note).
   // The app owns/sizes the shm object [64B header {'ADSM',w,h,seq,format} + 768B
   // palette + w*h index bytes]; we mmap it, block on "GO\n" per frame (SET applied
@@ -1898,9 +1835,9 @@ int main(int argc, char** argv){
         memcpy(g_shm,"ADSM",4);
         *(uint32_t*)(g_shm+4)=(uint32_t)H.fb_w; *(uint32_t*)(g_shm+8)=(uint32_t)H.fb_h;
         *(uint32_t*)(g_shm+12)=0; *(uint32_t*)(g_shm+16)=8;   // seq=0, format=8(indexed)
-        // addm 792: FD_CLOEXEC so a cycle re-exec does not leak this descriptor. The
-        // restore below dup2()s it onto fd 1, and dup2 clears CLOEXEC on the copy, so the
-        // transport survives execv exactly once — as fd 1 — instead of once per generation.
+        // FD_CLOEXEC so a cycle re-exec does not leak this descriptor. The restore below
+        // dup2()s it onto fd 1, and dup2 clears CLOEXEC on the copy, so the transport
+        // survives execv exactly once — as fd 1 — instead of once per generation.
         int afd=dup(1); if(afd>=0){ fcntl(afd,F_SETFD,FD_CLOEXEC); g_ackf=fdopen(afd,"wb"); freopen("/dev/null","w",stdout); }
       }
     }
@@ -1910,11 +1847,11 @@ int main(int argc, char** argv){
   if(g_shm_on) fprintf(stderr,"[adhost] ADSHM active: %s (%dx%d, %zu bytes)\n",g_shmname,H.fb_w,H.fb_h,g_shm_sz);
   FILE* streamf=nullptr;
   if(getenv("ADSTREAM") && !g_shm_on){
-    // *** addm 758 ***: the frame stream is throttled by the CONSUMER's pipe. Point it at a REGULAR
-    // FILE and nothing throttles it — the host writes frames as fast as it renders them (~1.4 GB/s
-    // measured, addm 748) and fills the disk in about a minute. Refuse that and name the fix;
-    // ADSTREAMFORCE=1 overrides. Pipes/sockets/ttys (the app's path — EmulatedHost.swift sets
-    // p.standardOutput = pipe) are untouched, and ADSHM never reaches this branch.
+    // The frame stream is throttled by the CONSUMER's pipe. Pointed at a REGULAR FILE nothing
+    // throttles it — the host writes frames as fast as it renders them (~1.4 GB/s) and fills the
+    // disk in about a minute. Refuse that and name the fix; ADSTREAMFORCE=1 overrides.
+    // Pipes/sockets/ttys (the app's path — EmulatedHost.swift sets p.standardOutput = pipe) are
+    // untouched, and ADSHM never reaches this branch.
     struct stat sst;
     bool isreg = (fstat(1,&sst)==0) && S_ISREG(sst.st_mode);
     if(isreg && !getenv("ADSTREAMFORCE")){
@@ -1924,7 +1861,7 @@ int main(int argc, char** argv){
     } else {
       if(isreg) fprintf(stderr,"[adhost] ADSTREAMFORCE: streaming to a regular file with NO "
                                "backpressure (~1.4 GB/s) — watch your disk.\n");
-      int sfd=dup(1); if(sfd>=0){ fcntl(sfd,F_SETFD,FD_CLOEXEC); streamf=fdopen(sfd,"wb"); freopen("/dev/null","w",stdout); }   // addm 792: see the ack dup above
+      int sfd=dup(1); if(sfd>=0){ fcntl(sfd,F_SETFD,FD_CLOEXEC); streamf=fdopen(sfd,"wb"); freopen("/dev/null","w",stdout); }   // see the ack dup above
     }
   }
   bool stream_idx = getenv("ADSTREAMIDX")!=nullptr;
@@ -1946,12 +1883,12 @@ int main(int argc, char** argv){
     if(!streamf) return;
     if(stream_idx) snap_p8_to(streamf, H.g_fb, H.fb_w, H.fb_h, H.fb_w);
     else           snap_ppm_to(streamf, H.g_fb, H.fb_w, H.fb_h, H.fb_w); };
-  // addm 699 BANNER OVERLAY (present-time): paint the captured banner DIRECTLY onto H.g_fb for the first
+  // BANNER OVERLAY (present-time): paint the captured banner DIRECTLY onto H.g_fb for the first
   // g_banner_nframes frames (saving the underlying rect), then restore after present so g_fb / the sprite bg
   // are never polluted. Direct blit (not qd_char) so it hits the screen regardless of the module's cur_port.
-  // AUTHORED DEFAULT (not RE'd): the exact fun-fact duration is absent from every disk image (it lived in the
-  // fullscreen-blanker engine this host replaces — faceplate extraction, addm 698 supp). ~3s matches the
-  // please-wait feel. The real clear is DESTRUCTIVE overdraw (library does no save-under), = this overlay model.
+  // The exact fun-fact duration is an AUTHORED DEFAULT, not RE'd: it is absent from every disk image (it lived
+  // in the fullscreen-blanker engine this host replaces), and ~3s matches the please-wait feel. The real clear
+  // is DESTRUCTIVE overdraw — the library does no save-under — which is what this overlay model reproduces.
   static int g_banner_nframes = getenv("ADBANNERFRAMES") ? atoi(getenv("ADBANNERFRAMES"))
       : (int)((getenv("ADBANNERSECS")?atof(getenv("ADBANNERSECS")):3.0) * (getenv("ADBANNERFPS")?atof(getenv("ADBANNERFPS")):15.0) + 0.5);
   struct BSave{ bool painted=false; int x0=0,y0=0,x1=0,y1=0; std::vector<uint8_t> px; };
@@ -1969,9 +1906,9 @@ int main(int argc, char** argv){
     s.painted=true; return s; };
   auto banner_restore=[&](BSave& s){ if(!s.painted) return; size_t idx=0;
     for(int yy=s.y0;yy<s.y1;yy++)for(int xx=s.x0;xx<s.x1;xx++){ try{ mem->write_u8(H.g_fb+(uint32_t)(yy*H.fb_w+xx), s.px[idx]); }catch(...){} idx++; } };
-  // addm 571: block until the app sends "GO\n"; apply any SET lines that arrive
-  // meanwhile (writes the same GetControlValue slot ADCTRL seeds, once g_ctrl_addr
-  // is populated — 0 during the GM path, matching its prior no-live-SET behavior).
+  // Block until the app sends "GO\n"; apply any SET lines that arrive meanwhile (writes
+  // the same GetControlValue slot ADCTRL seeds, once g_ctrl_addr is populated — it stays
+  // 0 during the GM path, which therefore takes no live SETs).
   // Returns false on EOF (app gone) so the frame loop exits cleanly.
   auto wait_go=[&]()->bool{
     for(;;){
@@ -1983,7 +1920,7 @@ int main(int argc, char** argv){
         if(sscanf(line.c_str(),"SET %d %d",&idx,&val)==2 && idx>=0 && idx<16 && g_ctrl_addr){
           try{ mem->write_u16b(g_ctrl_addr + (uint32_t)idx*2, (uint16_t)val); }catch(...){}
           if(getenv("ADSETLOG")) fprintf(stderr,"[adhost] live SET ctrl[%d]=%d\n",idx,val);
-        } else ad_input_line(line.c_str());   // addm 574: KEY/CAPS/MOUSE
+        } else ad_input_line(line.c_str());   // KEY/CAPS/MOUSE
       }
       char tmp[512]; ssize_t rn=read(0,tmp,sizeof(tmp));
       if(rn<=0) return false;
@@ -2024,24 +1961,20 @@ int main(int argc, char** argv){
     getenv("ADDUMPLIST")||getenv("ADR30")||getenv("ADSNAPBLIT")||getenv("ADPCSAMPLE")||
     getenv("ADWILDPC")||getenv("ADFBDUMP")||getenv("ADFORCEFRAME")||getenv("ADTALLY")||
     getenv("ADSNAPRAW")||getenv("ADRAWADDR")||getenv("ADRAWLEN")||getenv("ADSNAPW")||getenv("ADSNAPH");
-  // addm 607: RD UserInput execution-evidence counters. Captured ONCE (not folded into
-  // ANY_TRACE, which pays a ~30-getenv/instruction tax) so counting runs at near-full speed.
+  // RD UserInput execution-evidence counters. Captured ONCE, not folded into ANY_TRACE
+  // (which pays a ~30-getenv/instruction tax), so counting runs at near-full speed.
   const bool RDLOG = getenv("ADRDLOG")!=nullptr;
-  // addm 731: the addm-623 Time Flies gate tracer (ADTFGATELOG) was added AFTER the
-  // ANY_TRACE caching campaign and never folded in — it ran getenv() UNCONDITIONALLY
-  // per emulated instruction (getenv is a linear __findenv scan; `sample` showed
-  // 1839/2005 execute() samples here on Swirling Magic's 70-pixie swirl). Hoist it once
-  // like RDLOG/ANY_TRACE. Env is set once at launch (live controls arrive on the stdin
-  // SET channel, not env), so this is byte-identical to the per-instruction read.
+  // Hoisted like RDLOG/ANY_TRACE: this tracer is read per emulated instruction, and
+  // getenv is a linear __findenv scan that dominates execute() (1839/2005 samples on
+  // Swirling Magic's 70-pixie swirl). Env is set once at launch — live controls arrive
+  // on the stdin SET channel, not env — so a hoisted read is equivalent.
   const bool TFGATELOG = getenv("ADTFGATELOG")!=nullptr;
-  // addm 619: the fctiwz shim is DEFAULT-OFF — the bundled PPC32Emulator carries the
-  // saturation fix (PR #95) plus the local NaN-saturation fix (static_cast<int32_t>(NaN)
-  // was UB=0 on arm64; real PPC gives 0x80000000 — the shim/emulator output delta of
-  // addm 610 was exactly this). The shim's per-instruction opcode re-fetch cost ~170ns
-  // x every instruction (~32% of Psycho Deli's frame time, measured addm 619). (legacy-cleanup
-  // addm 679: the ADFCTIWZSHIM=1 A/B opt-back-in lever and the shim code it gated are retired —
-  // dead by default in main.)
-  // ---- addm 612: CAPS-LOCK live options toggle (PPC) --------------------------
+  // fctiwz correctness lives in the bundled PPC32Emulator, not in a host shim: it carries
+  // the saturation fix (upstream PR #95) plus a NaN-saturation fix (static_cast<int32_t>(NaN)
+  // is UB and yields 0 on arm64, where real PPC gives 0x80000000). A host-side shim would
+  // have to re-fetch the opcode per instruction, ~170ns x every instruction (~32% of Psycho
+  // Deli's frame time).
+  // ---- CAPS-LOCK live options toggle (PPC) ------------------------------------
   // Every AD4 PPC module imports PortableModule::GetCapsLockChange() from adxpl510
   // and calls it each frame; a returned 1 (caps toggled since last call) drives the
   // module's live option change (Time Flies -> next clock face, Fish World -> fish
@@ -2049,13 +1982,12 @@ int main(int argc, char** argv){
   // caps state as bit 0x20000 of *(libTOC-0x39D0)[0] (a heap modifier-state object),
   // edge-detects it against a cached prev at libTOC+0x390, and returns the change.
   // Under this host's BLANK/DRAW drive the library's own event pump that would set
-  // that bit is never reached (the shell input loop is not run — addm 574/598), so
-  // the bit is permanently 0 and caps does nothing. We mirror the app-supplied
-  // g_caps LEVEL into that bit at the instant the function runs (right before its
-  // first read), so the edge-detector fires exactly once per caps transition —
-  // authentic to the real key-toggle cadence. Default ON; ADNOCAPS opts out.
-  // Zero-regression: with no CAPS input g_caps stays false -> the mirror clears a
-  // bit that is already 0 -> byte-identical to a no-mirror run.
+  // that bit is never reached (the shell input loop is not run), so the bit is
+  // permanently 0 and caps does nothing. So mirror the app-supplied g_caps LEVEL into
+  // that bit at the instant the function runs (right before its first read), and the
+  // edge-detector fires exactly once per caps transition — the real key-toggle cadence.
+  // Default ON; ADNOCAPS opts out. Inert without CAPS input: g_caps stays false, so the
+  // mirror only ever clears a bit that is already 0.
   static const uint32_t kCapsFnPC  = BASE_A + 0xEA8C;   // GetCapsLockChange entry
   static const uint32_t kCapsGlOff = 0x39D0;            // libTOC - this = &capsObj ptr
   static const uint32_t kCapsBit   = 0x00020000;        // caps-state bit in capsObj[0]
@@ -2064,13 +1996,9 @@ int main(int argc, char** argv){
   emu.set_debug_hook([&](PPC32Emulator& e){
     auto& r = e.registers();
     uint32_t pc = r.pc;
-    // (legacy-cleanup addm 679: the fctiwz correctness shim — a bundled-PPC32Emulator-bug workaround for
-    // exec_FC_00E_00F_fctiw_fctiwz's `v < -0x80000000` unsigned-literal-wrap bug, gated on ADFCTIWZSHIM=1
-    // — is deleted. It was already dead by default in main (addm 619 flipped FCTIWZ_OFF default-true once
-    // the bundled PPC32Emulator itself carried the saturation fix, PR #95).)
-    // ---- addm 612: serve the caps state into GetCapsLockChange's source object ----
-    // Cheap single compare per instruction (like the fctiwz shim). Only acts at the
-    // library's GetCapsLockChange entry, and only mutates one bit of one heap word.
+    // ---- serve the caps state into GetCapsLockChange's source object -------------
+    // A single compare per instruction. Only acts at the library's GetCapsLockChange
+    // entry, and only mutates one bit of one heap word.
     if(!CAPS_OFF && pc==kCapsFnPC){
       // ADTESTCAPSAFTER=N (test lever): deterministically flip g_caps after N reads of
       // GetCapsLockChange — a frame-synced caps edge with no wall-clock/stdin confound,
@@ -2095,7 +2023,7 @@ int main(int argc, char** argv){
       } else if(CAPSLOG){ static long n=0; if(n++<8)
           fprintf(stderr,"    [caps] GetCapsLockChange: caps obj ptr NULL (toc=%08X)\n", tocp); }
     }
-    // ---- addm 623: Time Flies clock-TYPE-swap gate tracer (ADTFGATELOG) ----------
+    // ---- Time Flies clock-TYPE-swap gate tracer (ADTFGATELOG) --------------------
     // fnB @module+0x2680 is the caps-driven clock-TYPE swap. It reads the Type
     // control into obj[0x0A]/obj[0x48], then GATES the caps poll on obj[0x16]:
     //   0x26E0  lwz r0,[r28+0x16]; cmpwi 0; bne 0x271C   (obj[0x16]!=0 -> skip caps)
@@ -2114,7 +2042,7 @@ int main(int argc, char** argv){
         case 0x30002754: { static long n=0; if(n++<6) fprintf(stderr,"    [tfgate] resset TYPE1 (r2+468/0x1D4)\n"); } break;
       }
     }
-    // ---- addm 607: UserInput execution evidence (ADRDLOG; NOT under ANY_TRACE) ----
+    // ---- UserInput execution evidence (ADRDLOG; NOT under ANY_TRACE) -------------
     // Count entries to the library UserInput methods (fixed addrs at BASE_A) and log
     // the VALUE that GetLastKey/GetNextKey return (store to *r3) and KeyPressed's r3.
     // This proves whether the module reaches the input reads and what they hand back.
@@ -2382,10 +2310,10 @@ int main(int argc, char** argv){
     // rect (r5) into the screen-pixels object. Our host never wires the real
     // screen size into that rect, so force it to the framebuffer bounds so the
     // whole canvas/flying-area sizing downstream is correct. ESSENTIAL — always runs.
-    // addm 801: substitute the seed the module hands adxpl510's SRand.
-    // The module reads it from XTimer::GetMilliseconds(), which our virtual clock
-    // pins to a constant at INIT; this hands it the value a real machine's uptime
-    // would have given. Inert unless ADLIBRNGSEED is set.
+    // Substitute the seed the module hands adxpl510's SRand. The module reads it from
+    // XTimer::GetMilliseconds(), which our virtual clock pins to a constant at INIT;
+    // this hands it the value a real machine's uptime would have given. Inert unless
+    // ADLIBRNGSEED is set.
     if(g_librng_armed && pc==g_librng_srand_pc){
       static long n=0;
       fprintf(stderr,"[rngseed] SRand entry #%ld: seed %08X -> %08X\n",++n,r.r[3].u,g_librng_seed);
@@ -2543,9 +2471,8 @@ int main(int argc, char** argv){
   // CFM Prepare normally runs the fragment's __start (which runs the C++ static
   // constructors that populate engine global objects — e.g. the sprite-draw
   // callback table at [engineTOC+0x3C8]+0x22/+0x26 that Magic Turtle's per-turtle
-  // engine callback loop dispatches through). The host historically ran only
-  // __initialize; ADENGSTART calls __start first so those ctors run. Env-gated
-  // until proven non-regressive against the 17 renders.
+  // engine callback loop dispatches through). ADENGSTART calls __start before
+  // __initialize so those ctors run; env-gated.
   if(getenv("ADENGSTART")){
     try { uint32_t st = mem->get_symbol_addr("adxpl510:__start");
       call_tvec(st, {}, "adxpl510:__start");
@@ -2587,14 +2514,11 @@ int main(int argc, char** argv){
     // entries {value(2),r(2),g(2),b(2)}. Start with a grayscale ramp...
     H.g_clut = mem->allocate(8+256*8); mem->memset(H.g_clut,0,8+256*8);
     mem->write_u16b(H.g_clut+6, 255);
-    // addm 632: seed the AUTHENTIC Macintosh default 8-bit System palette instead of the
-    // bring-up-era synthetic grayscale ramp (entry i = gray(i)). Structure = 6x6x6 colour
+    // Seed the AUTHENTIC Macintosh default 8-bit System palette. Structure = 6x6x6 colour
     // cube (0-214, black excluded) + red/green/blue/gray 10-step ramps (215-254) + black@255;
     // matches resource_dasm default_icon_color_table_8bit (md5 of 768B RGB8 = 7bb7a37a).
-    // idx0=WHITE, idx255=BLACK. Module 'clut'/PICT palettes still overlay below (no-clut/no-PICT
-    // modules keep this authentic table where the ramp used to leave grayscale). (legacy-cleanup
-    // addm 679: the ADGRAYRAMP=1 A/B revert to the old synthetic grayscale ramp is retired — dead
-    // by default in main.)
+    // idx0=WHITE, idx255=BLACK. Module 'clut'/PICT palettes still overlay below, so a module
+    // that ships neither keeps this table.
     {
       static const int PV[6]={0xFF,0xCC,0x99,0x66,0x33,0x00};
       static const int PRV[10]={0xEE,0xDD,0xBB,0xAA,0x88,0x77,0x55,0x44,0x22,0x11};
@@ -2719,7 +2643,7 @@ int main(int argc, char** argv){
     // GDevice (60 bytes) + GDHandle
     H.g_gdev = mem->allocate(0x3C); mem->memset(H.g_gdev,0,0x3C);
     mem->write_u16b(H.g_gdev+0x04, 0);                 // gdType
-    // gdFlags @0x14 (addm 540): the real attribute bits TestDeviceAttribute reads.
+    // gdFlags @0x14: the real attribute bits TestDeviceAttribute reads.
     // gdDevType(0)=color, mainScreen(11), screenDevice(13), screenActive(15) set;
     // ramInit(10)/allInit(12)/noDriver(14) clear -> = 0xA801.
     mem->write_u16b(H.g_gdev+0x14, 0xA801);            // gdFlags
@@ -2748,9 +2672,10 @@ int main(int argc, char** argv){
   // Faceplate-provided per-sprite draw callback UPPs. The engine dispatches each
   // turtle/sprite through [ [engineTOC+0x3C8] + 0x22 ] and [+0x26] (procInfo 0xC0/0x30),
   // where [engineTOC+0x3C8] == this ADdl blob. The real After Dark faceplate pre-fills
-  // these with engine draw-proc TVectors; ours were null -> Magic Turtle's turtles never
-  // drew. ADDLCB=EngineSymbol installs that export's TVector into both slots (needs ADCUP
-  // so CallUniversalProc actually dispatches). ADDLCB22 / ADDLCB26 set them separately.
+  // these with engine draw-proc TVectors; ours are null unless installed, so a module
+  // whose drawing goes through them (Magic Turtle) draws nothing. ADDLCB=EngineSymbol
+  // installs that export's TVector into both slots (needs ADCUP so CallUniversalProc
+  // actually dispatches). ADDLCB22 / ADDLCB26 set them separately.
   {
     auto instcb=[&](uint32_t off,const char* sym){ if(!sym||!*sym) return;
       try{ uint32_t tv=mem->get_symbol_addr((string("adxpl510:")+sym).c_str());
@@ -2777,8 +2702,8 @@ int main(int argc, char** argv){
   // receive this frame AS the GMParamBlock, and their DoInitialize searches the
   // controls array for a record whose signed type-tag byte at [ctrls + i*10 + 11]
   // is >= 8 (else GetIndString the "use colors" caption + return -1). The record's
-  // Rect data (rec+2..rec+9) supplies the offscreen/screen bounds. Was 0 before, so
-  // filling it is non-regressive for modules that ignore +0x08.
+  // Rect data (rec+2..rec+9) supplies the offscreen/screen bounds. Modules that ignore
+  // +0x08 are unaffected.
   if(!getenv("ADNOFCTRL")) {
     uint32_t fctrls = hi_alloc(0x100, 0x50600000); mem->memset(fctrls,0,0x100);
     int fctrlN = getenv("ADFCTRLN")? atoi(getenv("ADFCTRLN")) : 8;
@@ -2829,47 +2754,34 @@ int main(int argc, char** argv){
             selector,rv,(unsigned long long)H.call_count);
     return rv;
   };
-  // ---- addm 721: control-value seeding, FACTORED so it can run BEFORE the module
-  // latches its controls. Previously this ran only AFTER call_main(0,"INIT") (and the
-  // GM/ADGM path returned before reaching it at all), so any module that reads
-  // GetControlValue DURING its INIT latched 0 instead of the user's value — ~25 popup
-  // options across ~7 modules were structurally inert (sweep P1: modules that re-read
-  // controls every frame worked; modules that read only at INIT were dead, correlation
-  // perfect on a GetControlValue PC-watch). The library control array lives at
-  // *(adxplTOC+0x3A8) and is allocated by adxpl510's __initialize (already called at
-  // load, well above here), so the pointer is valid before the module's INIT runs.
-  // Idempotent: writing the same values twice (early + the retained post-INIT re-seed)
-  // is harmless, and re-reading modules see the same values either way. ADNOEARLYSEED
-  // reverts to the legacy post-INIT-only order for A/B (a DELIBERATE baseline shift of
-  // the addm-619/713 kind — modules that latch at INIT now latch real values).
+  // ---- control-value seeding, factored so it can run BEFORE the module latches its
+  // controls. A module that reads GetControlValue DURING its INIT must see the user's
+  // value, not 0. The library control array lives at *(adxplTOC+0x3A8) and is allocated
+  // by adxpl510's __initialize (already called at load, well above here), so the pointer
+  // is valid before the module's INIT runs. Seeding is idempotent, so the early seed and
+  // the retained post-INIT re-seed can both run. ADNOEARLYSEED reverts to post-INIT-only
+  // ordering, under which modules that latch at INIT latch 0.
   // Compute the module's REAL control slots (from its sVal/mVal/xVal/bVal fork
   // resources, IDs 1000.., slot = ID-1000 — the same map the app uses) and the
   // desired per-slot values (ADCTRL overrides). Shared by both the pre-INIT frame
   // seed and the post-INIT array (re-)seed below.
   //
-  // addm 789: those SAME resources carry each control's SHIPPED FACTORY
-  // VALUE — one big-endian short in the resource body (sVal=slider 0..100, mVal=popup
-  // 1-based, xVal=checkbox 0/1, bVal=radio/palette enum). The host used to keep only
-  // the resource's EXISTENCE and substitute a filler 50 for every slot, so a bare
-  // (or short) ADCTRL drive ran the module at 50-for-everything — a value no faceplate
-  // can produce for a popup/checkbox. That filler has produced four separate wrong
-  // verdicts from mis-driven probes (POV white background, RPS/Slow Burn, Rainforest's
-  // Background=50 "black screen", Psycho Deli). Default each REAL slot to its OWN
-  // factory value instead; slots with NO *Val resource keep 50 (the addm-721 seeding
-  // semantics for modules with no control resources at all). Verified against
-  // catalog.json corpus-wide: 230/230 controls agree (scratchpad/vd_xcheck.py).
+  // Those SAME resources carry each control's SHIPPED FACTORY VALUE — one big-endian
+  // short in the resource body (sVal=slider 0..100, mVal=popup 1-based, xVal=checkbox
+  // 0/1, bVal=radio/palette enum). Default each REAL slot to its OWN factory value;
+  // slots with NO *Val resource keep the filler 50. A blanket 50 is a value no faceplate
+  // can produce for a popup or a checkbox, so it silently mis-drives those modules.
+  // Cross-checked against catalog.json corpus-wide: 230/230 controls agree.
   //
   // FIRST-WINS per slot, in sVal→mVal→xVal→bVal order, for the one module in the
   // corpus whose slot carries two types (Swirling Magic: mVal 1002=9 popup "Palette"
   // AND xVal 1002=1 checkbox "Magnify Pixies", both real, an inherent limit of the
-  // shared resource ID). That is exactly the tiling the 68K host's cvseed uses and
-  // exactly what EmulatedHost.swift's ADCTRL builder does, so all three agree on 9.
+  // shared resource ID). This is the same tiling the 68K host's cvseed and
+  // EmulatedHost.swift's ADCTRL builder use, so all three agree on 9.
   //
-  // Explicit ADCTRL still overrides, but only the entries actually GIVEN: a short
-  // ADCTRL now leaves its unspecified tail at the factory values rather than at 50
-  // (that alone repairs the census recipe `ADCTRL=100` for Rainforest, which drove
-  // slot 0=100 and left Background at the impossible 50). ADNOVALDEFAULTS=1 restores
-  // the filler-50 baseline exactly.
+  // Explicit ADCTRL overrides only the entries actually GIVEN: a short ADCTRL leaves its
+  // unspecified tail at the factory values rather than at 50. ADNOVALDEFAULTS=1 restores
+  // the filler-50 baseline for every slot.
   int ctrl_defs[16]; for(int i=0;i<16;i++) ctrl_defs[i]=50;
   bool ctrl_valid[16]={false}; int ctrl_found=0;
   const bool no_val_defaults = getenv("ADNOVALDEFAULTS")!=nullptr;
@@ -2892,7 +2804,7 @@ int main(int argc, char** argv){
     }
   }
   if(val_defaulted){
-    fprintf(stderr,"[adhost] addm 789: %d slot(s) defaulted to the module's own factory value:",val_defaulted);
+    fprintf(stderr,"[adhost] %d control slot(s) defaulted to the module's own factory value:",val_defaulted);
     for(int i=0;i<16;i++) if(ctrl_valid[i]) fprintf(stderr," [%d]=%d",i,ctrl_defs[i]);
     fprintf(stderr,"\n");
   }
@@ -2903,24 +2815,22 @@ int main(int argc, char** argv){
     uint32_t adxpl_toc = adxpl_tv ? mem->read_u32b(adxpl_tv + 4) : 0;
     uint32_t ctrl = adxpl_toc ? mem->read_u32b(adxpl_toc + 0x3A8) : 0;
     if(!ctrl){
-      // PRE-INIT PATH (addm 721): the library control array *(adxplTOC+0x3A8) does not
-      // exist yet — a STANDARD module allocates it during its OWN INIT and points it at
-      // the faceplate "frame" it was handed (proven: the store at module+0x3C writes
-      // theFrame's address into adxplTOC+0x3A8; GetControlValue(idx) then reads
-      // *(frame + idx*2)). theFrame is built by the host BEFORE INIT, so to make a
-      // control that a standard module LATCHES during INIT read the user's value, we
-      // write the value into theFrame's control shorts here (real control slots only).
+      // PRE-INIT PATH: the library control array *(adxplTOC+0x3A8) does not exist yet — a
+      // STANDARD module allocates it during its OWN INIT and points it at the faceplate
+      // "frame" it was handed (the store at module+0x3C writes theFrame's address into
+      // adxplTOC+0x3A8; GetControlValue(idx) then reads *(frame + idx*2)). theFrame is
+      // built by the host BEFORE INIT, so to make a control that a standard module LATCHES
+      // during INIT read the user's value, write the value into theFrame's control shorts
+      // here (real control slots only).
       //
-      // addm 727 REGRESSION FIX: this frame-overlay is ONLY valid for standard modules.
-      // A module driven through the myModulePPC dispatcher (ADMAINCODE, e.g. Points of
-      // View) NEVER stores theFrame into adxplTOC+0x3A8, so its `ctrl` stays NULL at
-      // EVERY phase — and it reads its controls from the fctrls RECORDS at frame+0x08,
-      // using theFrame's low bytes (frame+0..+7) as OTHER header fields, not as a control
-      // array. Writing control shorts into frame+0..+6 for such a module corrupts that
-      // header (POV rendered a WHITE background instead of black). So: (a) only ever do
-      // the frame-overlay in the PRE-INIT phase (post-INIT it must match the legacy
-      // no-op when ctrl is NULL), and (b) never for an ADMAINCODE module. Guarded by
-      // ADNOFRAMESEED too. POV thus reverts to its authentic black-background render.
+      // This frame-overlay is ONLY valid for standard modules. A module driven through the
+      // myModulePPC dispatcher (ADMAINCODE, e.g. Points of View) NEVER stores theFrame into
+      // adxplTOC+0x3A8, so its `ctrl` stays NULL at EVERY phase — and it reads its controls
+      // from the fctrls RECORDS at frame+0x08, using theFrame's low bytes (frame+0..+7) as
+      // OTHER header fields, not as a control array. Writing control shorts into frame+0..+6
+      // for such a module corrupts that header (Points of View then renders a WHITE
+      // background instead of black). So: (a) only ever do the frame-overlay in the PRE-INIT
+      // phase, and (b) never for an ADMAINCODE module. ADNOFRAMESEED disables it too.
       bool do_frame_seed = pre_init && H.g_frame && ctrl_found>0
                            && !getenv("ADMAINCODE") && !getenv("ADNOFRAMESEED");
       if(do_frame_seed){
@@ -2941,18 +2851,18 @@ int main(int argc, char** argv){
     for(int i=0;i<16;i++) mem->write_u16b(ctrl + i*2, (uint16_t)ctrl_defs[i]);
     fprintf(stderr,"[adhost] seeded control values @%08X (%s; defaults=module factory *Val, 50 where "
             "no *Val resource, ADCTRL to override)\n",ctrl,phase);
-    // ---- addm 623: authentic control-array size clamp ----------------------
+    // ---- authentic control-array size clamp --------------------------------
     // GetControlValue(idx) is an UNCHECKED flat read of this 16-short array. Real
     // After Dark sized the array to the module's ACTUAL controls and left the rest
-    // zero; our host over-provisions all 16 slots (=50 or the app's padded ADCTRL),
-    // so a module that reads a control index BEYOND its own controls gets 50 where
-    // the engine returned 0 (Time Flies reads GetControlValue(3) to gate its caps-lock
+    // zero; this host over-provisions all 16 slots (=50 or the app's padded ADCTRL),
+    // so a module that reads a control index BEYOND its own controls would get 50 where
+    // the engine returns 0 (Time Flies reads GetControlValue(3) to gate its caps-lock
     // clock-type swap). Zero every array slot with no backing control. Opt-out
     // ADNOCTRLZERO.
     if(!getenv("ADNOCTRLZERO") && ctrl_found>0){
       int zeroed=0;
       for(int i=0;i<16;i++) if(!ctrl_valid[i]){ mem->write_u16b(ctrl + i*2, 0); if(ctrl_defs[i]!=0) zeroed++; }
-      fprintf(stderr,"[adhost] addm623 control-array clamp: %d real control slot(s), "
+      fprintf(stderr,"[adhost] control-array clamp: %d real control slot(s), "
               "zeroed %d non-control slot(s) (authentic GetControlValue out-of-range=0)\n",ctrl_found,zeroed);
     }
   };
@@ -2969,14 +2879,8 @@ int main(int argc, char** argv){
     // Apply the After-Dark blanked-backdrop convention (CLUT[0]->black) that the
     // NON-GM path already does (§6a2 clut/PICT block, skipped when ADGM): a real Mac
     // blanks the screen to black before a saver runs, so an unpainted index-0 pixel
-    // must display black. PD's own SetEntries starts at index 1 (never idx0), so its
-    // palette is untouched. Opt-out ADKEEP0.
-    //
-    // (addm 632 originally also relied on this to keep DoBlank's offscreen GWorld
-    // all-zero so the skip-empty-GWorld blit heuristic wouldn't fire — that heuristic
-    // is GONE now, retired below in favor of the authentic present contract, so this
-    // force serves ONLY the blanked-background purpose. PD renders correctly under the
-    // authentic palette (ADKEEP0) too: gw distinct=100 vs the old host's distinct=1.)
+    // must display black. Psycho Deli's own SetEntries starts at index 1 (never idx0),
+    // so its palette is untouched. Opt-out ADKEEP0.
     if(!getenv("ADKEEP0") && H.g_clut){ uint32_t e0=H.g_clut+8;
       mem->write_u16b(e0+2,0); mem->write_u16b(e0+4,0); mem->write_u16b(e0+6,0);
       fprintf(stderr,"[adhost] GM black-blank: forced CLUT index 0 -> black\n"); }
@@ -3028,14 +2932,14 @@ int main(int argc, char** argv){
     mem->write_u16b(gmpb+0x0E, 0);                // flags clear (bit 0x400 must be 0)
     uint32_t gmctx = mem->allocate(0x400); mem->memset(gmctx,0,0x400);
     mem->write_u32b(gmpb+0x1E, gmctx);            // the +0x1E ptr (client/QD ctx - provisional)
-    // addm 727: AUTHENTIC GMParamBlock layout (Greg Parker Fringe Player SDK, memory
-    // reference_afterdark_sdk_structs). The host's original layout put the bounds Rect at
-    // gmpb+0..+6, which is authentically controlValues[4] — so an ADGM module (Psycho
-    // Deli) read Picture=controlValues[0]=0 (the bounds top) for EVERY option, hence all
-    // 12 Pictures identical. Authentic: controlValues[4]@0x00, monitors@0x08,
+    // AUTHENTIC GMParamBlock layout (Greg Parker Fringe Player SDK; see
+    // reference_afterdark_sdk_structs): controlValues[4]@0x00, monitors@0x08,
     // colorQDAvail@0x0C, qdGlobals@0x10, demoRect@0x16 (drawing bounds), errorMessage@0x1E,
-    // adVersion@0x26. Rebuild the block in that layout and seed controlValues from ADCTRL
-    // (slot i -> gmpb+i*2). Lever ADNOAUTHPB reverts to the legacy layout for A/B.
+    // adVersion@0x26. Note gmpb+0..+6 is controlValues[4], NOT a bounds Rect: putting the
+    // bounds there makes an ADGM module read controlValues[0] = the bounds top for every
+    // option (Psycho Deli's 12 Pictures then all render identically). Rebuild the block in
+    // that layout and seed controlValues from ADCTRL (slot i -> gmpb+i*2). ADNOAUTHPB
+    // reverts to the legacy layout for A/B.
     if(!getenv("ADNOAUTHPB")){
       mem->memset(gmpb,0,0x80);
       for(int i=0;i<4;i++) mem->write_u16b(gmpb + (uint32_t)i*2, (uint16_t)ctrl_defs[i]); // controlValues[4]
@@ -3070,7 +2974,7 @@ int main(int argc, char** argv){
       mem->write_u16b(gmpb+0x1C, demo_full?(uint16_t)H.fb_w:0);                //          right
       mem->write_u32b(gmpb+0x1E, gmctx);                 // errorMessage scratch
       mem->write_u16b(gmpb+0x26, 0x0200);                // adVersion 2.0
-      fprintf(stderr,"[adhost] addm727 authentic GMParamBlock: controlValues=[%d,%d,%d,%d] "
+      fprintf(stderr,"[adhost] authentic GMParamBlock: controlValues=[%d,%d,%d,%d] "
               "monitors@%08X demoRect=(0,0,%d,%d)%s\n",
               ctrl_defs[0],ctrl_defs[1],ctrl_defs[2],ctrl_defs[3],minfo,
               demo_full?H.fb_h:0, demo_full?H.fb_w:0, demo_full?" [ADGMDEMOFULL legacy]":" empty=full-screen");
@@ -3081,15 +2985,12 @@ int main(int argc, char** argv){
     mem->write_u16b(rgn+6,(uint16_t)H.fb_h); mem->write_u16b(rgn+8,(uint16_t)H.fb_w);
     uint32_t rgnH = mem->allocate(4); mem->write_u32b(rgnH, rgn);
     fprintf(stderr,"[adhost] GM: DoInit TVec@%08X DoBlank TVec@%08X gmpb=%08X\n",initTV,blankTV,gmpb);
-    // addm 721 P0 FIX: the ADGM path used to `return 0` before ever reaching the control
-    // seeding block, so an ADGM module (Psycho Deli, the only one) NEVER had its library
-    // control array seeded — GetControlValue(idx) read 0 for every control. Seed it here,
-    // before DoInitialize, so if the module reads controls through the shared library
-    // during init it latches the user's values. (The GMParamBlock.controls records built
-    // below still carry only the screen-Rect/offscreen bounds; if a future ADGM module is
-    // proven to read its user settings SOLELY through those records, that record format
-    // needs RE — see evidence.md. Seeding the library array is the correct, cheap first
-    // half and matches how the non-GM path delivers control values.)
+    // The ADGM path returns before the main control-seeding block, so seed the library
+    // control array here, before DoInitialize, and a module that reads controls through
+    // the shared library during init latches the user's values. The GMParamBlock.controls
+    // records built below carry only the screen-Rect/offscreen bounds; if an ADGM module
+    // turns out to read its user settings SOLELY through those records, that record format
+    // still needs RE.
     if(g_early_seed) seed_controls("GM pre-DoInitialize", true);
     call_tvec(initTV, {storeSlot, rgnH, gmpb}, "DoInitialize");
     H.cur_port = H.g_port;   // make our screen the current port before DoBlank draws
@@ -3102,59 +3003,52 @@ int main(int argc, char** argv){
     }
     fprintf(stderr,"[adhost] GM: clientStorage handle=%08X\n",storeH);
     int gmframes = getenv("ADFRAMES")? atoi(getenv("ADFRAMES")) : 10;
-    // STRUCTURAL arm (addm 693, replaces the strstr("Psycho Deli") name gate): PD's
-    // psychedelic motion is produced by its OWN DoDrawFrame step, which advances the
-    // module's float palette and re-installs it via SetEntries every frame. That step
-    // draws each pattern element through a per-style callback held at the module's
-    // DoDrawFrame TOC+0x64c; the callback is installed by the module's StyleDispatch
-    // (code 0x30002584, a 12-case style table), reached only via a setup message the
-    // direct DoBlank/DoDrawFrame GM drive never sends — so under our drive that slot is
-    // NULL while the seed TVector at TOC+0xf0 is present (the historical "crashes
-    // standalone" is exactly this null callback). That null-callback-with-seed signature
-    // is produced by no other state, so we key arming on IT, not on the module name.
-    // We reproduce exactly the store StyleDispatch's first case performs
-    // (*(TOC+0x64c) = *(TOC+0xf0), an authentic module TVector); DoDrawFrame then runs
-    // and the module re-randomises styles itself thereafter (StyleDispatch is re-called
-    // from inside DoDrawFrame). Detect the signature (null callback +
-    // a seed that points into the module image [BASE_M,+0x100000)) and reproduce
-    // StyleDispatch's first-case store to arm the module's own animation. The seed
-    // range-check self-validates, so this stays inert for any GM module that lacks the
-    // signature (today PD is the only GM module; a future one without it simply runs
-    // DoBlank-only, no fabricated colours).
+    // STRUCTURAL arm, not a module-name gate: Psycho Deli's psychedelic motion is produced
+    // by its OWN DoDrawFrame step, which advances the module's float palette and
+    // re-installs it via SetEntries every frame. That step draws each pattern element
+    // through a per-style callback held at the module's DoDrawFrame TOC+0x64c; the callback
+    // is installed by the module's StyleDispatch (code 0x30002584, a 12-case style table),
+    // reached only via a setup message the direct DoBlank/DoDrawFrame GM drive never sends —
+    // so under this drive that slot is NULL while the seed TVector at TOC+0xf0 is present.
+    // (Driving DoDrawFrame with the callback still NULL is what crashes the module.) That
+    // null-callback-with-seed signature is produced by no other state, so arming keys on it.
+    // Reproduce exactly the store StyleDispatch's first case performs (*(TOC+0x64c) =
+    // *(TOC+0xf0), an authentic module TVector); DoDrawFrame then runs and the module
+    // re-randomises styles itself thereafter (StyleDispatch is re-called from inside
+    // DoDrawFrame). The seed range-check (a seed pointing into the module image
+    // [BASE_M,+0x100000)) self-validates, so a GM module lacking the signature simply runs
+    // DoBlank-only rather than getting fabricated colours.
     bool pd_frame = false; uint32_t pd_toc = 0;
     {
       pd_toc = mem->read_u32b(frameTV+4);            // module RTOC (DoDrawFrame's toc)
       uint32_t cb   = mem->read_u32b(pd_toc+0x64c);  // per-style element-draw callback (NULL until StyleDispatch)
       uint32_t seed = mem->read_u32b(pd_toc+0xf0);   // style-0 element-draw TVector
-      // addm 727 note: the Picture popup selects one of 12 StyleDispatch cases, but the
-      // module RE-RANDOMISES the style inside DoDrawFrame, so pre-installing a per-Picture
-      // seed here does not stick (verified: seed index 0..11 all render identically).
-      // Locking the style to the Picture control requires the StyleDispatch SETUP call
-      // (code 0x30002584) that reads controlValues[0] — calling it directly with our GM
-      // args faults (address 2FFEEFE4, wrong arg/context), so Picture selection stays a
-      // documented gap pending a PPC disassembly of StyleDispatch's signature. The
-      // authentic GMParamBlock layout above DOES deliver PD's Speed + Knots sliders.
+      // The Picture popup selects one of 12 StyleDispatch cases, but the module
+      // RE-RANDOMISES the style inside DoDrawFrame, so pre-installing a per-Picture seed
+      // here does not stick (seed index 0..11 all render identically). Locking the style to
+      // the Picture control requires the StyleDispatch SETUP call (code 0x30002584) that
+      // reads controlValues[0]; calling it directly with these GM args faults (address
+      // 2FFEEFE4, wrong arg/context), so Picture selection is a known gap pending a PPC
+      // disassembly of StyleDispatch's signature. The authentic GMParamBlock layout above
+      // DOES deliver Psycho Deli's Speed + Knots sliders.
       bool seed_in_module = (seed>=BASE_M && seed<BASE_M+0x100000);
       if(cb==0 && seed_in_module){ mem->write_u32b(pd_toc+0x64c, seed); cb=seed; }
       if(cb){ pd_frame = true;
         fprintf(stderr,"[adhost] GM real-palette armed (structural null-callback signal): TOC=%08X drawCB@+0x64c=%08X seed@+0xf0=%08X\n",pd_toc,cb,seed); }
     }
-    // *** addm 757: DoBlank is a ONE-SHOT, not a per-frame call ***
-    // The ADgm contract is Initialize -> BlankScreen (once, paints the initial field)
-    // -> DrawFrame (repeatedly, animates it). This loop called DoBlank EVERY frame,
-    // and PD's DoBlank (code 30000DD4) zeroes its animation cursor at state+0x2420/
-    // +0x2422 and repaints the initial field — so every frame the module was reset to
-    // frame 0 and only one DrawFrame pass ever showed. That is why the screen was a
-    // flat repeating chevron field, why all 12 Picture styles looked ~identical
-    // (2.5% of pixels differed = the single DrawFrame pass), and why addm 727 read the
-    // Picture control as inert. Blanking once yields the module's real artwork
-    // (spiral/fractal fields) and 12 visibly distinct Pictures (99% of pixels differ).
-    // Lever ADGMBLANKEACH restores the per-frame blank for A/B.
+    // DoBlank is a ONE-SHOT, not a per-frame call. The ADgm contract is Initialize ->
+    // BlankScreen (once, paints the initial field) -> DrawFrame (repeatedly, animates it).
+    // Blanking every frame resets the module to frame 0: Psycho Deli's DoBlank (code
+    // 30000DD4) zeroes its animation cursor at state+0x2420/+0x2422 and repaints the
+    // initial field, so only one DrawFrame pass ever shows — a flat repeating chevron field
+    // in which all 12 Picture styles look near-identical. Blanking once yields the module's
+    // real artwork (spiral/fractal fields) and 12 visibly distinct Pictures.
+    // ADGMBLANKEACH restores the per-frame blank for A/B.
     const bool blank_each = getenv("ADGMBLANKEACH")!=nullptr;
     if(!getenv("ADGMNOBLANK") && !blank_each)
       call_tvec(blankTV, {storeH, rgnH, gmpb}, "DoBlank (once, pre-frame-loop)");
     for(int fN=0; fN<gmframes; fN++){
-      if(g_shm_on){ if(!wait_go()) break; }   // addm 571: block for the app's GO
+      if(g_shm_on){ if(!wait_go()) break; }   // block for the app's GO
       if(!getenv("ADGMNOBLANK") && blank_each) call_tvec(blankTV, {storeH, rgnH, gmpb}, "DoBlank");
       if(pd_frame){
         // The module's real per-frame animation step. Measured robust (0 faults / 300
@@ -3169,9 +3063,7 @@ int main(int argc, char** argv){
         }
       }
       else if(getenv("ADGMFRAME")) call_tvec(frameTV, {storeH, rgnH, gmpb}, "DoDrawFrame"); // opt-in (crashes standalone)
-      // No host auto-present of a module-private GWorld. (addm 691: retires the
-      // skip-empty-GWorld heuristic — a rendered-outcome proxy that read the
-      // offscreen's pixel content to decide whether to composite.)
+      // No host auto-present of a module-private GWorld.
       //
       // AUTHENTIC ADgm PRESENT CONTRACT (RE, scratchpad/gworld_evidence.md): a
       // classic GraphicsModule draws each frame to the CURRENT port, which the
@@ -3187,13 +3079,10 @@ int main(int argc, char** argv){
       //
       // Ground truth for the sole PPC GM module, Psycho Deli: 0 CopyBits, and its
       // 640x480 GWorld is a scratch/backdrop buffer DoBlank fills but never blits;
-      // its animated palette pattern is drawn directly into g_fb. The old loop
-      // presented that scratch buffer, and only the coincidence rgb_to_index(black)=0
-      // (idx0->black) kept it all-zero so the emptiness test skipped it. Under the
-      // authentic palette the DoBlank backdrop was nonzero (255) and the loop
-      // blitted a blank black frame over the real pattern (addm 621/632 regression).
-      // Honoring the contract structurally (only present what the module drew to the
-      // screen port) makes PD correct independent of that pixel-value coincidence.
+      // its animated palette pattern is drawn directly into g_fb. Presenting that
+      // scratch buffer blits a blank frame over the real pattern. Honoring the contract
+      // structurally — only present what the module drew to the screen port — makes it
+      // correct independent of any pixel-value coincidence.
       if(getenv("ADGMGWLOG")) for(size_t i=0;i<H.gworlds.size();i++){
         uint32_t port=H.gworlds[i], pmh=mem->read_u32b(port+0x02), pm=pmh?mem->read_u32b(pmh):0;
         if(!pm) continue; uint32_t base=mem->read_u32b(pm+0); int rb=mem->read_u16b(pm+4)&0x3FFF;
@@ -3204,23 +3093,22 @@ int main(int argc, char** argv){
       if(getenv("ADGMOFF")){ uint32_t off=strtoul(getenv("ADGMOFF"),0,0);
         for(int y=0;y<H.fb_h;y++)for(int x=0;x<H.fb_w;x++)
           mem->write_u8(H.g_fb+(uint32_t)y*H.fb_w+x, mem->read_u8(off+(uint32_t)y*H.fb_w+x)); }
-      BSave _bs=banner_paint(fN);   // addm 699: composite the timed banner onto this presented frame
+      BSave _bs=banner_paint(fN);   // composite the timed banner onto this presented frame
       if(const char* fbp=getenv("ADFRAMEDIR"))
         snap_ppm(string(fbp)+"/frame"+to_string(fN)+".ppm", H.g_fb, H.fb_w, H.fb_h, H.fb_w);
       stream_frame();
-      banner_restore(_bs);          // addm 699: restore g_fb — banner never persists in module state
+      banner_restore(_bs);          // restore g_fb — the banner never persists in module state
     }
     fprintf(stderr,"[adhost] GM: done (%llu OS calls, %llu CopyBits)\n",
             (unsigned long long)H.call_count,(unsigned long long)H.copybits_count);
     return 0;
   }
   // ---- module CFM-init: run the module's PEF init routine (its C++ _STI static
-  // constructors) BEFORE main(sel=0). Lunacy (LUNACY_LINKER.md) proved the CodeWarrior
-  // C++ (CP-app) modules must run their _STI ctor list before the first frame — that's
-  // what constructs the Sprite/XCanvas object graph. The GM path already does this
-  // (module __start/__initialize); the call_main path historically did NOT, so sprite
-  // modules ran with empty sprite objects ([sprite+4]==0). Run the module's real CFM
-  // init symbol here. ADNOMODCTOR opts out.
+  // constructors) BEFORE main(sel=0). CodeWarrior C++ (CP-app) modules must run their
+  // _STI ctor list before the first frame (see LUNACY_LINKER.md) — that is what
+  // constructs the Sprite/XCanvas object graph; without it sprite modules run with empty
+  // sprite objects ([sprite+4]==0). The GM path does this via module __start/__initialize;
+  // the call_main path runs the module's real CFM init symbol here. ADNOMODCTOR opts out.
   if(getenv("ADMODCTOR")){
     const auto& isym = mod.init();
     fprintf(stderr,"[adhost] module init symbol: section=%d value=%08X (m_sec0=%08X m_sec1=%08X)\n",
@@ -3234,13 +3122,13 @@ int main(int argc, char** argv){
       catch(const exception& ex){ fprintf(stderr,"[adhost] module CFM-init failed: %s\n",ex.what()); }
     }
   }
-  // addm 721 P1 FIX: seed the control array BEFORE the module's INIT, so a module that
-  // LATCHES a control during INIT (Rainforest/Swirling Magic/Life & All/Points of View …)
-  // reads the user's value, not 0. ADNOEARLYSEED reverts to the legacy post-INIT-only
-  // order. Retained post-INIT re-seed below covers re-reading modules and the revert path.
+  // Seed the control array BEFORE the module's INIT, so a module that LATCHES a control
+  // during INIT (Rainforest/Swirling Magic/Life & All/Points of View …) reads the user's
+  // value, not 0. ADNOEARLYSEED reverts to post-INIT-only ordering; the post-INIT re-seed
+  // below covers re-reading modules and that revert path.
   if(g_early_seed) seed_controls("pre-INIT", true);
-  // ---- addm 801: arm the opt-in library-RNG seeding (see the note at
-  // the top of the file for the full mechanism). Unset => nothing here runs.
+  // ---- arm the opt-in library-RNG seeding (see the note at the top of the file for the
+  // full mechanism). Unset => nothing here runs.
   if(const char* rs = getenv("ADLIBRNGSEED")){
     uint32_t engtoc = 0;
     try { engtoc = mem->read_u32b(mem->get_symbol_addr("adxpl510:__initialize")+4); }
@@ -3290,16 +3178,14 @@ int main(int argc, char** argv){
     scan(et+0x300, et+0x400, "engTOC");   // around the 0x3C8 callback-object slot
     fprintf(stderr,"[scancb] done\n");
   }
-  // Seed (re-seed) the module's control-panel values. FT (and every module) reads its
-  // slider settings via GetControlValue(index) == (*(adxplTOC+0x3A8))[index] (16-bit
-  // shorts). addm 721: the seeding is now done by seed_controls() and, when
-  // g_early_seed, has ALREADY run once BEFORE call_main(0,"INIT") above. This retained
-  // post-INIT call keeps re-reading modules working, provides the ADNOEARLYSEED revert
-  // path (early call skipped -> this becomes the sole, legacy-order seed), and is
-  // idempotent when the early seed ran. The full mechanism (0x3A8 array, addm-623 clamp,
-  // Time Flies GetControlValue(3) caps-lock case) is documented on the lambda above.
+  // Seed (re-seed) the module's control-panel values. Every module reads its slider
+  // settings via GetControlValue(index) == (*(adxplTOC+0x3A8))[index] (16-bit shorts).
+  // With g_early_seed this has ALREADY run once BEFORE call_main(0,"INIT") above; this
+  // post-INIT call keeps re-reading modules working, is the sole seed under
+  // ADNOEARLYSEED, and is idempotent when the early seed ran. The full mechanism (0x3A8
+  // array, size clamp, Time Flies GetControlValue(3) caps-lock case) is on the lambda above.
   seed_controls(g_early_seed ? "post-INIT re-seed" : "post-INIT (legacy order)", false);
-  // ---- addm 607: resolve the UserInput key ring (RD keypump) ---------------
+  // ---- resolve the UserInput key ring (RD keypump) -------------------------
   // The ring statics live at the adxpl510 TOC + fixed offsets (see ad_input_line
   // note). Resolve via the AddKey export's TVector TOC (== the r2 the methods use).
   {
@@ -3309,24 +3195,22 @@ int main(int argc, char** argv){
       g_ui_pressed = ui_toc + 0x448; g_ui_write = ui_toc + 0x44A;
       g_ui_read    = ui_toc + 0x44C; g_ui_size  = ui_toc + 0x44E;
       g_ui_buffer  = ui_toc + 0x450;
-      // Class-3 audit (addm 681) GENERALIZED — drop the "Rodger" name gate. The UserInput ring is
-      // shared-library infrastructure: ADShared40 exports AddKey, so ui_toc resolves for EVERY module
-      // (verified @TOC=10048000 for Rodger Dodger / Flying Toasters / Fish World / Marbles). The keypump
-      // feed is byte-inert without live key input (g_rd_dir==0 => no ring write, no demo/player poke;
-      // see the feed block below), so enabling it for every ring-importing module is byte-identical to
-      // the old RD-only gate across the whole no-input corpus — verified IDENT (default vs keypump-on)
-      // for RD + 3 diverse savers. Keypump is now on whenever the ring resolved (this enclosing `if`)
-      // and !ADNOKEYPUMP; ADKEYPUMPALL is retained as a harmless no-op alias for the flip.
+      // The UserInput ring is shared-library infrastructure, not one module's: ADShared40 exports
+      // AddKey, so ui_toc resolves for EVERY module (@TOC=10048000 for Rodger Dodger, Flying
+      // Toasters, Fish World, Marbles). The keypump feed is inert without live key input
+      // (g_rd_dir==0 => no ring write, no demo/player poke; see the feed block below), so it is
+      // enabled whenever the ring resolved (this enclosing `if`) and !ADNOKEYPUMP rather than
+      // gated on a module name. ADKEYPUMPALL is a no-op alias.
       g_keypump_on = !getenv("ADNOKEYPUMP");
-      fprintf(stderr,"[adhost] addm607 UserInput ring @TOC=%08X buffer=%08X size@=%08X "
+      fprintf(stderr,"[adhost] UserInput ring @TOC=%08X buffer=%08X size@=%08X "
               "keypump=%s (module=%s)\n", ui_toc, g_ui_buffer, g_ui_size,
               g_keypump_on?"ON":"off", (argc>2?argv[2]:"?"));
     } else {
-      fprintf(stderr,"[adhost] addm607 UserInput ring NOT resolved (module does not import "
+      fprintf(stderr,"[adhost] UserInput ring NOT resolved (module does not import "
               "AddKey) — keypump inert\n");
     }
   }
-  // ---- addm 569: LIVE CONTROL CHANNEL --------------------------------------
+  // ---- LIVE CONTROL CHANNEL ------------------------------------------------
   // In ADSTREAM (app) mode, poll stdin non-blocking once per frame for lines
   // "SET <idx> <val>" (idx 0..15) and apply them to the SAME control-value array
   // that ADCTRL seeds — GetControlValue(idx) reads (*(adxplTOC+0x3A8))[idx] every
@@ -3350,11 +3234,11 @@ int main(int argc, char** argv){
       if(sscanf(line.c_str(),"SET %d %d",&idx,&val)==2 && idx>=0 && idx<16 && g_ctrl_addr){
         try{ mem->write_u16b(g_ctrl_addr + (uint32_t)idx*2, (uint16_t)val); }catch(...){}
         if(getenv("ADSETLOG")) fprintf(stderr,"[adhost] live SET ctrl[%d]=%d\n",idx,val);
-      } else ad_input_line(line.c_str());   // addm 574: KEY/CAPS/MOUSE
+      } else ad_input_line(line.c_str());   // KEY/CAPS/MOUSE
     }
   };
-  // addm 574: headless test lever (no app) so caps/keys can be A/B'd from a decoded
-  // stream. Applied once before the loop; default-off -> byte-identical.
+  // Headless test lever (no app) so caps/keys can be A/B'd from a decoded stream.
+  // Applied once before the loop; default-off.
   if(getenv("ADTESTCAPS")){ g_caps=true; ad_km_set(kCapsKeycode,true); g_input_seen=true; }
   if(const char* tk=getenv("ADTESTKEY")){ ad_km_set(atoi(tk),true); g_input_seen=true; }
   auto fbchanged=[&](uint8_t fb)->long{ long c=0; for(int i=0;i<H.fb_w*H.fb_h;i++) if(mem->read_u8(H.g_fb+i)!=fb) c++; return c; };
@@ -3374,16 +3258,16 @@ int main(int argc, char** argv){
   // Drive animation frames via the requested selector (default 1 = DrawFrame).
   int draw_sel = getenv("ADDRAWSEL")? atoi(getenv("ADDRAWSEL")) : 1;
   int nframes  = getenv("ADFRAMES")? atoi(getenv("ADFRAMES")) : 0;
-  // addm 573: AUTHENTIC PER-MODULE DRAW PACING (stream/lockstep). Under ADSHM/ADSTREAM the app sends a
-  // GO (or drains the pipe) at up to 60fps; the old loop advanced the module once per GO, so animation
-  // ran at DISPLAY fps (Swirling Magic etc. "too fast"). Decouple: advance the module only every
-  // pace-interval wall-milliseconds; a GO that arrives early RE-SENDS the previous frame — we simply skip
-  // the module DRAW (and its offscreen composite), leaving g_fb unchanged, so stream_frame() re-emits it.
+  // AUTHENTIC PER-MODULE DRAW PACING (stream/lockstep). Under ADSHM/ADSTREAM the app sends a GO (or
+  // drains the pipe) at up to 60fps; advancing the module once per GO runs the animation at DISPLAY
+  // fps, which is far too fast for most modules. Decouple: advance the module only every
+  // pace-interval wall-milliseconds; a GO that arrives early RE-SENDS the previous frame — skip the
+  // module DRAW (and its offscreen composite), leaving g_fb unchanged, so stream_frame() re-emits it.
   // The authentic per-module interval is already encoded as ADUSPERCALL (the µs of simulated time the
   // catalog authored per DrawFrame — 100ms/10fps for most modules, 12ms for Magic Turtle); ADPACEMS /
-  // ADPACEHZ override. Time sources (Microseconds/TickCount) already track real wall-clock in stream mode
-  // (addm 549/550) so a skipped call costs no time drift. Gated on ADSTREAM; ADNOPACE opts out
-  // (byte-identical to the per-GO model). Headless (no ADSTREAM) always advances -> census unaffected.
+  // ADPACEHZ override. Time sources (Microseconds/TickCount) track real wall-clock in stream mode, so
+  // a skipped call costs no time drift. Gated on ADSTREAM; ADNOPACE opts out. Headless (no ADSTREAM)
+  // always advances, so the census is unaffected.
   const bool g_pace_on = getenv("ADSTREAM") && !getenv("ADNOPACE");
   double g_pace_ms = getenv("ADUSPERCALL") ? atof(getenv("ADUSPERCALL"))/1000.0 : 100.0;
   if(getenv("ADPACEMS")) g_pace_ms = atof(getenv("ADPACEMS"));
@@ -3391,25 +3275,24 @@ int main(int argc, char** argv){
   if(g_pace_ms < 0.0) g_pace_ms = 0.0;
   double g_pace_last=-1e18;
   auto pace_now=[&]()->double{ return ad_wall_elapsed()*1000.0; };
-  // addm 581: INIT EXEMPTION (replaces addm 580) — do not pace until the module's DRAW has actually
-  // CHANGED the framebuffer vs a pre-first-draw baseline. Slow-init modules (Art Critic: ~900 DRAW
-  // calls of init work before the first visible paint) must run init at full call rate; pacing
-  // throttled that to 10 calls/s so init never finished in a 62s window. The addm-580 fb-UNIFORMITY
-  // test failed to protect it (a non-uniform post-blank screen "engaged" pacing on frame 0); a
-  // baseline-CHANGE test is robust to whatever blank left on screen. ADNOINITEXEMPT disables.
+  // INIT EXEMPTION: do not pace until the module's DRAW has actually CHANGED the framebuffer vs a
+  // pre-first-draw baseline. Slow-init modules (Art Critic does ~900 DRAW calls of init work before
+  // the first visible paint) must run init at full call rate; pacing throttles that to 10 calls/s so
+  // init never finishes in a 62s window. The test is baseline-CHANGE rather than fb-UNIFORMITY, so it
+  // is robust to whatever the blank left on screen. ADNOINITEXEMPT disables.
   bool g_first_drawn = false;
   uint64_t g_pace_basehash = 0; bool g_pace_base_init = false;
   const bool g_initexempt = !getenv("ADNOINITEXEMPT");
-  // addm 581: idle-FF accrual state (68K addm-578 port; see g_adff_ticks). Gated to paced stream
-  // wall-clock mode; ADGM (Psycho Deli's palette-cycler, whose fb indices can idle while its palette
-  // animates) and ADNOIDLEFF opt out. ADIDLEFFTICKS/ADIDLEFFAFTER/ADIDLEFFLOG as on the 68K host.
+  // idle-FF accrual state (see g_adff_ticks). Gated to paced stream wall-clock mode; ADGM (Psycho
+  // Deli's palette-cycler, whose fb indices can idle while its palette animates) and ADNOIDLEFF opt
+  // out. ADIDLEFFTICKS/ADIDLEFFAFTER/ADIDLEFFLOG as on the 68K host.
   const bool g_idleff_on = g_pace_on && ad_wallclock_on() && !getenv("ADNOIDLEFF") && !getenv("ADGM");
   const uint32_t g_idleff_base = getenv("ADIDLEFFTICKS") ? (uint32_t)strtoul(getenv("ADIDLEFFTICKS"),0,0) : 120;
   const int g_idleff_after = getenv("ADIDLEFFAFTER") ? atoi(getenv("ADIDLEFFAFTER")) : 15;
   uint64_t g_idleff_lasthash = 0; int g_idleff_streak = 0; bool g_idleff_init = false;
-  if(g_pace_on) fprintf(stderr,"[adhost] addm573 pacing module DRAW to %.1f ms (%.1f fps)\n",g_pace_ms, g_pace_ms>0?1000.0/g_pace_ms:0.0);
-  // addm 622 + RAINFOREST ENGINE-DRIVE FIX: the AD4 SDK module shim (main's 8-entry selector
-  // table) is identical boilerplate in every PPC module: main(&result, ?, message, frame) with
+  if(g_pace_on) fprintf(stderr,"[adhost] pacing module DRAW to %.1f ms (%.1f fps)\n",g_pace_ms, g_pace_ms>0?1000.0/g_pace_ms:0.0);
+  // The AD4 SDK module shim (main's 8-entry selector table) is identical boilerplate in every
+  // PPC module: main(&result, ?, message, frame) with
   //   0 Initialize (operator new + ctor, *result = the module object)
   //   1 Close      (virtual dtor, vtable+0x08, delete-flag 1)
   //   2 **BlankScreen**  -> the object's vtable+0x0C
@@ -3420,48 +3303,46 @@ int main(int argc, char** argv){
   //   +0x08 __dt  +0x0C DoBlankScreen  +0x10 DoDrawFrame  +0x14 DoLButtonDown  +0x18 DoLButtonHeld
   //   +0x1C DoLButtonUp  +0x20 DoUpdateRgn  +0x24 DoMouseMove  +0x28 DoDisableAnimation
   //   +0x2C DoEnableAnimation  +0x30 DoButton(short)  +0x34 DoUserMessage(short)
-  // (The addm-622 note said message 2 = "UserMessage/About card" and put DoBlankScreen at
-  // vtable+0x14; both came from extrapolating TVector addresses down the slot list, which
-  // breaks at +0x30. The base-class vtable dump above is direct evidence and supersedes it.)
-  // The host drove ONLY messages 0 and 3, so a module's DoBlankScreen override — the ONLY
-  // place a module paints its background — never ran. Rainforest was the visible casualty: it
-  // rendered a BLACK SCREEN (0.2% non-black), and its 10 Background options collapsed to 2
-  // distinct renders because nothing ever painted the jungle backdrop or the pattern texture.
-  // Driving message 2 once after Initialize (what the real After Dark app does before the
-  // first DrawFrame) is authentic and corpus-safe: 16/19 PPC modules byte-IDENTICAL; the
-  // other two GAIN authored content they had been skipping — Flying Toasters! plays its
-  // "toaster evolution" era-card intro and then resumes flying toasters, Rock Paper Scissors
-  // re-seeds its sprite layout (still 200/200 distinct frames). ADNOBLANKMSG=1 reverts to the
-  // legacy 0/3-only drive; ADBLANKSEL=<n> still overrides which message is sent.
+  // (Do not extrapolate TVector addresses down the slot list to name these — the run breaks at
+  // +0x30. The base-class vtable dump is the direct evidence.)
+  // Message 2 matters: a module's DoBlankScreen override is the ONLY place a module paints its
+  // background. Driving only messages 0 and 3 leaves Rainforest a BLACK SCREEN (0.2% non-black)
+  // with its 10 Background options collapsed to 2 distinct renders, because nothing ever paints
+  // the jungle backdrop or the pattern texture. Sending message 2 once after Initialize is what
+  // the real After Dark app does before the first DrawFrame; 16/19 PPC modules render
+  // identically either way and the other two GAIN authored content — Flying Toasters! plays its
+  // "toaster evolution" era-card intro before resuming, Rock Paper Scissors re-seeds its sprite
+  // layout. ADNOBLANKMSG=1 reverts to the 0/3-only drive; ADBLANKSEL=<n> overrides which message
+  // is sent.
   if(nframes>0 && !getenv("ADNOBLANKMSG")){
     int blank_sel = getenv("ADBLANKSEL") ? atoi(getenv("ADBLANKSEL")) : 2;
     call_main(blank_sel, "BLANK");
   }
   for(int fN=0; fN<nframes; fN++){
-    if(g_shm_on){ if(!wait_go()) break; }   // addm 571: block for the app's GO (SET applied inline)
-    else poll_set();               // addm 569: apply any live "SET idx val" before the draw
-    ad_poll_real_caps();           // addm 797: ADREALCAPS=1 -> fold real caps state in (inert unless armed)
-    // addm 573: pacing decision — should the module advance this display frame? (else re-send prev frame)
+    if(g_shm_on){ if(!wait_go()) break; }   // block for the app's GO (SET applied inline)
+    else poll_set();               // apply any live "SET idx val" before the draw
+    ad_poll_real_caps();           // ADREALCAPS=1 -> fold real caps state in (inert unless armed)
+    // pacing decision — should the module advance this display frame? (else re-send prev frame)
     bool g_advance = !g_pace_on;
-    if(!g_advance && g_initexempt && !g_first_drawn){   // addm 581 init exemption (first-change vs baseline)
+    if(!g_advance && g_initexempt && !g_first_drawn){   // init exemption (first change vs baseline)
       uint64_t h=1469598103934665603ULL;
       for(int i=0;i<H.fb_w*H.fb_h;i+=64){ h=(h ^ mem->read_u8(H.g_fb+(uint32_t)i))*1099511628211ULL; }
       if(!g_pace_base_init){ g_pace_base_init=true; g_pace_basehash=h; }
       if(h!=g_pace_basehash) g_first_drawn=true; else g_advance=true;
     }
     if(!g_advance){ double n=pace_now(); if((n-g_pace_last)>=g_pace_ms){ g_pace_last=n; g_advance=true; } }
-    // addm 607: RD keypump — feed one KeyType into the UserInput ring per advanced frame
-    // (the shell's per-keyDown AddKey, reproduced). Byte-inert when no key is active
-    // (feed==0 -> no ring write, no flag set). ADRDFEED=<hex> forces a constant KeyType.
-    // addm 608: ADRDMODE=<hex> pokes RD's authentic demo/player mode flag at module
-    // TOC+0x3EA4 each frame (0=demo/attract, !=0=interactive player). MoveHandler
-    // (module+0x4124) and PlayThing (0x6F50) both gate the keyboard path on this flag.
+    // RD keypump — feed one KeyType into the UserInput ring per advanced frame (the
+    // shell's per-keyDown AddKey, reproduced). Inert when no key is active (feed==0 -> no
+    // ring write, no flag set). ADRDFEED=<hex> forces a constant KeyType.
+    // ADRDMODE=<hex> pokes RD's demo/player mode flag at module TOC+0x3EA4 each frame
+    // (0=demo/attract, !=0=interactive player). MoveHandler (module+0x4124) and PlayThing
+    // (0x6F50) both gate the keyboard path on this flag.
     if(g_advance && g_keypump_on){
-      // addm 609: ADRDPLAY auto-trigger — the first MAPPED key press (arrows/WASD via the
-      // KEY protocol) flips RD's own demo/player flag, then keeps it poked (sticky, same
-      // per-frame semantics as ADRDMODE, in case a state transition resets it). Idle = pure
-      // demo, byte-identical to main; press an arrow = interactive player mode (KeyToMove
-      // path). Default ON for RD; ADNORDPLAY opts out; explicit ADRDMODE=<hex> overrides.
+      // Auto-trigger: the first MAPPED key press (arrows/WASD via the KEY protocol) flips
+      // RD's own demo/player flag, then keeps it poked (sticky, same per-frame semantics as
+      // ADRDMODE, in case a state transition resets it). Idle stays in pure demo/attract
+      // mode; an arrow press enters interactive player mode (the KeyToMove path). Default
+      // ON; ADNORDPLAY opts out; explicit ADRDMODE=<hex> overrides.
       static bool g_rd_play = false;
       if(!g_rd_play && g_rd_dir && !getenv("ADNORDPLAY")) g_rd_play = true;
       const char* rdm = getenv("ADRDMODE");
@@ -3511,11 +3392,11 @@ int main(int argc, char** argv){
     }
     if(g_advance)
     call_main(draw_sel, "DRAW");
-    // addm 581: idle detection for the tick catch-up — sampled fb hash (stride 4) after each ADVANCE
-    // draw; an unchanged fb means the module idled on virtual time (the only input it waits on), so
-    // after g_idleff_after consecutive idle advances add an escalating boost (base<<streak, x64 cap)
-    // to the monotonic g_adff_ticks offset TickCount/Microseconds serve. Any fb change resets the
-    // streak, so actively-drawing modules never see boosted time (the addm-573 pacing rates hold).
+    // Idle detection for the tick catch-up — sampled fb hash (stride 4) after each ADVANCE draw.
+    // An unchanged fb means the module idled on virtual time (the only input it waits on), so after
+    // g_idleff_after consecutive idle advances add an escalating boost (base<<streak, x64 cap) to
+    // the monotonic g_adff_ticks offset TickCount/Microseconds serve. Any fb change resets the
+    // streak, so actively-drawing modules never see boosted time and the pacing rates hold.
     if(g_idleff_on && g_advance){
       uint64_t ih=1469598103934665603ULL;
       for(int i=0;i<H.fb_w*H.fb_h;i+=4){ ih=(ih ^ mem->read_u8(H.g_fb+(uint32_t)i))*1099511628211ULL; }
@@ -3537,7 +3418,7 @@ int main(int argc, char** argv){
     // Uses the real NewGWorld registry (not a memory scan), so it can't grab engine
     // code as a false "image". Opt-in: the 15 sprite modules CopyBits to the screen
     // themselves and must NOT have an offscreen blitted over their correct output.
-    if(g_advance && getenv("ADBLITGW")){   // addm 573: skip the offscreen re-composite on re-send frames
+    if(g_advance && getenv("ADBLITGW")){   // skip the offscreen re-composite on re-send frames
       uint32_t bestBase=0; int bestW=0,bestH=0,bestRB=0; long bestNZ=0;
       for(uint32_t port : H.gworlds){
         uint32_t pmh=0,pm=0; try{ pmh=mem->read_u32b(port+0x02); pm=pmh?mem->read_u32b(pmh):0; }catch(...){continue;}
@@ -3566,7 +3447,7 @@ int main(int argc, char** argv){
     // no GWorld, no CopyBits) leave their frame in a buffer the host never flips to
     // g_fb. Scan mapped memory in fb_w*fb_h windows for the densest non-zero block
     // (the plotted illusion) and, if it beats g_fb, blit it in so the frame shows.
-    if(g_advance && getenv("ADSCANIMG")){   // addm 573: skip the offscreen scan/blit on re-send frames
+    if(g_advance && getenv("ADSCANIMG")){   // skip the offscreen scan/blit on re-send frames
       uint32_t span=(uint32_t)H.fb_w*H.fb_h; uint32_t best=0,bestden=0;
       long cur=0; for(uint32_t i=0;i<span;i++){ uint8_t b=0; try{b=mem->read_u8(H.g_fb+i);}catch(...){} if(b)cur++; }
       bestden=(uint32_t)cur; // baseline: g_fb itself
@@ -3584,24 +3465,22 @@ int main(int argc, char** argv){
         if(!getenv("ADSCANNOBLIT")) for(uint32_t i=0;i<span;i++){ uint8_t b=0; try{b=mem->read_u8(best+i);}catch(...){} mem->write_u8(H.g_fb+i,b); }
       }
     }
-    BSave _bs=banner_paint(fN);   // addm 699: composite the timed banner onto this presented frame
+    BSave _bs=banner_paint(fN);   // composite the timed banner onto this presented frame
     if(const char* fbp=getenv("ADFRAMEDIR"))
       snap_ppm(string(fbp)+"/frame"+to_string(fN)+".ppm", H.g_fb, H.fb_w, H.fb_h, H.fb_w);
     stream_frame();
-    banner_restore(_bs);          // addm 699: restore g_fb — banner never persists in module state
-    // addm 595/761: TIMED re-init CYCLE (engine-authentic saver cycling), reconciled with the 68K host
-    // (addm 701/719/744): the real After Dark control panel ran each saver for a while then re-inited on
-    // a TIMER — never a stall watcher, and never a freshness gate. Plain ADCYCLE is now the AUTHENTIC
-    // model: UNCONDITIONAL re-init at ADCYCLESECS (default 60s = sVal 503), no matter what the module is
-    // doing on screen — exactly what the fullscreen blanker did to whatever was mid-animation. The
-    // freshness/grace gate (defer the boundary while the module is still animating) was OUR invention, not
-    // the engine's; it is retained as an explicit legacy A/B path behind ADCYCLEFRESH=1 (default period
-    // reverts to 45s, matching its original addm-595 behavior), byte-for-byte identical to the prior
-    // default when armed. ADCYCLESECS=n overrides the period either way; ADNOCYCLE disables; ADSTALLSECS=n
-    // arms the OFF-by-default sampled safety-net. Byte-inert when none of these are set (the census does
-    // not set them for PPC). The idle-FF (addm 581) is an orthogonal virtual-TIME fix and is KEPT untouched.
+    banner_restore(_bs);          // restore g_fb — the banner never persists in module state
+    // TIMED re-init CYCLE (engine-authentic saver cycling). The real After Dark control panel ran
+    // each saver for a while then re-inited on a TIMER — never a stall watcher, and never a
+    // freshness gate. Plain ADCYCLE is that model: UNCONDITIONAL re-init at ADCYCLESECS (default
+    // 60s = sVal 503), no matter what the module is doing on screen, exactly as the fullscreen
+    // blanker tore down whatever was mid-animation. ADCYCLEFRESH=1 selects a non-authentic
+    // freshness/grace gate that defers the boundary while the module is still animating (its
+    // period defaults to 45s). ADCYCLESECS=n overrides the period either way; ADNOCYCLE disables;
+    // ADSTALLSECS=n arms the off-by-default sampled safety net. Inert when none of these are set.
+    // The idle-FF above is an orthogonal virtual-TIME mechanism and is independent of this.
     {
-      static const bool g_cycle_fresh = getenv("ADCYCLEFRESH");      // legacy freshness-gated A/B path
+      static const bool g_cycle_fresh = getenv("ADCYCLEFRESH");      // non-authentic freshness gate
       static const bool g_cycle_on = (getenv("ADAUTORESTART") || getenv("ADCYCLE")) && !getenv("ADNOCYCLE");
       if(g_cycle_on){
         double now = ad_wall_elapsed();
@@ -3616,13 +3495,13 @@ int main(int argc, char** argv){
           fr_last_sample=now;
         }
         if(!cyc_armed && (g_first_drawn || fr_seen_change)){ cyc_armed=true; cyc_start=now; }   // anchor at first draw
-        // Authentic default Duration = 60s (sVal 503). Legacy freshness path keeps its former 45s default.
+        // Authentic default Duration = 60s (sVal 503). The freshness path defaults to 45s.
         double cyc_secs  = getenv("ADCYCLESECS")  ? atof(getenv("ADCYCLESECS"))  : (g_cycle_fresh ? 45.0 : 60.0);
         double cyc_grace = getenv("ADCYCLEGRACE") ? atof(getenv("ADCYCLEGRACE")) : 8.0;
         if(cyc_armed && cyc_secs>0 && (now-cyc_start)>=cyc_secs){
-          // LEGACY freshness gate (ADCYCLEFRESH): defer the boundary if the module is still animating. The
-          // authentic engine had no such gate — the DEFAULT path re-inits UNCONDITIONALLY at the Duration
-          // boundary, exactly as the fullscreen blanker tore down + re-init'd whatever was on screen.
+          // Freshness gate (ADCYCLEFRESH): defer the boundary if the module is still animating. The
+          // authentic engine has no such gate — the DEFAULT path re-inits UNCONDITIONALLY at the
+          // Duration boundary, as the fullscreen blanker tore down whatever was on screen.
           if(g_cycle_fresh && (now-fr_last_change) < cyc_grace){
             if(getenv("ADCYCLELOG")) fprintf(stderr,"[ADCYCLE] (legacy fresh) boundary at %.1fs but module still animating (last fb change %.1fs ago < grace %.1fs) -> defer one period\n", now-cyc_start, now-fr_last_change, cyc_grace);
             cyc_start = now;
@@ -3630,7 +3509,7 @@ int main(int argc, char** argv){
             const char* g=getenv("ADAR_GEN"); int gen=g?atoi(g):0;
             fprintf(stderr,"[ADCYCLE] cycle-timer fired at frame %d gen %d (%.1fs elapsed since first draw) -> re-exec module init\n",
               fN, gen, now-cyc_start);
-            // addm 792: RESTORE THE REAL STDOUT ONTO fd 1 BEFORE execv.
+            // RESTORE THE REAL STDOUT ONTO fd 1 BEFORE execv.
             // Both transports move the app-facing stdout to a PRIVATE dup and then point
             // fd 1 at /dev/null (see the two `dup(1)` sites above), and the re-exec'd
             // process rebuilds its transport from `dup(1)`. If fd 1 is still /dev/null at
@@ -3639,8 +3518,7 @@ int main(int argc, char** argv){
             // nobody looks at. Under ADSHM that is a DEADLOCK, not just a lost frame: the
             // app blocks waiting for the per-frame ack byte and the host blocks in wait_go()
             // waiting for the next GO, so the screensaver freezes at the first cycle
-            // boundary. The ADSTREAM (streamf) restore was already here; ADSHM (g_ackf) —
-            // the transport the app actually uses by default — was not.
+            // boundary. Both transports must be restored, ADSHM (g_ackf) included.
             // stdout is flushed FIRST, while fd 1 is still /dev/null, so that nothing
             // buffered for the bit bucket can land in the transport we are about to restore.
             fflush(stdout);

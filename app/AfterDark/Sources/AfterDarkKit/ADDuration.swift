@@ -1,13 +1,12 @@
 import Foundation
 
-// addm 796: Duration — the module-cycle interval — as a USER PREFERENCE,
-// which is what it was in the real product.
+// Duration — the module-cycle interval — is a USER PREFERENCE, which is what
+// it was in the real product.
 //
 // PROVENANCE (verbatim, not authored). The After Dark 4.0 control panel is the
 // top-level "After Dark 4.0" cdev in the AD9 tree (on disk as
-// afterdark/ad9_engine/AD40_engine.rsrc, 510,625 B; located by addm 701). Its main
-// window carries a discrete SLIDER (the "Slider CDEF", CNTL 129) whose three
-// defining resources are:
+// afterdark/ad9_engine/AD40_engine.rsrc). Its main window carries a discrete
+// SLIDER (the "Slider CDEF", CNTL 129) whose three defining resources are:
 //
 //   sUnt 503  slider TICK LABELS, (word pos, pstring) pairs:
 //             0 "Short" (left-end caption), then the 13 real stops
@@ -19,21 +18,21 @@ import Foundation
 //             92->21600, 100->0xFFFFFFFF ("Forever" = never cycle)
 //   sVal 503  resource NAME "Default Duration:", value 0x003C = 60 s
 //             => the FACTORY DEFAULT is "1 min.", which is exactly the 60 s the
-//             hosts already use for ADCYCLESECS (addm 701/744/761). An untouched
-//             preference therefore changes nothing.
+//             hosts already use for ADCYCLESECS. An untouched preference
+//             therefore changes nothing.
 //
 //   sUnt 500  the SAME ladder for the per-Randomizer Duration in the Randomizer
 //             editor; its resource NAME is literally "Duration:" (hence our label)
 //             and it differs only in pos 0 ("Default" = inherit the global value)
 //             and the exclamation on the top stop ("Forever!"). Its companion
-//             mVal 500 / MENU 500 is "Order:" (Random / In Order) — i.e. the
-//             original paired Order: with Duration:, and Duration existed both
-//             globally and per-Randomizer.
+//             mVal 500 / MENU 500 is "Order:" (Random / In Order) — the original
+//             paired Order: with Duration:, and Duration existed both globally
+//             and per-Randomizer.
 //
-// Duration was NEVER a module resource (addm 788 supp: a 39-type census of the
-// module corpus finds no Duration anywhere, and the AD 4.0 Faceplate/Shared ship
-// zero sVal resources) — so there is nothing for a module and the cycle to
-// negotiate, and this is purely the user's call.
+// Duration was never a module resource — the module corpus has no Duration
+// resource anywhere, and the AD 4.0 Faceplate/Shared ship zero sVal resources —
+// so there is nothing for a module and the cycle to negotiate; this is purely
+// the user's call.
 //
 // The stop LABELS below are copied from sUnt 500 (the resource whose name is
 // "Duration:") verbatim, including its inconsistent punctuation — "15 sec" with no

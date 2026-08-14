@@ -19,13 +19,13 @@ public struct EmulatedModuleView: View {
                                                            settings: settings))
     }
 
-    // addm 797: modules that take ARROW/WASD keys and the mouse. These need
+    // Modules that take ARROW/WASD keys and the mouse. These need
     // first-responder capture (they swallow keystrokes), so the set stays small and
     // explicit. Caps-Lock is NOT part of this gate — see capsConsumer below.
     static let interactiveNames: Set<String> = ["Rodger Dodger", "Fish World"]
     static func isInteractive(_ m: ADModule) -> Bool { interactiveNames.contains(m.name) }
 
-    // addm 797: does this module document a Caps-Lock behaviour? Derived from
+    // Does this module document a Caps-Lock behaviour? Derived from
     // the module's OWN About text (shipped in catalog.json), not a hand-kept list, so it
     // can never drift out of sync with the corpus. 19 modules match across both families
     // — Time Flies ("Caps-lock changes the type of clock"), Mandelbrot ("change the color
@@ -54,9 +54,9 @@ public struct EmulatedModuleView: View {
                         .font(.callout).foregroundStyle(.secondary)
                 }
             }
-            // addm 797: subtle hint that this saver responds to the keyboard.
-            // Was gated on isInteractive (2 modules); now on capsConsumer, so all 19
-            // modules that document a Caps-Lock behaviour advertise it.
+            // Subtle hint that this saver responds to the keyboard: shown for
+            // interactive modules and for any module that documents a Caps-Lock
+            // behaviour.
             if (Self.capsConsumer(module) || Self.isInteractive(module)) && driver.hasFrame {
                 VStack {
                     Spacer()
@@ -85,7 +85,7 @@ public struct EmulatedModuleView: View {
 public final class FrameLayerNSView: NSView {
     var onVisibility: ((Bool) -> Void)?
 
-    // addm 574: live input callbacks (wired by EmulatedDriver to the host). onKey
+    // Live input callbacks (wired by EmulatedDriver to the host). onKey
     // fires for keyDown/keyUp with the Mac virtual keycode (NSEvent.keyCode IS the
     // Mac virtual keycode the host's KeyMap expects). onCaps fires on caps-lock STATE
     // changes (flagsChanged). onMouse fires with FRAME-LOCAL coords (aspect-fit
@@ -98,9 +98,9 @@ public final class FrameLayerNSView: NSView {
     private var lastImageSize: CGSize = .zero // native frame size for mouse mapping
     private var mouseDownNow = false
 
-    // addm 797: this view no longer observes Caps-Lock at all. The host reads
-    // the real key itself once per frame under ADREALCAPS (EmulatedHost._buildEnv), which
-    // needs no first responder, no key window and no event delivery — so it behaves the
+    // This view does not observe Caps-Lock at all. The host reads the real key
+    // itself once per frame under ADREALCAPS (EmulatedHost._buildEnv), which needs
+    // no first responder, no key window and no event delivery — so it behaves the
     // same in this pane and inside the screen-saver appex, and it survives host respawns
     // and module cycling with no state to replay. An NSEvent monitor + poll here would be
     // a second, weaker source of the same fact.
@@ -125,7 +125,7 @@ public final class FrameLayerNSView: NSView {
         CATransaction.commit()
     }
 
-    // MARK: - addm 574: keyboard + mouse capture (interactive modules only)
+    // MARK: - Keyboard + mouse capture (interactive modules only)
     public override var acceptsFirstResponder: Bool { captureInput }
 
     public override func keyDown(with event: NSEvent) {
@@ -189,9 +189,8 @@ public final class FrameLayerNSView: NSView {
         nc.addObserver(self, selector: #selector(occlusionChanged),
                        name: NSApplication.didUnhideNotification, object: nil)
         updateVisibility()
-        // addm 574: arrow/WASD + mouse modules grab keyboard focus so those keys route
+        // Arrow/WASD + mouse modules grab keyboard focus so those keys route
         // here. Deferred so the window has finished setting up its responder chain.
-        // (Caps no longer rides on this — startCapsObservation above already seeded it.)
         if captureInput {
             DispatchQueue.main.async { [weak self] in
                 guard let self, let win = self.window else { return }
@@ -267,7 +266,7 @@ final class EmulatedDriver: ObservableObject {
             self?.host?.setPaused(!visible)
         }
         // Arrow/WASD + mouse need first-responder capture, so they stay gated. Caps is
-        // NOT here: the host polls the real key itself (addm 797).
+        // NOT here: the host polls the real key itself.
         if EmulatedModuleView.isInteractive(module) {
             frameView.captureInput = true
             frameView.onKey   = { [weak self] kc, down in self?.host?.sendKey(keycode: kc, down: down) }
@@ -307,7 +306,7 @@ final class EmulatedDriver: ObservableObject {
             h.updateSettings(self.settings.snapshot(for: self.module))
         }
         debounce = work
-        // addm 569: settings now apply over the live SET channel (no respawn), so
+        // Settings apply over the live SET channel (no respawn), so
         // the debounce can be short — a moved slider takes effect in ~100ms.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
     }

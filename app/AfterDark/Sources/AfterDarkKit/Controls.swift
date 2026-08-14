@@ -70,9 +70,9 @@ public final class ADSettingsStore: ObservableObject {
     }
 }
 
-// addm 796: the GLOBAL Duration preference (the control panel's own slider,
-// see ADDuration for the resource provenance). Unlike ADSettingsStore this is not
-// per-module — Duration belonged to the control panel, not to any module.
+// The GLOBAL Duration preference (the control panel's own slider, see ADDuration
+// for the resource provenance). Unlike ADSettingsStore this is not per-module —
+// Duration belongs to the control panel, not to any module.
 //
 // Owns the three places the value has to land: the app's defaults domain (persistence),
 // EmulatedHost.durationSeconds (every host this process spawns from now on), and the

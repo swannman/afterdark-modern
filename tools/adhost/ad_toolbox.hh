@@ -4,7 +4,7 @@
 // marshaling differs. This header holds the reusable core — a color GrafPort +
 // PixMap over a host framebuffer, the CLUT, and the QuickDraw raster primitives —
 // so each host's trap/import handler just unpacks its own calling convention and
-// calls these methods. Ported verbatim from adhost.cc's proven implementation.
+// calls these methods.
 #pragma once
 #include <stdint.h>
 #include <stdio.h>
@@ -22,8 +22,7 @@ namespace adtoolbox {
 extern const uint8_t QDFONT[96][8];
 
 // ---- Authentic Macintosh default 8-bit System palette ('clut' id 8) ----------
-// addm 632: fill `out` with the REAL Mac 256-colour default CLUT, replacing the
-// bring-up-era synthetic grayscale ramp (entry i = gray(i)). Structure (matches
+// Fill `out` with the real Mac 256-colour default CLUT. Structure (matches
 // resource_dasm's default_icon_color_table_8bit byte-for-byte; md5 of the 768-byte
 // RGB8 table = 7bb7a37a1af9e3b447628ea5a7fa1184):
 //   0..214  = 6x6x6 colour cube, levels {FF,CC,99,66,33,00}, R outer/G mid/B inner
@@ -33,13 +32,9 @@ extern const uint8_t QDFONT[96][8];
 //   235..244 = blue ramp
 //   245..254 = gray ramp  (EE..11 on all channels)
 //   255      = black (0,0,0)
-// Key contrasts with the old host palettes this replaces: index 0 = WHITE (was gray
-// in the ramp, white in the cube fallback too), and index 255 = BLACK (the gray ramp
-// left it WHITE; the 6x6x6 cube fallback left it (17,17,17) — the Warp! gray-trail bug).
-// The colour SET is identical to the old 6x6x6 cube fallback (verified multiset-equal):
-// only 41 indices (215..255) are re-ordered so black lands at 255 and the ramps shift
-// up one — exactly where a real Mac put them, so direct-index art matches real hardware
-// and rgb_to_index returns the same DISPLAYED colour (a possibly-different index).
+// Index 0 is WHITE and index 255 is BLACK. Both matter: direct-index art is authored
+// against those slots, and a table that ends at anything other than pure black leaves
+// modules that erase to 255 (Warp!) with visible dark-gray trails.
 inline void mac_sys7_palette(uint8_t out[256][3]) {
   static const int V[6]  = {0xFF,0xCC,0x99,0x66,0x33,0x00};
   static const int RV[10]= {0xEE,0xDD,0xBB,0xAA,0x88,0x77,0x55,0x44,0x22,0x11};
@@ -70,11 +65,11 @@ struct ToolboxCanvas {
 
   // ---- pen model (PenSize / PenMode / PenPat / BackPat / HidePen) -----------
   // A faithful GrafPort pen. The DEFAULTS below are chosen so the pen rasterizers
-  // (qd_penline/qd_penstamp/qd_penfill) are BYTE-IDENTICAL to the old direct
-  // qd_line(...,qd_fg) / qd_fillrect(...,qd_fg) paths: 1x1 pen, patCopy transfer,
-  // an all-black (all-ones) pen pattern, pen visible. A module only diverges once
-  // it actually calls PenSize/PenMode/PenPat — so modules that never touch the pen
-  // (the canaries Snake/Bogglins) render identically.
+  // (qd_penline/qd_penstamp/qd_penfill) collapse to the plain qd_line(...,qd_fg) /
+  // qd_fillrect(...,qd_fg) paths: 1x1 pen, patCopy transfer, an all-black (all-ones)
+  // pen pattern, pen visible. A module only diverges once it actually calls
+  // PenSize/PenMode/PenPat, so modules that never touch the pen (Snake, Bogglins)
+  // render identically either way.
   int16_t pen_sw=1, pen_sh=1;                  // pnSize (width,height)
   int16_t pen_mode=8;                          // pnMode; 8=patCopy (default)
   uint8_t pen_pat[8]={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};  // pnPat: solid black
@@ -120,7 +115,7 @@ struct ToolboxCanvas {
     }
   }
   // Stamp the pen rectangle (pnSize) with its top-left at (x,y) — QD's pen hangs
-  // right/down. 1x1 collapses to a single qd_penpx (byte-identical to the old direct path).
+  // right/down. 1x1 collapses to a single qd_penpx (identical to the plain path).
   void qd_penstamp(int x,int y){
     if(pen_sw<=1 && pen_sh<=1){ qd_penpx(x,y); return; }
     int w=pen_sw>0?pen_sw:0, h=pen_sh>0?pen_sh:0;
@@ -271,12 +266,6 @@ struct ToolboxCanvas {
   explicit ToolboxCanvas(std::shared_ptr<ResourceDASM::MemoryContext> m): mem(m) {}
 
   // ---- CLUT / colour -------------------------------------------------------
-  // addm 769: three display/colour compensation fields retired writer-less after the gate audit —
-  // dm_white_black (addm 557 Draw Morph paper; gate retired addm 766, it was destroying the module's
-  // own light strokes), disp_black0 (addm 583 Nirvana; premise dead post-754, retired addm 766) and
-  // disp_black255 (addm 627 Warp!; writer gone since addm 679 — the authentic System palette already
-  // ends at pure black). The mechanisms they compensated for are fixed at the source: the authentic
-  // palette (addm 632) and the 1..N clut merge contract (addm 754/754b).
   uint8_t rgb_to_index(uint16_t R,uint16_t G,uint16_t B) const {
     int r8=R>>8,g8=G>>8,b8=B>>8,best=0; long bd=1L<<40;
     for(int i=0;i<256;i++){ uint32_t e=g_clut+8+i*8;
@@ -397,12 +386,9 @@ struct ToolboxCanvas {
     g_fb   = mem->allocate(W*Hh); mem->memset(g_fb,0,W*Hh);
     g_clut = mem->allocate(8+256*8); mem->memset(g_clut,0,8+256*8);
     mem->write_u16b(g_clut+6, 255);
-    // addm 632: seed the AUTHENTIC Macintosh default 8-bit System palette (mac_sys7_palette)
-    // instead of the bring-up-era synthetic grayscale ramp (entry i = gray(i)). Callers may
-    // still overlay a module 'clut' via clut_set() on top (partial cluts keep this authentic
-    // substrate for the indices they don't cover). idx0=WHITE, idx255=BLACK (the ramp left both
-    // wrong). (legacy-cleanup addm 679: the ADGRAYRAMP=1 A/B revert to the old ramp is retired —
-    // dead by default in main.)
+    // Seed the authentic Macintosh default 8-bit System palette (mac_sys7_palette). Callers
+    // may overlay a module 'clut' via clut_set() on top; a partial clut keeps this substrate
+    // for the indices it does not cover. idx0=WHITE, idx255=BLACK.
     {
       uint8_t pal[256][3]; mac_sys7_palette(pal);
       for(int i=0;i<256;i++){ uint32_t e=g_clut+8+i*8;
@@ -422,19 +408,13 @@ struct ToolboxCanvas {
     // layout: hRes@0x16, vRes@0x1A (Fixed), pixelType@0x1E, pixelSize@0x20, cmpCount@0x22,
     // cmpSize@0x24, pmTable@0x2A.
     //
-    // *** addm 758 ***: the four bring-up-era LEGACY ALIASES this block used to also write
-    // (pixelSize@0x13, cmpCount@0x16, cmpSize@0x18, pmTable@0x1C) are RETIRED. They were not a
-    // second valid layout — they were guesses at unknown offsets, and because they landed INSIDE
-    // the architectural fields they destroyed them: 0x13/0x16/0x18 sit in packSize/hRes, and the
-    // pmTable LONG at 0x1C covers vRes' low half AND pixelType@0x1E. Writing 0x1C last (the
-    // write-order contract addm 751 had to inherit and propagate to every GWorld) therefore left
-    // pixelType reading the LOW HALF OF THE COLOUR-TABLE HANDLE on every host pixmap including the
-    // screen — never 0 (chunky indexed), the one value an 8bpp indexed pixmap must report. With the
-    // aliases gone the collision does not exist and both fields are simply right. The corpus does
-    // not read any of these bytes: an all-magenta-CTabHandle-plus-filler poison over the whole
-    // changed range (0x13,0x14,0x16..0x1F) is byte-identical on all 61 modules, both hash axes, and
-    // the PPC host (adhost.cc) has always built this pixmap with the architectural values and no
-    // aliases. ADPMLEGACY=1 restores the legacy alias block byte-for-byte for A/B.
+    // ADPMLEGACY=1 additionally writes four alias fields (pixelSize@0x13, cmpCount@0x16,
+    // cmpSize@0x18, pmTable@0x1C). They are NOT a second valid layout: they land INSIDE the
+    // architectural fields and destroy them — 0x13/0x16/0x18 sit in packSize/hRes, and the
+    // pmTable LONG at 0x1C covers vRes' low half AND pixelType@0x1E. Because 0x1C is written
+    // last, pixelType then reads the LOW HALF OF THE COLOUR-TABLE HANDLE on every host pixmap
+    // including the screen — never 0 (chunky indexed), the one value an 8bpp indexed pixmap
+    // must report. The lever exists only for A/B; no module in the corpus reads these bytes.
     const bool pm_legacy = (getenv("ADPMLEGACY")!=nullptr);
     if(!pm_legacy){
       mem->write_u32b(g_pm+0x16, 0x00480000);      // hRes = 72 dpi (Fixed)
@@ -445,7 +425,7 @@ struct ToolboxCanvas {
     mem->write_u16b(g_pm+0x22, 1);                 // cmpCount = 1 (indexed)
     mem->write_u16b(g_pm+0x24, 8);                 // cmpSize = 8
     mem->write_u32b(g_pm+0x2A, cth);               // pmTable (CTabHandle)
-    if(pm_legacy){                                 // the retired aliases, in their original order
+    if(pm_legacy){                                 // the alias fields, in their original order
       mem->write_u16b(g_pm+0x13, 8);               // legacy pixelSize
       mem->write_u16b(g_pm+0x16, 1); mem->write_u16b(g_pm+0x18, 1); // legacy cmpCount/cmpSize
       mem->write_u32b(g_pm+0x1C, cth);             // legacy pmTable (clobbers pixelType@0x1E)
@@ -461,20 +441,18 @@ struct ToolboxCanvas {
     mem->write_u16b(g_port+0x10,0); mem->write_u16b(g_port+0x12,0);
     mem->write_u16b(g_port+0x14,(uint16_t)Hh); mem->write_u16b(g_port+0x16,(uint16_t)W);
     mem->write_u32b(g_port+0x18, vish);
-    // *** addm 799 ***: the SCREEN port's clipRgn(+0x1C). This builder wrote visRgn and
-    // left +0x1C NULL, exactly the gap addm 790 closed on the NewGWorld arm. QuickDraw's invariant
-    // is that a port owns a clipRgn from birth: SetClip and ClipRect copy a shape INTO the port's
-    // existing region rather than adopting the caller's handle, which is only definable if the field
-    // is never NULL. The PPC twin has always built both — adhost.cc:2652/2660 makes two independent
-    // rectangular records with mkrgn() and writes them to +0x18 and +0x1C.
+    // The SCREEN port's clipRgn(+0x1C). QuickDraw's invariant is that a port owns a clipRgn from
+    // birth: SetClip and ClipRect copy a shape INTO the port's existing region rather than
+    // adopting the caller's handle, which is only definable if the field is never NULL. The PPC
+    // host builds both fields the same way, as two independent rectangular records.
     // Guest code READS this field: MacCanvas::SetPenOrigin (LIB510_Canvas @0x0100E4E6) fetches the
     // port's clipRgn at +0x1C and OffsetRgns it to hold the clip over the same pixels across the
     // SetOrigin two instructions later. With the field NULL the host's OffsetRgn takes its
     // `rg = h ? read(h) : 0` guard and silently does nothing.
-    // Nothing HOST-side reads +0x1C — the host's clip is qd_clip_* plus the addm-717b per-port store
-    // — so this is a structural repair of the port record, not a change to what is drawn.
-    // ADNOSCRCLIPRGN=1 restores the NULL. (getenv here rather than a host lever because this is the
-    // header; the ADPMLEGACY precedent above reads its lever the same way.)
+    // Nothing HOST-side reads +0x1C — the host's clip is qd_clip_* plus the per-port store — so
+    // this is a structural repair of the port record, not a change to what is drawn.
+    // ADNOSCRCLIPRGN=1 restores the NULL. (getenv here rather than a host lever because this is
+    // the header; ADPMLEGACY above reads its lever the same way.)
     if(getenv("ADNOSCRCLIPRGN")==nullptr){
       uint32_t clp = mem->allocate(0x0A); mem->write_u16b(clp,10);   // rgnSize = 10 (rectangular)
       mem->write_u16b(clp+2,0); mem->write_u16b(clp+4,0);
@@ -521,8 +499,8 @@ struct ToolboxCanvas {
   std::vector<uint8_t> ppm_idx, ppm_rgb; uint8_t ppm_lut[256*3];
 
   // Choose the source page + read the whole index plane into `ppm_idx` once.
-  // (Bulk read; falls back to per-pixel on a partially-mapped buffer so the
-  // output stays identical to the old per-pixel path.)
+  // (Bulk read; falls back to per-pixel on a partially-mapped buffer, with the
+  // same output.)
   uint32_t snap_pick_src(){
     uint32_t src;
     if(const char* fa=getenv("ADSNAPADDR")){ src=(uint32_t)strtoul(fa,0,16); }
@@ -540,14 +518,10 @@ struct ToolboxCanvas {
       ppm_lut[i*3+0]=(uint8_t)(mem->read_u16b(e+2)>>8);
       ppm_lut[i*3+1]=(uint8_t)(mem->read_u16b(e+4)>>8);
       ppm_lut[i*3+2]=(uint8_t)(mem->read_u16b(e+6)>>8); }
-    // addm 583: display-only black-at-index-0 (Nirvana). Overrides the SHOWN colour of index-0 pixels to
-    // black without touching g_clut or rgb_to_index. Feeds every display path (P6 stream, P8 stream, shm)
-    // since they all source ppm_lut here. Default-off => byte-identical for every other module.
   }
   // Write one P6 frame to an already-open stream (used both for file snaps and
   // for the ADSTREAM stdout pipe — the app consumes concatenated P6 frames).
-  // Optimized: one bulk index read + a 256-entry CLUT LUT + one buffered fwrite
-  // of the whole frame, replacing the per-pixel fputc/CLUT-read path. Byte-identical.
+  // One bulk index read + a 256-entry CLUT LUT + one buffered fwrite of the whole frame.
   void snap_ppm_stream(FILE* o){
     fprintf(o,"P6\n%d %d\n255\n",fb_w,fb_h);
     size_t n=(size_t)fb_w*fb_h;
@@ -577,13 +551,12 @@ struct ToolboxCanvas {
     fwrite(ppm_idx.data(),1,n,o);
     fflush(o);
   }
-  // addm 571: zero-copy shared-memory transport. Same payload as snap_p8_stream
-  // (768-byte RGB palette + w*h index bytes) but written straight into a caller-
-  // provided memory region (an mmap'd POSIX shm slot) instead of an stdout stream —
-  // no header, no fwrite, no pipe. `pal_dst` must have room for 256*3 bytes and
-  // `idx_dst` for fb_w*fb_h bytes. Reuses the existing scratch/helpers so a shm
-  // frame is byte-for-byte identical to the P8 stream's palette+index payload.
-  // Purely additive; unused unless the host opts into ADSHM mode.
+  // Zero-copy shared-memory transport. Same payload as snap_p8_stream (768-byte RGB
+  // palette + w*h index bytes) but written straight into a caller-provided memory region
+  // (an mmap'd POSIX shm slot) instead of an stdout stream — no header, no fwrite, no
+  // pipe. `pal_dst` must have room for 256*3 bytes and `idx_dst` for fb_w*fb_h bytes.
+  // Reuses the existing scratch/helpers so a shm frame is byte-for-byte identical to the
+  // P8 stream's palette+index payload. Unused unless the host opts into ADSHM mode.
   void snap_p8_shm(uint8_t* pal_dst, uint8_t* idx_dst){
     if(getenv("ADRAWIDX")){ for(int i=0;i<256;i++){ uint8_t v=(uint8_t)i; pal_dst[i*3]=v;pal_dst[i*3+1]=v;pal_dst[i*3+2]=v; } }
     else { snap_build_lut(); for(int i=0;i<256*3;i++) pal_dst[i]=ppm_lut[i]; }
