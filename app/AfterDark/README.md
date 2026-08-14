@@ -2,7 +2,7 @@
 
 SwiftUI macOS app: a sidebar module picker; the selected module runs in a
 resizable/fullscreen window. **Every module runs the real emulated After Dark
-code** via `EmulatedHost` (which drives the `tools/adhost` hosts) — there is no
+code** via `EmulatedHost` (which drives the `engine` hosts) — there is no
 native reimplementation or placeholder rendering of any module.
 
 ```bash

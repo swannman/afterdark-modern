@@ -48,11 +48,11 @@ done
 # Bundle the emulation HOST binaries (adhost68k = 68K, adhost = PPC) inside the
 # .app so a shipped app can actually RUN a module — ADPaths.hostsDir resolves them
 # from Contents/Helpers when distributed, else the dev tree. Build them FRESH from
-# the current host sources via the tools/adhost Makefile (same clang flags/deps),
+# the current host sources via the engine Makefile (same clang flags/deps),
 # so the bundled binaries always match source. The COPYRIGHTED shared libs
 # (ADShared40.pef / AD4Library.rsrc) are deliberately NOT bundled — they arrive via
 # the first-run download and are read from assets/shared at runtime.
-ADHOST_SRC="$(cd ../../tools/adhost && pwd)"
+ADHOST_SRC="$(cd ../../engine && pwd)"
 echo "Building emulation hosts (adhost68k, adhost)…"
 make -C "$ADHOST_SRC" adhost68k adhost
 cp "$ADHOST_SRC/adhost68k" "$ADHOST_SRC/adhost" "$APP/Contents/Helpers/"
@@ -95,7 +95,7 @@ PLIST
 # with resources at its root), so an app-level signature needs that layout
 # reworked first. Developer-ID + hardened runtime + notarization are the same
 # open distribution follow-up.
-SIGN_ID="${AD_SIGN_ID:--}"   # "-" = ad-hoc; set AD_SIGN_ID to your "Apple Development: ..." identity to sign properly
+SIGN_ID="${AD_SIGN_ID:--}"
 sign(){ codesign --force --sign "$SIGN_ID" --timestamp=none "$@" 2>/dev/null \
         || codesign --force --sign - "$@"; }
 for h in "$APP/Contents/Helpers"/adhost68k "$APP/Contents/Helpers"/adhost \

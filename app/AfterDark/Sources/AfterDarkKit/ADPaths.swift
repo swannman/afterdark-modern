@@ -8,7 +8,7 @@ import Foundation
 //
 // There are TWO layouts (auto-detected, each env-overridable):
 //   DEV: a source checkout. Host binaries + shared libs both live in
-//        repoRoot/tools/adhost. This is the historical behavior.
+//        repoRoot/engine. This is the historical behavior.
 //   DISTRIBUTED: a shipped .app. The host binaries are BUNDLED in
 //        <App>.app/Contents/Helpers (self-contained: only system dylibs); the
 //        COPYRIGHTED shared libs (ADShared40.pef / AD4Library.rsrc) are NEVER
@@ -33,16 +33,16 @@ public enum ADPaths {
         return "\(home)/Library/Application Support/AfterDarkModern/assets"
     }()
 
-    // Where this repo (and its built hosts under tools/adhost) lives. Override with
+    // Where this repo (and its built hosts under engine) lives. Override with
     // AD_REPO_DIR. Default: walk up from the current directory until a dir that
-    // contains "tools/adhost" is found (handles `swift run` from app/AfterDark);
+    // contains "engine" is found (handles `swift run` from app/AfterDark);
     // fall back to the current directory.
     public static let repoRoot: String = {
         if let e = env("AD_REPO_DIR") { return expand(e) }
         let fm = FileManager.default
         var dir = fm.currentDirectoryPath
         for _ in 0..<8 {
-            if fm.fileExists(atPath: "\(dir)/tools/adhost") { return dir }
+            if fm.fileExists(atPath: "\(dir)/engine") { return dir }
             let parent = (dir as NSString).deletingLastPathComponent
             if parent == dir { break }
             dir = parent
@@ -73,7 +73,7 @@ public enum ADPaths {
     public static let hostsDir: String = {
         if let e = env("AD_HOST_DIR") { return expand(e) }
         if let b = bundledHostsDir { return b }
-        return "\(repoRoot)/tools/adhost"
+        return "\(repoRoot)/engine"
     }()
 
     // Directory holding the shared runtime libraries (ADShared40.pef, AD4Library.rsrc)
@@ -81,12 +81,12 @@ public enum ADPaths {
     // distributed app the downloaded assetsRoot/shared, else the dev tree.
     public static let sharedLibsRoot: String = {
         if let e = env("AD_SHARED_DIR") { return expand(e) }
-        return isDistributed ? "\(assetsRoot)/shared" : "\(repoRoot)/tools/adhost"
+        return isDistributed ? "\(assetsRoot)/shared" : "\(repoRoot)/engine"
     }()
 
     // Resolve a catalog host path to the host binary: takes only its basename
     // (adhost / adhost68k) and joins it under hostsDir, so the catalog's literal
-    // "tools/adhost/adhost" resolves to the bundle in a shipped app.
+    // "engine/adhost" resolves to the bundle in a shipped app.
     public static func resolveHost(_ path: String) -> String {
         if path.hasPrefix("/") { return path }        // already absolute: pass through
         return "\(hostsDir)/\((path as NSString).lastPathComponent)"

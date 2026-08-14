@@ -1,7 +1,7 @@
 # After Dark Modern
 
 Run real **After Dark** 68K and PowerPC screensaver modules under CPU emulation on
-modern macOS. Two hosts (`tools/adhost`) execute the original module code against a
+modern macOS. Two hosts (`engine/`) execute the original module code against a
 software QuickDraw and stream frames; a SwiftUI app presents them.
 
 Everything in this repo is original work. **No copyrighted After Dark bits are
@@ -12,9 +12,10 @@ separately.
 
 ## Layout
 
-- `tools/adhost/` — the emulation hosts (`adhost68k.cc`, `adhost.cc`) and the
+- `engine/` — the emulation hosts (`adhost68k.cc`, `adhost.cc`) and the
   software QuickDraw (`ad_toolbox.{cc,hh}`)
-- `tools/adfetch/` — downloads/extracts the original assets, checksum-verified
+- `tools/` — utilities: `adfetch/` downloads/extracts the original assets
+  (checksum-verified); the rest are debugging/validation aids
 - `app/AfterDark/` — the app, plus `adrender` (headless renderer/verifier)
 - `docs/RESEARCH.md` — the reverse-engineering log (what the hosts expect and why)
 
@@ -30,7 +31,7 @@ cd third_party/resource_dasm && cmake -S . -B build -DCMAKE_PREFIX_PATH=../local
   && cmake --build build --target resource_file m68kdasm resource_dasm -j8 && cd ../..
 
 # hosts
-cd tools/adhost && make && cd ../..
+cd engine && make adhost adhost68k && cd ..
 ```
 
 **Emulator version note:** this project found several M68KEmulator defects and
@@ -68,7 +69,7 @@ byte-identical hash streams mean emulator-equivalent:
 
 ```bash
 ADSCREENW=512 ADSCREENH=384 ADFBHASH=1 ADFRAMES=200 \
-  tools/adhost/adhost68k "<AD Deluxe dir>/<Module>/..namedfork/rsrc"
+  engine/adhost68k "<AD Deluxe dir>/<Module>/..namedfork/rsrc"
 ```
 
 Use `ADFBHASHRGB=1` for palette-animating modules (the index plane can't see CLUT

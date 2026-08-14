@@ -22,7 +22,7 @@
 #                        --cache / AD_CACHE_DIR lets the app keep the re-downloadable
 #                        ISO/img under ~/Library/Caches instead of Application Support.
 #   sources.conf         beside this script — where each source comes from + how to unpack it
-#   --install-host-libs  ALSO copy the two shared runtime libraries into tools/adhost/
+#   --install-host-libs  ALSO copy the two shared runtime libraries into engine/
 #                         (ADShared40.pef, AD4Library.rsrc), overwriting whatever is there.
 #                         The hosts read these from their working directory, so a live dev
 #                         setup needs this once; opt in explicitly since it clobbers files
@@ -353,9 +353,9 @@ acquire_dlx(){
 
 # Copy the two shared libraries out of the extracted trees, canonical copy
 # under the assets root ($ASSETS/shared/). The RUNNING hosts read these two
-# files from their working directory (tools/adhost/), not from the assets
+# files from their working directory (engine/), not from the assets
 # root — but writing there unconditionally used to silently overwrite a
-# developer's live tools/adhost/{ADShared40.pef,AD4Library.rsrc} on every run
+# developer's live engine/{ADShared40.pef,AD4Library.rsrc} on every run
 # (those files are gitignored, so `git status` never showed the clobber). Now
 # that only happens with an explicit --install-host-libs opt-in, which prints
 # what it overwrites.
@@ -395,7 +395,7 @@ if [ "$VERIFY_ONLY" = 0 ]; then
   place_shared_libs
 fi
 
-# Verify the shared libs wherever this run actually put them: tools/adhost/
+# Verify the shared libs wherever this run actually put them: engine/
 # only with --install-host-libs, otherwise the assets-root copy.
 VERIFY_ADHOST_DIR="$ADHOST_DIR"
 [ "$INSTALL_HOST_LIBS" = 1 ] || VERIFY_ADHOST_DIR="$SHARED_DIR"

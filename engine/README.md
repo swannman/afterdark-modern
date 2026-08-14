@@ -1,4 +1,4 @@
-# adhost — After Dark runtime hosts
+# engine — After Dark runtime hosts
 
 Two hosts run the **real** After Dark module code under CPU emulation
 (resource_dasm's emulators over `MemoryContext`, with a debug hook intercepting

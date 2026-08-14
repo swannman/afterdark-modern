@@ -336,14 +336,14 @@ static void pf_probe_emulator_opcodes(){
     {ok3, "ADDX/SUBX overflow computed in int32_t, so V is wrong at INT_MIN",
           "resource_dasm master past PR #97 (merged)"},
     {ok4, "SWAP does not set the condition codes (N/Z stale from the previous instruction)",
-          "PR #100, or apply tools/adhost/scratchpad/swap_upstream.diff"},
+          "PR #100"},
     {ok5, "CMPA.W compares at WORD width, so 64K-aligned addresses test equal to zero",
-          "PR #100, or apply tools/adhost/scratchpad/cmpa_upstream.diff"},
+          "PR #100"},
   };
   for(const auto& a : arms) if(!a.ok) fprintf(stderr, "  MISSING: %s\n           remedy: %s\n", a.defect, a.remedy);
   fprintf(stderr,
     "\nUpdate third_party/resource_dasm past PRs #97 (merged) and #100, or check out the PR branch, or\n"
-    "apply the local patches listed in tools/adhost/README.md, then rebuild libresource_file.a and relink.\n\n");
+    "build third_party/resource_dasm from PR #100 (gh pr checkout 100), then rebuild libresource_file.a and relink.\n\n");
 }
 static uint64_t g_pf_dll_base=0;          // [pf] emu.cycles() when the dll# step budget was armed
 static size_t g_sfx_lastN=(size_t)-1;     // [pf] island-set size at the previous frame (early-exit signal)

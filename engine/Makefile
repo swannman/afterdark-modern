@@ -2,7 +2,7 @@
 # the build links their static libraries in place). To build them:
 #   cd ../../third_party/phosg && cmake -S . -B build -DCMAKE_INSTALL_PREFIX=../local && cmake --build build -j8 && cmake --install build
 #   cd ../resource_dasm && cmake -S . -B build -DCMAKE_PREFIX_PATH=../local && cmake --build build --target resource_file m68kdasm resource_dasm -j8
-TP=$(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../../third_party)
+TP=$(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../third_party)
 RD=$(TP)/resource_dasm
 PH=$(TP)/local
 CXX=clang++

@@ -27,14 +27,14 @@ $AD_ASSETS_DIR/shared/AD4Library.rsrc     # rsrc fork of "After Dark 4.0 Library
 
 ### Dev workflow: `--install-host-libs`
 
-The **running hosts** (`tools/adhost/adhost` / `adhost68k`) read the two shared
+The **running hosts** (`engine/adhost` / `adhost68k`) read the two shared
 libraries from their own working directory, not from the assets root — so a
-live dev checkout needs copies at `tools/adhost/ADShared40.pef` and
-`tools/adhost/AD4Library.rsrc`. `adfetch.sh` does **not** write there by
+live dev checkout needs copies at `engine/ADShared40.pef` and
+`engine/AD4Library.rsrc`. `adfetch.sh` does **not** write there by
 default: those two files are gitignored (so `git status` won't show a
 clobber), and a plain run used to silently overwrite a developer's existing
 copies on every invocation. Pass `--install-host-libs` to opt in — it copies
-the assets-root shared libs into `tools/adhost/`, printing the md5 of
+the assets-root shared libs into `engine/`, printing the md5 of
 whatever it overwrites:
 
 ```bash
@@ -71,7 +71,7 @@ different source); it's harmless to repeat.
 It is **idempotent and resumable**: finished downloads and populated trees are
 skipped; partial downloads resume. `--force` re-extracts; `--verify-only`
 re-checks an existing tree (pair it with `--install-host-libs` too if you want
-it to check the `tools/adhost/` copies rather than the assets-root ones).
+it to check the `engine/` copies rather than the assets-root ones).
 
 ## Verification
 

@@ -1,7 +1,7 @@
 # After Dark on Modern macOS — Reverse-Engineering Reference
 
 What the original After Dark modules are, what they expect from the machine
-underneath them, and how the hosts in `tools/adhost` supply it.
+underneath them, and how the hosts in `engine` supply it.
 
 ## Goal and approach
 
@@ -20,9 +20,9 @@ approximate. Executing the original binaries is both less work and exact.
 
 Two hosts, one architecture:
 
-- `tools/adhost/adhost.cc` — PowerPC (`A4gm`) modules on the PPC engine
+- `engine/adhost.cc` — PowerPC (`A4gm`) modules on the PPC engine
   `After Dark 4.0 Shared` (`adxpl510`).
-- `tools/adhost/adhost68k.cc` — 68K (`ADgm`) modules against the classic 68K
+- `engine/adhost68k.cc` — 68K (`ADgm`) modules against the classic 68K
   Toolbox and the 68K After Dark engine (`After Dark 3.0 Faceplate` /
   `After Dark 4.0 Library`).
 
@@ -446,7 +446,7 @@ contents.
 
 ## Host design
 
-`tools/adhost/adhost.cc` builds one emulated address space containing the real
+`engine/adhost.cc` builds one emulated address space containing the real
 engine and the real module and drives the module's own entry point.
 
 1. **Load.** `adxpl510` (`ADShared.pef`) and the module PEF go into one

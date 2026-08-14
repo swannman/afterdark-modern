@@ -83,7 +83,7 @@ public final class ADCatalog {
                 // Catalog paths are relative. The host binary resolves to hostsDir
                 // (dev tree OR bundled Helpers); the workingDir/CWD resolves to the
                 // SHARED-LIBS dir (dev tree OR the downloaded assets/shared) — NOT
-                // literally to the catalog's "tools/adhost", which no longer exists
+                // literally to the catalog's "engine", which no longer exists
                 // in a shipped app. rsrc/dataFork resolve against the assets root
                 // (fetched original bits). See ADPaths.
                 recipe = ADRecipe(host: ADPaths.resolveHost(host),

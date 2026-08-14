@@ -4,7 +4,7 @@ import Combine
 // Scenes that can consume module control values live (without a rebuild).
 
 // Module settings model. Mirrors the control typing of real After Dark modules
-// (see tools/adhost/adhost68k.cc ~5752: 'sVal' slider / 'xVal' checkbox /
+// (see engine/adhost68k.cc ~5752: 'sVal' slider / 'xVal' checkbox /
 // 'mVal' popup menu), so ported modules can expose the same controls the
 // originals defined.
 public struct ADControl: Identifiable, Hashable {
