@@ -1,4 +1,3 @@
-import SpriteKit
 import CoreGraphics
 
 public enum ADFamily: String, Hashable {
@@ -31,20 +30,19 @@ public struct ADModule: Identifiable, Hashable {
     public let name: String
     public let available: Bool
     public let family: ADFamily
-    public let native: Bool            // true => rendered by a native SpriteKit scene
-    public let recipe: ADRecipe?       // non-native => emulated via this recipe
+    public let recipe: ADRecipe?       // launched under emulation via this recipe
     // Module-specific controls shown in the settings inspector, plus the module's
     // original About text and credits line, shown beneath them.
     public let controls: [ADControl]
     public let about: String?
     public let credits: String?
     public init(id: String, name: String, available: Bool,
-                family: ADFamily = .ppc, native: Bool = false,
+                family: ADFamily = .ppc,
                 recipe: ADRecipe? = nil,
                 controls: [ADControl] = [], about: String? = nil,
                 credits: String? = nil) {
         self.id = id; self.name = name; self.available = available
-        self.family = family; self.native = native; self.recipe = recipe
+        self.family = family; self.recipe = recipe
         self.controls = controls; self.about = about; self.credits = credits
     }
     public static func == (l: ADModule, r: ADModule) -> Bool { l.id == r.id }
@@ -54,21 +52,3 @@ public struct ADModule: Identifiable, Hashable {
 // The full module roster, loaded from the bundled catalog (61 68K + 19 PPC).
 public let AD_MODULES: [ADModule] = ADCatalog.shared.modules
 
-// Build the SpriteKit scene for a module at a given size. Only native modules
-// Every module is now emulated (EmulatedModuleView); the native SpriteKit path
-// only ever produces the placeholder. (Flying Toasters used to have a bespoke
-// native scene — it now runs the real emulated 68K module like everything else.)
-public func makeADScene(for module: ADModule, size: CGSize,
-                        settings: [String: Int] = [:]) -> SKScene {
-    let sz = CGSize(width: max(size.width, 320), height: max(size.height, 240))
-    return ComingSoonScene(size: sz, title: module.name)
-}
-
-// Build a scene AND run its setup immediately (for offscreen rendering, where
-// there is no SKView to trigger didMove(to:)).
-public func makeADSceneBegun(for module: ADModule, size: CGSize,
-                             settings: [String: Int] = [:]) -> SKScene {
-    let s = makeADScene(for: module, size: size, settings: settings)
-    (s as? ComingSoonScene)?.begin()
-    return s
-}

@@ -47,7 +47,6 @@ public final class ADCatalog {
         }
         modules = cat.modules.map { jm in
             let fam: ADFamily = (jm.family == "68K") ? .k68 : .ppc
-            let native = jm.native ?? false
             // A module can legitimately expose two controls that share a resource
             // ID across DIFFERENT resource types — e.g. Swirling Magic has both an
             // 'mVal' 1002 (Palette popup) and an 'xVal' 1002 (Magnify Pixies
@@ -79,7 +78,7 @@ public final class ADCatalog {
                                  valueNames: c.valueNames)
             }
             var recipe: ADRecipe? = nil
-            if !native, let host = jm.host, jm.workingDir != nil,
+            if let host = jm.host, jm.workingDir != nil,
                let rsrc = jm.rsrcPath, let args = jm.argsTemplate {
                 // Catalog paths are relative. The host binary resolves to hostsDir
                 // (dev tree OR bundled Helpers); the workingDir/CWD resolves to the
@@ -96,7 +95,7 @@ public final class ADCatalog {
                                   controlEnvVar: jm.controlEnvVar ?? "ADCVSET")
             }
             return ADModule(id: jm.id, name: jm.displayName,
-                            available: true, family: fam, native: native,
+                            available: true, family: fam,
                             recipe: recipe, controls: controls,
                             about: jm.about, credits: jm.credits)
         }

@@ -381,17 +381,15 @@ if moduleId == "--verify" {
     let ppc = all.filter { $0.family == .ppc }
     let k68 = all.filter { $0.family == .k68 }
     print("=== catalog ===")
-    print("total=\(all.count)  PPC=\(ppc.count) (expect 19)  68K=\(k68.count) (expect 61)")
-    let native = all.filter { $0.native }
-    print("native=\(native.count): \(native.map { $0.name }.joined(separator: ", "))")
+    print("total=\(all.count)  PPC=\(ppc.count) (expect 18)  68K=\(k68.count) (expect 62)")
     let withAbout = all.filter { ($0.about?.isEmpty == false) }.count
     let totalControls = all.reduce(0) { $0 + $1.controls.count }
     print("controls parsed total=\(totalControls)  modules with About=\(withAbout)/\(all.count)")
     let noControls = all.filter { $0.controls.isEmpty }
     print("modules with 0 controls=\(noControls.count): \(noControls.map { $0.name }.joined(separator: ", "))")
-    // recipe sanity: every non-native module resolves a host + module file.
+    // recipe sanity: every module resolves a host + module file.
     var badRecipe: [String] = []
-    for m in all where !m.native {
+    for m in all {
         guard let r = m.recipe else { badRecipe.append("\(m.name)(no recipe)"); continue }
         if !FileManager.default.fileExists(atPath: r.host) { badRecipe.append("\(m.name)(no host)") }
         let modFile = r.dataForkPath ?? r.rsrcPath
@@ -401,66 +399,8 @@ if moduleId == "--verify" {
     exit(0)
 }
 
-guard let module = AD_MODULES.first(where: { $0.id == moduleId }) else {
-    FileHandle.standardError.write("unknown module \(moduleId)\n".data(using: .utf8)!); exit(1)
-}
-guard let device = MTLCreateSystemDefaultDevice(),
-      let queue = device.makeCommandQueue() else {
-    FileHandle.standardError.write("no Metal device\n".data(using: .utf8)!); exit(1)
-}
-
-let size = CGSize(width: W, height: H)
-let scene = makeADSceneBegun(for: module, size: size, settings: ctlSettings)
-let renderer = SKRenderer(device: device)
-renderer.scene = scene
-
-// Offscreen color target.
-let td = MTLTextureDescriptor.texture2DDescriptor(
-    pixelFormat: .rgba8Unorm, width: W, height: H, mipmapped: false)
-td.usage = [.renderTarget, .shaderRead]
-// .shared, not .managed: on Apple-silicon GPUs managed textures don't round-trip
-// through getBytes (blit synchronize is a no-op), which reads back all-black.
-td.storageMode = .shared
-let target = device.makeTexture(descriptor: td)!
-
-var simTime = 0.0
-renderer.update(atTime: 0)
-
-func renderPNG(at t: Double, to path: String) {
-    // Step the scene forward (never backward) to absolute time t so actions
-    // advance smoothly across a whole sequence.
-    let step = 1.0 / 60.0
-    while simTime < t {
-        simTime = min(simTime + step, t)
-        renderer.update(atTime: simTime)
-    }
-    let rpd = MTLRenderPassDescriptor()
-    rpd.colorAttachments[0].texture = target
-    rpd.colorAttachments[0].loadAction = .clear
-    rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-    rpd.colorAttachments[0].storeAction = .store
-    let cb = queue.makeCommandBuffer()!
-    let viewport = CGRect(x: 0, y: 0, width: W, height: H)
-    renderer.render(withViewport: viewport, commandBuffer: cb, renderPassDescriptor: rpd)
-    cb.commit()
-    cb.waitUntilCompleted()
-
-    var raw = [UInt8](repeating: 0, count: W * H * 4)
-    target.getBytes(&raw, bytesPerRow: W * 4,
-                    from: MTLRegionMake2D(0, 0, W, H), mipmapLevel: 0)
-    // Metal texture origin is top-left already for our render; build CGImage.
-    let cs = CGColorSpaceCreateDeviceRGB()
-    let ctx = CGContext(data: &raw, width: W, height: H, bitsPerComponent: 8,
-                        bytesPerRow: W * 4, space: cs,
-                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-    let img = ctx.makeImage()!
-    let url = URL(fileURLWithPath: path)
-    let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil)!
-    CGImageDestinationAddImage(dest, img, nil)
-    CGImageDestinationFinalize(dest)
-    FileHandle.standardError.write("wrote \(path)\n".data(using: .utf8)!)
-}
-
-for t in times {
-    renderPNG(at: t, to: "\(outPrefix)_t\(Int(t*1000)).png")
-}
+// addm 806: the legacy SpriteKit scene renderer is gone — every module runs the real
+// emulated code, so there is no scene to render offscreen. The real modes are above
+// (--smoke, --verify, --verify-emulation, ...).
+FileHandle.standardError.write("adrender: unknown mode. Use --smoke <module> <secs>, --verify, or --verify-emulation.\n".data(using: .utf8)!)
+exit(2)

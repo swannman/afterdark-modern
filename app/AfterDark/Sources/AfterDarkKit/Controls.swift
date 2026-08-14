@@ -1,11 +1,7 @@
 import Foundation
 import Combine
-import SpriteKit
 
 // Scenes that can consume module control values live (without a rebuild).
-public protocol ADConfigurableScene: SKScene {
-    func apply(settings: [String: Int])
-}
 
 // Module settings model. Mirrors the control typing of real After Dark modules
 // (see tools/adhost/adhost68k.cc ~5752: 'sVal' slider / 'xVal' checkbox /

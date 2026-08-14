@@ -1,5 +1,4 @@
 import SwiftUI
-import SpriteKit
 import AfterDarkKit
 
 @main
@@ -104,11 +103,11 @@ struct MainWindow: View {
             Section(title) {
                 ForEach(mods) { m in
                     HStack(spacing: 8) {
-                        Image(systemName: m.native ? "star.circle.fill" : "play.circle")
-                            .foregroundStyle(m.native ? .yellow : .green)
+                        Image(systemName: "play.circle")
+                            .foregroundStyle(.green)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(m.name)
-                            Text(m.native ? "Native" : m.family.caption)
+                            Text(m.family.caption)
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
@@ -161,45 +160,23 @@ struct DurationBar: View {
     }
 }
 
-// Chooses the native SpriteKit scene or the emulated host preview for a module.
+// Every module runs the REAL emulated After Dark code — there is no native or
+// placeholder rendering path (the last one, a bespoke Flying Toasters scene, was
+// deleted at addm 737; the SpriteKit machinery it rode on was removed at addm 806).
 struct ModuleDetail: View {
     let module: ADModule
     @ObservedObject var settings: ADSettingsStore
 
     var body: some View {
-        if module.native {
-            ModuleView(module: module, settings: settings)
-        } else if module.recipe != nil {
+        if module.recipe != nil {
             EmulatedModuleView(module: module, settings: settings)
         } else {
-            ModuleView(module: module, settings: settings)   // placeholder scene
+            // A module with no launch recipe (assets missing) — nothing to run.
+            ZStack {
+                Color.black
+                Text("\(module.name): assets not available")
+                    .foregroundStyle(.secondary)
+            }
         }
-    }
-}
-
-struct ModuleView: View {
-    let module: ADModule
-    @ObservedObject var settings: ADSettingsStore
-    @State private var scene: SKScene?
-
-    var body: some View {
-        GeometryReader { geo in
-            SpriteView(scene: currentScene(size: geo.size),
-                       options: [.ignoresSiblingOrder])
-                .background(Color.black)
-                .onChange(of: settings.values) {
-                    // Live-apply new control values to the running scene.
-                    (scene as? ADConfigurableScene)?
-                        .apply(settings: settings.snapshot(for: module))
-                }
-        }
-    }
-
-    private func currentScene(size: CGSize) -> SKScene {
-        if let s = scene { return s }
-        let s = makeADScene(for: module, size: size,
-                            settings: settings.snapshot(for: module))
-        DispatchQueue.main.async { scene = s }
-        return s
     }
 }

@@ -1,19 +1,21 @@
-# AfterDark (native app)
+# AfterDark (app)
 
-SwiftUI + SpriteKit macOS app. A sidebar module picker; the selected module runs
-in a resizable / fullscreen-capable window. Flying Toasters is implemented with
-the real decoded sprites; other modules show a placeholder for now.
+SwiftUI macOS app: a sidebar module picker; the selected module runs in a
+resizable/fullscreen window. **Every module runs the real emulated After Dark
+code** via `EmulatedHost` (which drives the `tools/adhost` hosts) — there is no
+native reimplementation or placeholder rendering of any module.
 
-## Run it
+```bash
+swift run AfterDark          # first launch downloads assets, then the picker
+./make_app.sh                # or build a standalone AfterDark.app bundle
 ```
-cd app/AfterDark
-./make_app.sh          # builds AfterDark.app (a real launchable bundle)
-open AfterDark.app     # pick a module in the sidebar; resize / green-button fullscreen
-```
-A bare `swift run` won't show a window (SwiftUI needs an .app bundle) — use `make_app.sh`.
 
-## Targets
-- **AfterDarkKit** — scenes, sprite loader, decoded sprite resources.
-- **AfterDark** — the SwiftUI app.
-- **adrender** — headless Metal renderer (`adrender <module> <outPrefix> <w> <h> <t0,t1,…>`),
-  used to verify/preview scenes without a display.
+Global preferences: the **Duration** slider under the module list (the real
+control panel's 13-stop ladder, "15 sec." to "Forever!") sets how often a
+running module re-initializes, exactly as After Dark's Duration did. Caps Lock
+reaches every module that listens for it (Time Flies changes clock type,
+Rodger Dodger enters play mode, ...).
+
+Targets: **AfterDarkKit** (EmulatedHost, catalog, first-run download, views),
+**AfterDark** (the app), **adrender** (headless: `--smoke <module> <secs>` drives a
+module through the full pipeline; `--verify` checks the catalog/recipes).
