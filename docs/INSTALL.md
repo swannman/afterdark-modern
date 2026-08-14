@@ -12,9 +12,11 @@ The download contains two things:
 
 Move `AfterDark.app` somewhere permanent (e.g. `/Applications`), then open it.
 
-The releases are not notarized, so on first launch macOS will refuse to open
-the app. Either **right-click the app → Open → Open**, or clear the quarantine
-flag in Terminal:
+Signed releases are notarized by Apple and open normally. If you grabbed an
+unsigned CI artifact or built from source and macOS refuses to open it, either
+**right-click the app → Open → Open** (macOS 14), approve it under System
+Settings → Privacy & Security → "Open Anyway" (macOS 15+), or clear the
+quarantine flag in Terminal:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/AfterDark.app

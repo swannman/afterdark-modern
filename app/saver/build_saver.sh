@@ -65,13 +65,21 @@ for h in adhost68k adhost; do
     [ -n "$extra" ] && { echo "WARNING: $h has non-system dylib deps:" >&2; echo "$extra" >&2; }
 done
 
-# --- Sign: hosts first (inner Mach-Os), then the bundle with entitlements ------
-sign() { codesign --force --options runtime --timestamp=none "$@" 2>/dev/null \
-         || codesign --force "${@/--sign $SIGN_ID/--sign -}"; }
-codesign --force --sign "$SIGN_ID" --options runtime --timestamp=none "$RES/adhost68k" "$RES/adhost" \
+# --- Sign: hosts first (inner Mach-Os), then the bundle -----------------------
+# A "Developer ID Application" identity signs for distribution: hardened runtime,
+# trusted timestamp, and NO entitlements — get-task-allow fails notarization, and
+# the app-group entitlement never took effect on an MH_BUNDLE anyway (the sidecar
+# handoff is the real channel). Dev identities keep the entitlements so the
+# debugger/harness can still attach.
+case "$SIGN_ID" in
+  "Developer ID"*) SIGN_OPTS=(--options runtime --timestamp); ENT=() ;;
+  *)               SIGN_OPTS=(--options runtime --timestamp=none)
+                   ENT=(--entitlements AfterDark.entitlements) ;;
+esac
+codesign --force --sign "$SIGN_ID" "${SIGN_OPTS[@]}" "$RES/adhost68k" "$RES/adhost" \
   || codesign --force --sign - "$RES/adhost68k" "$RES/adhost"
-codesign --force --sign "$SIGN_ID" --entitlements AfterDark.entitlements --timestamp=none "$OUT" \
-  || codesign --force --sign - --entitlements AfterDark.entitlements "$OUT"
+codesign --force --sign "$SIGN_ID" "${SIGN_OPTS[@]}" "${ENT[@]}" "$OUT" \
+  || codesign --force --sign - "${ENT[@]}" "$OUT"
 
 echo "== built $OUT =="
 codesign -dvv "$OUT" 2>&1 | grep -E 'Identifier|Authority|TeamIdentifier' | head

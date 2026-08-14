@@ -14,20 +14,24 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$BIN/AfterDark" "$APP/Contents/MacOS/AfterDark"
 # Bundle.module resolves the resource bundle relative to the executable's dir.
-cp -R "$BIN/AfterDark_AfterDarkKit.bundle" "$APP/Contents/MacOS/" 2>/dev/null || \
-  cp -R "$BIN"/*_AfterDarkKit.bundle "$APP/Contents/MacOS/"
+# The SwiftPM resource bundle lives in Contents/Resources (NOT Contents/MacOS):
+# Bundle.module's generated accessor checks Bundle.main.resourceURL first, and
+# codesign refuses non-code bundles inside the code directory, which would make
+# the app unsignable/un-notarizable.
+cp -R "$BIN/AfterDark_AfterDarkKit.bundle" "$APP/Contents/Resources/" 2>/dev/null || \
+  cp -R "$BIN"/*_AfterDarkKit.bundle "$APP/Contents/Resources/"
 
 # Bundle the first-run downloader (adfetch + its manifest/verify/sources) inside
 # the app so a distributed .app can acquire the original assets on first launch.
-# FirstRunManager looks here first (Contents/Helpers/adfetch/adfetch.sh), then
+# FirstRunManager looks here first (Contents/Resources/adfetch/adfetch.sh), then
 # falls back to a dev checkout's tools/adfetch. verify_manifest.SH (not the .py
 # twin) is what ships: the download path must not need python3.
 ADFETCH_SRC="$(cd ../../tools/adfetch && pwd)"
-mkdir -p "$APP/Contents/Helpers/adfetch"
+mkdir -p "$APP/Contents/Resources/adfetch"
 cp "$ADFETCH_SRC/adfetch.sh" "$ADFETCH_SRC/sources.conf" \
    "$ADFETCH_SRC/assets.manifest.json" "$ADFETCH_SRC/verify_manifest.sh" \
    "$ADFETCH_SRC/manifest.sh" \
-   "$APP/Contents/Helpers/adfetch/"
+   "$APP/Contents/Resources/adfetch/"
 
 # Bundle the EXTRACTION TOOLS adfetch drives (unar + hfsutils' hmount/hcd/hls/
 # hcopy/humount), built from source by tools/get_extractors.sh, so a downloaded
@@ -74,7 +78,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <dict>
   <key>CFBundleName</key><string>After Dark</string>
   <key>CFBundleDisplayName</key><string>After Dark 4.0</string>
-  <key>CFBundleIdentifier</key><string>com.local.afterdark</string>
+  <key>CFBundleIdentifier</key><string>com.swannman.afterdark</string>
   <key>CFBundleVersion</key><string>0.1</string>
   <key>CFBundleShortVersionString</key><string>0.1</string>
   <key>CFBundlePackageType</key><string>APPL</string>
@@ -86,24 +90,27 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-# Sign every Mach-O we bundle (hosts + extraction tools). AD_SIGN_ID overrides
-# the identity (same convention as saver/build_saver.sh); with no usable identity
-# we fall back to an ad-hoc signature, which is all a local dev build needs.
-#
-# The .app itself is NOT sealed here: codesign refuses the SwiftPM resource
-# bundle in Contents/MacOS ("bundle format unrecognized" — it is a flat bundle
-# with resources at its root), so an app-level signature needs that layout
-# reworked first. Developer-ID + hardened runtime + notarization are the same
-# open distribution follow-up.
+# Sign every Mach-O we bundle (hosts + extraction tools), then seal the whole
+# app. AD_SIGN_ID overrides the identity (same convention as
+# app/saver/build_saver.sh); with no usable identity we fall back to ad-hoc,
+# which is all a local dev build needs. A "Developer ID Application" identity
+# gets the hardened runtime + a trusted timestamp — the shape notarization
+# requires.
 SIGN_ID="${AD_SIGN_ID:--}"
-sign(){ codesign --force --sign "$SIGN_ID" --timestamp=none "$@" 2>/dev/null \
+case "$SIGN_ID" in
+  "Developer ID"*) SIGN_OPTS=(--options runtime --timestamp) ;;
+  *)               SIGN_OPTS=(--timestamp=none) ;;
+esac
+sign(){ codesign --force --sign "$SIGN_ID" "${SIGN_OPTS[@]}" "$@" 2>/dev/null \
         || codesign --force --sign - "$@"; }
 for h in "$APP/Contents/Helpers"/adhost68k "$APP/Contents/Helpers"/adhost \
          "$APP/Contents/Helpers/bin"/*; do
   sign "$h"
   codesign --verify --strict "$h" || { echo "ERROR: $h failed signature verify" >&2; exit 1; }
 done
-echo "codesign: hosts + extraction tools signed ($SIGN_ID)"
+sign "$APP"
+codesign --verify --strict "$APP" || { echo "ERROR: app seal failed verify" >&2; exit 1; }
+echo "codesign: hosts + extraction tools + app sealed ($SIGN_ID)"
 
 echo "Built $PWD/$APP"
 echo "Run it with:  open '$PWD/$APP'"

@@ -167,8 +167,8 @@ public final class FirstRunManager: ObservableObject {
     // MARK: - adfetch location
     private func adfetchScript() -> String? {
         let fm = FileManager.default
-        // 1. Bundled inside the .app (Contents/Helpers/adfetch/adfetch.sh).
-        let bundled = "\(Bundle.main.bundlePath)/Contents/Helpers/adfetch/adfetch.sh"
+        // 1. Bundled inside the .app (Contents/Resources/adfetch/adfetch.sh).
+        let bundled = "\(Bundle.main.bundlePath)/Contents/Resources/adfetch/adfetch.sh"
         if fm.fileExists(atPath: bundled) { return bundled }
         // 2. Dev checkout: repoRoot/tools/adfetch/adfetch.sh.
         let dev = "\(ADPaths.repoRoot)/tools/adfetch/adfetch.sh"

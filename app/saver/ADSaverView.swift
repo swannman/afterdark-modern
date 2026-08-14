@@ -29,7 +29,7 @@ public final class ADSaverView: ScreenSaverView {
     // right here in the configure sheet, shared bidirectionally with the app.
     private let saverSettings = ADSaverSettings()
 
-    private let log = Logger(subsystem: "com.afterdark.saver", category: "view")
+    private let log = Logger(subsystem: "com.swannman.afterdark.saver", category: "view")
 
     private var modules: [ADModule] = []
     private var haveAssets = false
@@ -81,7 +81,7 @@ public final class ADSaverView: ScreenSaverView {
 
     // MARK: - Selection
     private func defaultsStore() -> UserDefaults? {
-        let id = Bundle(for: ADSaverView.self).bundleIdentifier ?? "com.afterdark.saver"
+        let id = Bundle(for: ADSaverView.self).bundleIdentifier ?? "com.swannman.afterdark.saver"
         return ScreenSaverDefaults(forModuleWithName: id)
     }
 

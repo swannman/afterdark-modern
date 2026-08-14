@@ -7,7 +7,7 @@
     <key>CFBundleExecutable</key>
     <string>AfterDark</string>
     <key>CFBundleIdentifier</key>
-    <string>com.afterdark.saver</string>
+    <string>com.swannman.afterdark.saver</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
