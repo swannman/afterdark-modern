@@ -15,7 +15,6 @@ import os
 public final class ADSaverView: ScreenSaverView {
 
     // MARK: Preferences (shared cross-process via ScreenSaverDefaults)
-    private static let kSelection = "ADSelectedModule"   // module id, or kCycleAll
     private static let kCycleAll  = "__cycle_all__"
 
     // The module rotation runs on the user's Duration preference (see ADDuration
@@ -80,17 +79,16 @@ public final class ADSaverView: ScreenSaverView {
     }
 
     // MARK: - Selection
-    private func defaultsStore() -> UserDefaults? {
-        let id = Bundle(for: ADSaverView.self).bundleIdentifier ?? "com.swannman.afterdark.saver"
-        return ScreenSaverDefaults(forModuleWithName: id)
-    }
-
-    // The emulated (non-native, recipe-backed) roster in catalog order.
+    // The recipe-backed roster in catalog order.
     private var emulatable: [ADModule] { modules.filter { $0.available && $0.recipe != nil } }
 
     // Resolve the current selection into either a single module or the cycle list.
+    // The selection lives in the SHARED settings document, not ScreenSaverDefaults:
+    // the Options sheet and the running saver can be different processes whose
+    // preference domains never meet (the write literally vanishes into the sheet
+    // host's sandbox), while the document is one absolute path every process shares.
     private func resolveSelection() {
-        let sel = defaultsStore()?.string(forKey: Self.kSelection) ?? Self.kCycleAll
+        let sel = saverSettings.selection ?? Self.kCycleAll
         if sel == Self.kCycleAll {
             cycling = true
             cycleList = emulatable
@@ -168,7 +166,54 @@ public final class ADSaverView: ScreenSaverView {
            Date().timeIntervalSince(moduleStartedAt) >= TimeInterval(durationSeconds) {
             startModule(at: cycleIndex + 1)
         }
+        pollSharedSettings()
         setNeedsDisplay(bounds)
+    }
+
+    // The Options sheet may run in ANOTHER process (System Settings hosts it there),
+    // so a running saver learns about edits only from the shared document. Stat the
+    // two document paths every couple of seconds; on any mtime change, re-read and
+    // apply: selection/duration changes re-resolve the rotation, control-value
+    // changes reach the live host (PPC applies in place; 68K respawns, exactly like
+    // the app's inspector).
+    private var lastSettingsPoll = Date.distantPast
+    private var lastSettingsMTime: Date = .distantPast
+    private func pollSharedSettings() {
+        guard host != nil, Date().timeIntervalSince(lastSettingsPoll) >= 2 else { return }
+        lastSettingsPoll = Date()
+        let fm = FileManager.default
+        var newest = Date.distantPast
+        for p in [ADSharedSettings.primaryPath(), ADSharedSettings.mirrorPath()].compactMap({ $0 }) {
+            if let m = (try? fm.attributesOfItem(atPath: p))?[.modificationDate] as? Date, m > newest {
+                newest = m
+            }
+        }
+        guard newest > lastSettingsMTime else { return }
+        let firstPoll = lastSettingsMTime == .distantPast
+        lastSettingsMTime = newest
+        if firstPoll { return }   // baseline only — don't restart on the first sight
+
+        let oldSelection = saverSettings.selection ?? Self.kCycleAll
+        let currentModule = cycleList.indices.contains(cycleIndex) ? cycleList[cycleIndex] : nil
+        let oldValues = currentModule.map { saverSettings.snapshot(for: $0) }
+        saverSettings.reload()
+        durationSeconds = saverSettings.durationSeconds(sidecarFallback: sidecarDuration)
+
+        let newSelection = saverSettings.selection ?? Self.kCycleAll
+        if newSelection != oldSelection {
+            log.info("selection changed -> \(newSelection, privacy: .public)")
+            resolveSelection()
+            startModule(at: 0)
+            return
+        }
+        // Re-arm the host's duration semantics in case Duration changed.
+        EmulatedHost.durationSeconds = (cycling && cycleList.count > 1)
+            ? ADDuration.forever
+            : durationSeconds
+        if let m = currentModule, let old = oldValues {
+            let new = saverSettings.snapshot(for: m)
+            if new != old { host?.updateSettings(new) }
+        }
     }
 
     // MARK: - Draw
@@ -225,27 +270,30 @@ public final class ADSaverView: ScreenSaverView {
     // MARK: - Configure sheet (the control panel)
     public override var hasConfigureSheet: Bool { true }
 
+    // ONE controller (and window) per view, reused across opens — System Settings'
+    // sheet host wedges when a saver hands it a fresh window each time. The
+    // controller refreshes its content from the document on every open.
     private var configController: ADConfigController?
     public override var configureSheet: NSWindow? {
-        saverSettings.reload()   // absorb app-side edits made since load
-        let ctl = ADConfigController(
+        saverSettings.reload()   // absorb edits from the app / another process
+        let ctl = configController ?? ADConfigController(
             modules: emulatable,
             settings: saverSettings,
-            currentSelection: defaultsStore()?.string(forKey: Self.kSelection) ?? Self.kCycleAll,
-            cycleAllTag: Self.kCycleAll,
-            currentDuration: saverSettings.durationSeconds(sidecarFallback: sidecarDuration)
+            cycleAllTag: Self.kCycleAll
         ) { [weak self] chosen, duration in
             guard let self else { return }
-            self.defaultsStore()?.set(chosen, forKey: Self.kSelection)
-            self.defaultsStore()?.synchronize()
+            // OK already persisted the document; apply to THIS instance if it is
+            // the one animating (when the sheet runs in the saver's own process).
             self.durationSeconds = duration
-            // Apply immediately if animating.
+            self.saverSettings.reload()
             if self.host != nil {
                 self.resolveSelection()
                 self.startModule(at: 0)
             }
         }
-        configController = ctl        // retain while the sheet is up
+        configController = ctl
+        ctl.refresh(currentSelection: saverSettings.selection ?? Self.kCycleAll,
+                    currentDuration: saverSettings.durationSeconds(sidecarFallback: sidecarDuration))
         return ctl.window
     }
 }
@@ -271,8 +319,8 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
     private let aboutText = NSTextField(wrappingLabelWithString: "")
     private var rows: [ADControlRow] = []
 
-    init(modules: [ADModule], settings: ADSaverSettings, currentSelection: String,
-         cycleAllTag: String, currentDuration: Int,
+    init(modules: [ADModule], settings: ADSaverSettings,
+         cycleAllTag: String,
          onDone: @escaping (String, Int) -> Void) {
         self.modules = modules
         self.settings = settings
@@ -339,8 +387,6 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
             durationPopup.lastItem?.tag = stop.seconds
         }
         durationPopup.frame = NSRect(x: 86, y: 52, width: 130, height: 26)
-        durationPopup.selectItem(withTag: currentDuration)
-        if durationPopup.selectedItem == nil { durationPopup.selectItem(withTag: ADDuration.defaultSeconds) }
 
         let defaults = NSButton(title: "Use Defaults", target: self, action: #selector(useDefaults))
         defaults.frame = NSRect(x: 252, y: 50, width: 120, height: 32)
@@ -366,7 +412,16 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
         cv.addSubview(cancel)
         cv.addSubview(ok)
 
-        // Restore selection state.
+        refresh(currentSelection: cycleAllTag, currentDuration: ADDuration.defaultSeconds)
+    }
+
+    // (Re)load the sheet's state from the settings document. Called on every open,
+    // so a reused window never shows stale values.
+    func refresh(currentSelection: String, currentDuration: Int) {
+        durationPopup.selectItem(withTag: currentDuration)
+        if durationPopup.selectedItem == nil { durationPopup.selectItem(withTag: ADDuration.defaultSeconds) }
+        table.reloadData()
+        suppressSelectionCallback = true
         if currentSelection == cycleAllTag {
             randomize.state = .on
             table.selectRowIndexes([0], byExtendingSelection: false)
@@ -378,6 +433,7 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
             randomize.state = .on
             table.selectRowIndexes([0], byExtendingSelection: false)
         }
+        suppressSelectionCallback = false
         showControls(for: selectedModule())
     }
 
@@ -400,7 +456,12 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
         ])
         return cell
     }
+    private var suppressSelectionCallback = false
     func tableViewSelectionDidChange(_ notification: Notification) {
+        // A deliberate click on a module row means "run THIS module": drop out of
+        // Randomize, or the row choice would be silently ignored at OK. (Programmatic
+        // selection during refresh() doesn't count.)
+        if !suppressSelectionCallback { randomize.state = .off }
         showControls(for: selectedModule())
     }
 
@@ -451,6 +512,7 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
         }
         let duration = durationPopup.selectedItem?.tag ?? ADDuration.defaultSeconds
         if duration != settings.doc.durationSeconds { settings.setDuration(duration) }
+        settings.setSelection(chosen)
         settings.save()
         onDone(chosen, duration)
         endSheet()
@@ -461,12 +523,14 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
     }
 
     private func endSheet() {
+        // Both dismissal paths AND an explicit orderOut: leaving the window attached
+        // is what wedges System Settings' sheet host into never opening it again.
         if let parent = window.sheetParent {
             parent.endSheet(window)
         } else {
             NSApp.endSheet(window)
-            window.orderOut(nil)
         }
+        window.orderOut(nil)
     }
 }
 

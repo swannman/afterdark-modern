@@ -247,6 +247,12 @@ public final class ADSaverSettings {
         doc.setDuration(seconds)
     }
 
+    public func setSelection(_ moduleId: String) {
+        doc.setSelection(moduleId)
+    }
+
+    public var selection: String? { doc.selectedModule }
+
     public func save() {
         ADSharedSettings.saveFromSaver(doc)
     }

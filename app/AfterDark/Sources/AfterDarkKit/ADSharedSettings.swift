@@ -20,6 +20,12 @@ import Darwin   // getpwuid/getuid — the REAL home, unaffected by appex $HOME 
 public struct ADSharedSettings: Codable {
     public var durationSeconds: Int?
     public var durationStamp: Double
+    // The saver's module selection: a module id, "__cycle_all__", or nil (never
+    // chosen -> cycle-all). Lives here — NOT in ScreenSaverDefaults — because the
+    // sheet host and the running saver can be different processes with different
+    // preference sandboxes; this document is the one store every process shares.
+    public var selectedModule: String?
+    public var selectionStamp: Double?
     // Flat control values, "moduleId.controlId" -> value (ADSettingsStore's shape).
     public var values: [String: Int]
     // moduleId -> last edit time for that module's values.
@@ -85,6 +91,10 @@ public struct ADSharedSettings: Codable {
                 out.durationSeconds = d.durationSeconds
                 out.durationStamp = d.durationStamp
             }
+            if d.selectedModule != nil, (d.selectionStamp ?? 0) >= (out.selectionStamp ?? -1) {
+                out.selectedModule = d.selectedModule
+                out.selectionStamp = d.selectionStamp ?? 0
+            }
             for (mod, stamp) in d.moduleStamps where stamp >= (out.moduleStamps[mod] ?? -1) {
                 out.moduleStamps[mod] = stamp
                 let prefix = mod + "."
@@ -114,6 +124,11 @@ public struct ADSharedSettings: Codable {
     public mutating func setDuration(_ seconds: Int, at time: Double = Date().timeIntervalSince1970) {
         durationSeconds = seconds
         durationStamp = time
+    }
+
+    public mutating func setSelection(_ moduleId: String, at time: Double = Date().timeIntervalSince1970) {
+        selectedModule = moduleId
+        selectionStamp = time
     }
 
     // MARK: - Process-level load/save
