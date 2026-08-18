@@ -15,14 +15,11 @@ Toolbox traps):
 
 ## Build
 
-`make` (see the Makefile header for the third_party dependency build). Build
-resource_dasm at the pinned pre-rewrite revision the corpus is validated
-against (`git checkout 2fcd907`, then merge PR #100 — the same recipe CI
-uses). The 2026 M68KEmulator rewrite on current master is close but not yet
-equivalent: PR #102 fixes its three decode/PEA bugs, and two modules still
-diverge beyond that. The 68K host probes the emulator at startup and warns,
-naming any missing fix, then runs anyway; the PowerPC host is correct on any
-of these revisions.
+`make` (see the Makefile header for the third_party dependency build). Plain
+resource_dasm master works: the 2026 M68KEmulator rewrite plus the fix PRs
+(#102, #103, both merged) is validated against the full module corpus. The
+68K host probes the emulator at startup and warns, naming any missing fix,
+then runs anyway; the PowerPC host is correct on the same revisions.
 
 ## Running
 

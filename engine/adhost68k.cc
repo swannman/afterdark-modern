@@ -338,11 +338,15 @@ static void pf_probe_emulator_opcodes(){
   const uint16_t w8[]={0x486F,0x0004,0x205F};
   bool ok8=stepN([](M68KEmulator&){}, w8,3,
                 [](M68KEmulator& e){ auto&r=e.registers(); return r.a[0]==r.a[7]+4; }, 2);
-  const bool all_ok = ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8;
+  // 9) exg D0,A5 — the rewrite's first release exchanged the TRANSPOSED registers (D5<->A0).
+  const uint16_t w9[]={0xC18D};
+  bool ok9=step([](M68KEmulator& e){ auto&r=e.registers(); r.d[0].u=0x11111111; r.a[5]=0x22222222; }, w9,1,
+                [](M68KEmulator& e){ auto&r=e.registers(); return r.d[0].u==0x22222222 && r.a[5]==0x11111111; });
+  const bool all_ok = ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9;
   if(getenv("ADLEANLOG"))
-    fprintf(stderr,"[pf] emulator opcode probe: EXTB.L=%s bitfield-reg=%s ADDX/SUBX-V=%s SWAP-ccr=%s CMPA.W-width=%s byte-imm=%s btst-imm=%s pea-A7=%s -> %s\n",
+    fprintf(stderr,"[pf] emulator opcode probe: EXTB.L=%s bitfield-reg=%s ADDX/SUBX-V=%s SWAP-ccr=%s CMPA.W-width=%s byte-imm=%s btst-imm=%s pea-A7=%s exg=%s -> %s\n",
             ok1?"ok":"MISSING", ok2?"ok":"MISSING", ok3?"ok":"MISSING", ok4?"ok":"MISSING", ok5?"ok":"MISSING",
-            ok6?"ok":"MISSING", ok7?"ok":"MISSING", ok8?"ok":"MISSING",
+            ok6?"ok":"MISSING", ok7?"ok":"MISSING", ok8?"ok":"MISSING", ok9?"ok":"MISSING",
             all_ok?"emulator is complete (no host shims exist)":"INCOMPLETE (warned; running anyway)");
   if(all_ok) return;
   // Name every missing fix and the remedy for it. This is the whole diagnosis: whoever hits this is almost
@@ -364,16 +368,18 @@ static void pf_probe_emulator_opcodes(){
     {ok5, "CMPA.W compares at WORD width, so 64K-aligned addresses test equal to zero",
           "resource_dasm master past the 2026 M68KEmulator rewrite"},
     {ok6, "every nonzero byte immediate decodes as invalid (mask tested the wrong half of the extension word)",
-          "PR #102"},
+          "resource_dasm master past PR #102 (merged)"},
     {ok7, "immediate btst/bchg/bclr/bset read the EA extension before the bit-number word",
           "PR #102"},
     {ok8, "pea (d16,A7) pushes an address 4 bytes too low (EA resolved after the predecrement)",
           "PR #102"},
+    {ok9, "exg Dx,Ay exchanges the transposed registers (D<a>/A<d> instead of D<d>/A<a>)",
+          "PR #103"},
   };
   for(const auto& a : arms) if(!a.ok) fprintf(stderr, "  MISSING: %s\n           remedy: %s\n", a.defect, a.remedy);
   fprintf(stderr,
-    "\nUpdate third_party/resource_dasm to a master that includes the 2026 M68KEmulator rewrite AND\n"
-    "PR #102 (gh pr checkout 102 until it merges), then rebuild libresource_file.a and relink.\n\n");
+    "\nUpdate third_party/resource_dasm to current master (all listed fixes are merged upstream),\n"
+    "then rebuild libresource_file.a and relink.\n\n");
 }
 static uint64_t g_pf_dll_base=0;          // [pf] emu.cycles() when the dll# step budget was armed
 static size_t g_sfx_lastN=(size_t)-1;     // [pf] island-set size at the previous frame (early-exit signal)

@@ -15,16 +15,16 @@ jobs:
 
       # The emulator dependency (resource_dasm + phosg) rarely changes; cache the
       # built libraries keyed on the upstream revisions we build against.
-      # Pinned to the last pre-rewrite master + the PR #100 fixes — the exact emulator
-      # the corpus is validated against. The M68KEmulator rewrite (2026-08) is close
-      # but still diverges on two modules (PR #102 has our first three fixes); move
-      # the pin forward once the corpus matches it everywhere.
+      # Plain upstream master: the 2026 M68KEmulator rewrite plus the fix PRs
+      # (#102, #103) is corpus-validated — 88/88 modules byte-identical to the
+      # previous emulator (two of them corrected: movem.w sign-extension and
+      # register shift counts mod 64).
       - name: Resolve emulator revision
         id: rd
         run: |
           key=$(git ls-remote https://github.com/fuzziqersoftware/resource_dasm \
-                  refs/pull/100/head | shasum | cut -c1-16)
-          echo "key=pre-rewrite-2fcd907-$key" >> "$GITHUB_OUTPUT"
+                  refs/heads/master | shasum | cut -c1-16)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
 
       - name: Cache third_party
         uses: actions/cache@v4
@@ -37,11 +37,6 @@ jobs:
           if [ ! -f third_party/resource_dasm/build/libresource_file.a ]; then
             git clone https://github.com/fuzziqersoftware/phosg third_party/phosg
             git clone https://github.com/fuzziqersoftware/resource_dasm third_party/resource_dasm
-            # Pre-rewrite master + the PR #100 fixes (see the pin note above).
-            (cd third_party/resource_dasm \
-              && git checkout 2fcd907 \
-              && git -c user.email=ci@localhost -c user.name=ci fetch origin pull/100/head \
-              && git -c user.email=ci@localhost -c user.name=ci merge --no-edit FETCH_HEAD)
             (cd third_party/phosg && cmake -S . -B build -DCMAKE_INSTALL_PREFIX=../local \
               && cmake --build build -j4 && cmake --install build)
             (cd third_party/resource_dasm && cmake -S . -B build -DCMAKE_PREFIX_PATH=../local \
