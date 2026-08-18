@@ -272,8 +272,8 @@ static uint64_t g_pf_cycle_debt=0;
 static const uint16_t PF_NULLRTS_TRAP=0xAFFD;
 static void pf_probe_emulator_opcodes(){
   const uint32_t B=0x00200000;
-  auto step=[&](std::function<void(M68KEmulator&)> setup, const uint16_t* words, size_t n,
-                std::function<bool(M68KEmulator&)> check)->bool{
+  auto stepN=[&](std::function<void(M68KEmulator&)> setup, const uint16_t* words, size_t n,
+                std::function<bool(M68KEmulator&)> check, int insns)->bool{
     try{
       auto m=std::make_shared<MemoryContext>();
       m->allocate_at(B,0x200);
@@ -282,10 +282,14 @@ static void pf_probe_emulator_opcodes(){
       auto& r=e.registers(); r.pc=B; r.a[7]=B+0x180;
       setup(e);
       int steps=0;
-      e.set_debug_hook([&steps](M68KEmulator&){ if(steps++>=1) throw EmulatorBase::terminate_emulation(); });
+      e.set_debug_hook([&steps,insns](M68KEmulator&){ if(steps++>=insns) throw EmulatorBase::terminate_emulation(); });
       try{ e.execute(); }catch(const EmulatorBase::terminate_emulation&){}
       return check(e);
     }catch(...){ return false; }
+  };
+  auto step=[&](std::function<void(M68KEmulator&)> setup, const uint16_t* words, size_t n,
+                std::function<bool(M68KEmulator&)> check)->bool{
+    return stepN(setup, words, n, check, 1);
   };
   // 1) EXTB.L D0 — sign-extend byte to long. Unreachable in an unpatched build (its `case 7` sits under
   //    `if (g == 0)` but EXTB.L has bit 8 set), so the opcode decodes as lea/chk and D0 is left wrong.
@@ -318,10 +322,27 @@ static void pf_probe_emulator_opcodes(){
   const uint16_t w5[]={0xB0FC,0x0000};
   bool ok5=step([](M68KEmulator& e){ auto&r=e.registers(); r.a[0]=0x000A0000; r.sr.u=0; }, w5,2,
                 [](M68KEmulator& e){ return (e.registers().sr.u&0x04)==0; });
-  const bool all_ok = ok1 && ok2 && ok3 && ok4 && ok5;
+  // 6) move.b #1,D0 — the 2026 M68KEmulator rewrite validated byte immediates with the mask on the
+  //    wrong half of the extension word, so EVERY nonzero byte immediate decoded as invalid.
+  const uint16_t w6[]={0x103C,0x0001};
+  bool ok6=step([](M68KEmulator& e){ e.registers().d[0].u=0xAAAAAAAA; }, w6,2,
+                [](M68KEmulator& e){ return (e.registers().d[0].u&0xFF)==0x01; });
+  // 7) btst #0,(abs).l on a zero byte inside the probe arena — the rewrite decoded the destination
+  //    EA before the bit-number word; the read_ins stream is sequential, so both operands came out
+  //    wrong ("Immediate btst operation has high value bits set" faults on real code).
+  const uint16_t w7[]={0x0839,0x0000,(uint16_t)(B>>16),(uint16_t)((B&0xFFFF)+0x100)};  // btst #0,(B+0x100).l
+  bool ok7=step([&](M68KEmulator& e){ e.registers().sr.u=0; }, w7,4,
+                [](M68KEmulator& e){ return (e.registers().sr.u&0x04)==0x04; }); // byte is 0 -> Z set
+  // 8) pea (4,A7) then pop — the rewrite predecremented A7 before resolving the EA, so the pushed
+  //    address was 4 low. Silent data corruption (every stack-local pointer wrong).
+  const uint16_t w8[]={0x486F,0x0004,0x205F};
+  bool ok8=stepN([](M68KEmulator&){}, w8,3,
+                [](M68KEmulator& e){ auto&r=e.registers(); return r.a[0]==r.a[7]+4; }, 2);
+  const bool all_ok = ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8;
   if(getenv("ADLEANLOG"))
-    fprintf(stderr,"[pf] emulator opcode probe: EXTB.L=%s bitfield-reg=%s ADDX/SUBX-V=%s SWAP-ccr=%s CMPA.W-width=%s -> %s\n",
+    fprintf(stderr,"[pf] emulator opcode probe: EXTB.L=%s bitfield-reg=%s ADDX/SUBX-V=%s SWAP-ccr=%s CMPA.W-width=%s byte-imm=%s btst-imm=%s pea-A7=%s -> %s\n",
             ok1?"ok":"MISSING", ok2?"ok":"MISSING", ok3?"ok":"MISSING", ok4?"ok":"MISSING", ok5?"ok":"MISSING",
+            ok6?"ok":"MISSING", ok7?"ok":"MISSING", ok8?"ok":"MISSING",
             all_ok?"emulator is complete (no host shims exist)":"INCOMPLETE (warned; running anyway)");
   if(all_ok) return;
   // Name every missing fix and the remedy for it. This is the whole diagnosis: whoever hits this is almost
@@ -339,14 +360,20 @@ static void pf_probe_emulator_opcodes(){
     {ok3, "ADDX/SUBX overflow computed in int32_t, so V is wrong at INT_MIN",
           "resource_dasm master past PR #97 (merged)"},
     {ok4, "SWAP does not set the condition codes (N/Z stale from the previous instruction)",
-          "PR #100"},
+          "resource_dasm master past the 2026 M68KEmulator rewrite"},
     {ok5, "CMPA.W compares at WORD width, so 64K-aligned addresses test equal to zero",
-          "PR #100"},
+          "resource_dasm master past the 2026 M68KEmulator rewrite"},
+    {ok6, "every nonzero byte immediate decodes as invalid (mask tested the wrong half of the extension word)",
+          "PR #102"},
+    {ok7, "immediate btst/bchg/bclr/bset read the EA extension before the bit-number word",
+          "PR #102"},
+    {ok8, "pea (d16,A7) pushes an address 4 bytes too low (EA resolved after the predecrement)",
+          "PR #102"},
   };
   for(const auto& a : arms) if(!a.ok) fprintf(stderr, "  MISSING: %s\n           remedy: %s\n", a.defect, a.remedy);
   fprintf(stderr,
-    "\nUpdate third_party/resource_dasm past PRs #97 (merged) and #100, or check out the PR branch, or\n"
-    "build third_party/resource_dasm from PR #100 (gh pr checkout 100), then rebuild libresource_file.a and relink.\n\n");
+    "\nUpdate third_party/resource_dasm to a master that includes the 2026 M68KEmulator rewrite AND\n"
+    "PR #102 (gh pr checkout 102 until it merges), then rebuild libresource_file.a and relink.\n\n");
 }
 static uint64_t g_pf_dll_base=0;          // [pf] emu.cycles() when the dll# step budget was armed
 static size_t g_sfx_lastN=(size_t)-1;     // [pf] island-set size at the previous frame (early-exit signal)
