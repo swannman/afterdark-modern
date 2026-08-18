@@ -10,8 +10,10 @@ CXXFLAGS=-std=c++20 -O2 -I$(RD)/src -I$(PH)/include
 # ApplicationServices provides CGEventSourceFlagsState (real Caps Lock state for modules that poll KeyMap).
 LIBS=$(RD)/build/libresource_file.a $(PH)/lib/libphosg.a -lz -framework ApplicationServices
 
-adhost: adhost.cc
+EMULIB=$(RD)/build/libresource_file.a
+
+adhost: adhost.cc $(EMULIB)
 	$(CXX) $(CXXFLAGS) adhost.cc $(LIBS) -o adhost
 
-adhost68k: adhost68k.cc ad_toolbox.cc ad_toolbox.hh
+adhost68k: adhost68k.cc ad_toolbox.cc ad_toolbox.hh $(EMULIB)
 	$(CXX) $(CXXFLAGS) adhost68k.cc ad_toolbox.cc $(LIBS) -o adhost68k
