@@ -24,7 +24,7 @@ jobs:
         run: |
           key=$(git ls-remote https://github.com/fuzziqersoftware/resource_dasm \
                   refs/pull/100/head | shasum | cut -c1-16)
-          echo "key=pre-rewrite-9a1221e-$key" >> "$GITHUB_OUTPUT"
+          echo "key=pre-rewrite-2fcd907-$key" >> "$GITHUB_OUTPUT"
 
       - name: Cache third_party
         uses: actions/cache@v4
@@ -39,7 +39,7 @@ jobs:
             git clone https://github.com/fuzziqersoftware/resource_dasm third_party/resource_dasm
             # Pre-rewrite master + the PR #100 fixes (see the pin note above).
             (cd third_party/resource_dasm \
-              && git checkout 9a1221e \
+              && git checkout 2fcd907 \
               && git -c user.email=ci@localhost -c user.name=ci fetch origin pull/100/head \
               && git -c user.email=ci@localhost -c user.name=ci merge --no-edit FETCH_HEAD)
             (cd third_party/phosg && cmake -S . -B build -DCMAKE_INSTALL_PREFIX=../local \
