@@ -245,18 +245,6 @@ static const char* g_duty_name[PFD_N] = {"instructions","sfx_island","sb_capture
 static void pf_duty_dump(){ if(!getenv("ADPFDUTY")) return;
   for(int i=0;i<PFD_N;i++) fprintf(stderr,"[duty] %-16s %llu\n", g_duty_name[i],(unsigned long long)g_duty[i]); }
 
-// ==== [pf] EMULATOR OPCODE-CAPABILITY CHECK ====
-// The M68K opcode defects this probe checks for are fixed in the emulator itself (PRs #97 merged and
-// #100 open; until #100 lands, the local third_party clone carries the patches named in the error
-// text below), so the host carries no per-instruction shims for them.
-//
-// The probe is a DIAGNOSTIC: it executes each opcode once on a throwaway emulator, and if the library
-// we are linked against gets any of them wrong it prints ONE warning naming the defect and its
-// remedy -- and then RUNS ANYWAY. It does not gate the run. The defects here are not crashes, they
-// are wrong condition codes and wrong arithmetic that come out the far end as a plausible-looking
-// but wrong render -- which is exactly what the warning is there to name, so that such a render is
-// never mistaken for the module's real output.
-// Cost is startup-only: five one-instruction runs, once, before any module code executes.
 static std::function<void()> g_pf_install_hook;   // [pf] installs the lean hook on demand (dynamic arming)
 static bool g_pf_hook_installed=false;            // is a hook currently attached?
 static bool g_pf_zero_hook=false;                 // this run started with NO hook at all
@@ -270,117 +258,6 @@ static uint64_t g_pf_cycle_debt=0;
 // which is host-allocated, host-zeroed scratch that nothing else in the host reads or writes — so an A-line
 // trap there is host-owned, not a guest-code patch.
 static const uint16_t PF_NULLRTS_TRAP=0xAFFD;
-static void pf_probe_emulator_opcodes(){
-  const uint32_t B=0x00200000;
-  auto stepN=[&](std::function<void(M68KEmulator&)> setup, const uint16_t* words, size_t n,
-                std::function<bool(M68KEmulator&)> check, int insns)->bool{
-    try{
-      auto m=std::make_shared<MemoryContext>();
-      m->allocate_at(B,0x200);
-      for(size_t i=0;i<n;i++) m->write_u16b(B+(uint32_t)i*2, words[i]);
-      M68KEmulator e(m);
-      auto& r=e.registers(); r.pc=B; r.a[7]=B+0x180;
-      setup(e);
-      int steps=0;
-      e.set_debug_hook([&steps,insns](M68KEmulator&){ if(steps++>=insns) throw EmulatorBase::terminate_emulation(); });
-      try{ e.execute(); }catch(const EmulatorBase::terminate_emulation&){}
-      return check(e);
-    }catch(...){ return false; }
-  };
-  auto step=[&](std::function<void(M68KEmulator&)> setup, const uint16_t* words, size_t n,
-                std::function<bool(M68KEmulator&)> check)->bool{
-    return stepN(setup, words, n, check, 1);
-  };
-  // 1) EXTB.L D0 — sign-extend byte to long. Unreachable in an unpatched build (its `case 7` sits under
-  //    `if (g == 0)` but EXTB.L has bit 8 set), so the opcode decodes as lea/chk and D0 is left wrong.
-  const uint16_t w1[]={0x49C0};
-  bool ok1=step([](M68KEmulator& e){ e.registers().d[0].u=0x123456FF; }, w1,1,
-                [](M68KEmulator& e){ return e.registers().d[0].u==0xFFFFFFFFu; });
-  // 2) bfextu D0{0:8},D1 with a REGISTER source — an unpatched build throws "unimplemented bfextu from register".
-  const uint16_t w2[]={0xE9C0,0x1008};
-  bool ok2=step([](M68KEmulator& e){ e.registers().d[0].u=0xFF000000; e.registers().d[1].u=0; }, w2,2,
-                [](M68KEmulator& e){ return e.registers().d[1].u==0xFFu; });
-  // 3) subx.l D1,D0 with D0=0, D1=0x80000000, X=0 -> 0 - (-2^31) overflows, so V MUST be set. An unpatched
-  //    build computes the check in int32_t, which wraps and hides exactly this case.
-  const uint16_t w3[]={0x9181};
-  bool ok3=step([](M68KEmulator& e){ auto&r=e.registers(); r.d[0].u=0; r.d[1].u=0x80000000u; r.sr.u=0; }, w3,1,
-                [](M68KEmulator& e){ auto&r=e.registers(); return r.d[0].u==0x80000000u && (r.sr.u&0x02)!=0; });
-  // 4) swap.w D0 with D0=0x000000FE and Z ALREADY SET (as `clr.w D0` leaves it). SWAP sets N and Z from the
-  //    32-bit result and clears V and C; a build that only exchanges the halves leaves the stale Z, so the
-  //    `beq` that every CodeWarrior 32-bit divide helper puts right after its `clr.w/swap.w` pair branches
-  //    the wrong way. Probed separately from the other three because those are already fixed upstream and
-  //    this one is not, so an upstream fix can retire this arm alone.
-  const uint16_t w4[]={0x4840};
-  bool ok4=step([](M68KEmulator& e){ auto&r=e.registers(); r.d[0].u=0x000000FE; r.sr.u=0x04 /*Z*/; }, w4,1,
-                [](M68KEmulator& e){ auto&r=e.registers(); return r.d[0].u==0x00FE0000u && (r.sr.u&0x04)==0; });
-  // 5) cmpa.w A0,#0 with A0=0x000A0000 -- a 64K-ALIGNED but plainly NON-NULL address. Z must come back
-  //    CLEAR. resource_dasm passes size=SIZE_WORD to set_ccr_flags_integer_subtract (M68KEmulator.cc:2601),
-  //    which sign_extends the 32-bit An down to its low word, so every 64K-aligned address compares EQUAL
-  //    to zero. That turns LIB510's `operator new` null-check (`cmpa.w A0,#0 / bne` at 0x0100442C) into a
-  //    false "allocation failed" -> Throw(0x101) -> the module builds nothing. Probed separately from the
-  //    other four for the same reason ok4 is: so an upstream fix can retire this arm alone.
-  const uint16_t w5[]={0xB0FC,0x0000};
-  bool ok5=step([](M68KEmulator& e){ auto&r=e.registers(); r.a[0]=0x000A0000; r.sr.u=0; }, w5,2,
-                [](M68KEmulator& e){ return (e.registers().sr.u&0x04)==0; });
-  // 6) move.b #1,D0 — the 2026 M68KEmulator rewrite validated byte immediates with the mask on the
-  //    wrong half of the extension word, so EVERY nonzero byte immediate decoded as invalid.
-  const uint16_t w6[]={0x103C,0x0001};
-  bool ok6=step([](M68KEmulator& e){ e.registers().d[0].u=0xAAAAAAAA; }, w6,2,
-                [](M68KEmulator& e){ return (e.registers().d[0].u&0xFF)==0x01; });
-  // 7) btst #0,(abs).l on a zero byte inside the probe arena — the rewrite decoded the destination
-  //    EA before the bit-number word; the read_ins stream is sequential, so both operands came out
-  //    wrong ("Immediate btst operation has high value bits set" faults on real code).
-  const uint16_t w7[]={0x0839,0x0000,(uint16_t)(B>>16),(uint16_t)((B&0xFFFF)+0x100)};  // btst #0,(B+0x100).l
-  bool ok7=step([&](M68KEmulator& e){ e.registers().sr.u=0; }, w7,4,
-                [](M68KEmulator& e){ return (e.registers().sr.u&0x04)==0x04; }); // byte is 0 -> Z set
-  // 8) pea (4,A7) then pop — the rewrite predecremented A7 before resolving the EA, so the pushed
-  //    address was 4 low. Silent data corruption (every stack-local pointer wrong).
-  const uint16_t w8[]={0x486F,0x0004,0x205F};
-  bool ok8=stepN([](M68KEmulator&){}, w8,3,
-                [](M68KEmulator& e){ auto&r=e.registers(); return r.a[0]==r.a[7]+4; }, 2);
-  // 9) exg D0,A5 — the rewrite's first release exchanged the TRANSPOSED registers (D5<->A0).
-  const uint16_t w9[]={0xC18D};
-  bool ok9=step([](M68KEmulator& e){ auto&r=e.registers(); r.d[0].u=0x11111111; r.a[5]=0x22222222; }, w9,1,
-                [](M68KEmulator& e){ auto&r=e.registers(); return r.d[0].u==0x22222222 && r.a[5]==0x11111111; });
-  const bool all_ok = ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9;
-  if(getenv("ADLEANLOG"))
-    fprintf(stderr,"[pf] emulator opcode probe: EXTB.L=%s bitfield-reg=%s ADDX/SUBX-V=%s SWAP-ccr=%s CMPA.W-width=%s byte-imm=%s btst-imm=%s pea-A7=%s exg=%s -> %s\n",
-            ok1?"ok":"MISSING", ok2?"ok":"MISSING", ok3?"ok":"MISSING", ok4?"ok":"MISSING", ok5?"ok":"MISSING",
-            ok6?"ok":"MISSING", ok7?"ok":"MISSING", ok8?"ok":"MISSING", ok9?"ok":"MISSING",
-            all_ok?"emulator is complete (no host shims exist)":"INCOMPLETE (warned; running anyway)");
-  if(all_ok) return;
-  // Name every missing fix and the remedy for it. This is the whole diagnosis: whoever hits this is almost
-  // always someone who re-cloned third_party and lost the local patches.
-  fprintf(stderr,
-    "\n*** adhost68k: the resource_dasm this host is linked against is MISSING M68K emulator fixes. ***\n"
-    "This host carries NO emulator-defect shims -- every defect is fixed in the emulator itself -- so\n"
-    "affected modules will render as the deficient emulator computes them. Continuing anyway;\n"
-    "the list below explains any wrong-looking render.\n\n");
-  struct { bool ok; const char* defect; const char* remedy; } arms[] = {
-    {ok1, "EXTB.L decodes as lea/chk (sign-extend byte->long never happens)",
-          "resource_dasm master past PR #97 (merged)"},
-    {ok2, "register-direct bitfield ops throw 'unimplemented bfextu from register'",
-          "resource_dasm master past PR #97 (merged)"},
-    {ok3, "ADDX/SUBX overflow computed in int32_t, so V is wrong at INT_MIN",
-          "resource_dasm master past PR #97 (merged)"},
-    {ok4, "SWAP does not set the condition codes (N/Z stale from the previous instruction)",
-          "resource_dasm master past the 2026 M68KEmulator rewrite"},
-    {ok5, "CMPA.W compares at WORD width, so 64K-aligned addresses test equal to zero",
-          "resource_dasm master past the 2026 M68KEmulator rewrite"},
-    {ok6, "every nonzero byte immediate decodes as invalid (mask tested the wrong half of the extension word)",
-          "resource_dasm master past PR #102 (merged)"},
-    {ok7, "immediate btst/bchg/bclr/bset read the EA extension before the bit-number word",
-          "PR #102"},
-    {ok8, "pea (d16,A7) pushes an address 4 bytes too low (EA resolved after the predecrement)",
-          "PR #102"},
-    {ok9, "exg Dx,Ay exchanges the transposed registers (D<a>/A<d> instead of D<d>/A<a>)",
-          "PR #103"},
-  };
-  for(const auto& a : arms) if(!a.ok) fprintf(stderr, "  MISSING: %s\n           remedy: %s\n", a.defect, a.remedy);
-  fprintf(stderr,
-    "\nUpdate third_party/resource_dasm to current master (all listed fixes are merged upstream),\n"
-    "then rebuild libresource_file.a and relink.\n\n");
-}
 static uint64_t g_pf_dll_base=0;          // [pf] emu.cycles() when the dll# step budget was armed
 static size_t g_sfx_lastN=(size_t)-1;     // [pf] island-set size at the previous frame (early-exit signal)
 static int    g_sfx_stable=0;             // [pf] consecutive frames the island set has not grown
@@ -1735,7 +1612,6 @@ int main(int argc, char** argv){
   // Emulator precondition FIRST, before any guest code runs. The module load itself executes LIB510
   // init under the emulator, so checking at hook-install time would already have run thousands of
   // mis-emulated instructions before refusing. Five one-instruction runs; startup-only.
-  pf_probe_emulator_opcodes();
   if(getenv("ADSFLIVEPROBE")){ g_sfLiveProbe=true; atexit(sf_live_dump);     // near-JT liveness probe
     struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_handler=[](int){ sf_live_dump(); fflush(stderr); _exit(0); };
     sigaction(SIGTERM,&sa,nullptr); sigaction(SIGINT,&sa,nullptr); sigaction(SIGALRM,&sa,nullptr); }
@@ -9864,8 +9740,8 @@ int main(int argc, char** argv){
       // intercepts, the twoA5 screen-bounds reader, Daredevil Dan's section-walk bound, the dll#
       // null-RTS shim), probe-scoped (the island recorder), or event-scoped (Time Manager fire, key
       // pump). None of them is universal: the Ticks/budget duties run off InterruptManager, the
-      // emulator carries the opcode instructions itself (the startup probe warns if the linked library
-      // does not), and RET_SENT is serviced by a host-owned A-line trap. So a run with none of them
+      // emulator carries the opcode instructions itself, and RET_SENT is serviced by a
+      // host-owned A-line trap. So a run with none of them
       // armed installs NO DEBUG HOOK AT ALL — 42 of the 61 modules reach that state.
       // Event-scoped duties install the hook mid-run (see g_pf_install_hook call sites); a hook attached
       // later behaves exactly as one attached at load, because every duty it carries is idempotent and
@@ -10077,7 +9953,6 @@ int main(int argc, char** argv){
       // @0x01029912, 256-entry palette scan), a bounded ~10^8-instruction compute, not a logic gate.
       // The register-direct bitfield ops, EXTB.L, SWAP condition codes and CMPA.W width are all correct
       // in the emulator (resource_dasm PRs #97 merged, #100 open), so the hook carries no host-side
-      // shims for them; pf_probe_emulator_opcodes() warns at startup if the linked library is missing
       // any of them.
       // Two-A5 screen-BOUNDS reader intercept. When execution reaches the library's
       // screen-bounds reader entry (resolved robustly via the [A5+0x61C8] island at load time), the

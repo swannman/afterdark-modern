@@ -16,10 +16,8 @@ Toolbox traps):
 ## Build
 
 `make` (see the Makefile header for the third_party dependency build). Plain
-resource_dasm master works: the 2026 M68KEmulator rewrite plus the fix PRs
-(#102, #103, both merged) is validated against the full module corpus. The
-68K host probes the emulator at startup and warns, naming any missing fix,
-then runs anyway; the PowerPC host is correct on the same revisions.
+resource_dasm master works — every emulator fix this project has needed is
+merged upstream.
 
 ## Running
 
