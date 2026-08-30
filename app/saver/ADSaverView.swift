@@ -357,7 +357,7 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
     private let table = NSTableView()
     // Which modules participate in the Randomize rotation (the checkbox column).
     private var includeSet = Set<String>()
-    private let randomize = NSButton(checkboxWithTitle: "Randomize \u{2014} rotate through the checked modules", target: nil, action: nil)
+    private let randomize = NSButton(checkboxWithTitle: "Randomize checked", target: nil, action: nil)
     private let durationPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let moduleTitle = NSTextField(labelWithString: "")
     private let controlsStack = NSStackView()
@@ -397,7 +397,7 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
         listScroll.borderType = .bezelBorder
         listScroll.autoresizingMask = [.height]
 
-        randomize.frame = NSRect(x: 16, y: 420, width: 420, height: 20)
+        randomize.frame = NSRect(x: 16, y: 420, width: 224, height: 20)
         randomize.target = self
         randomize.action = #selector(randomizeToggled)
 
