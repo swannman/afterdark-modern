@@ -452,6 +452,14 @@ public final class EmulatedHost {
             env["ADSCREENW"] = String(w); env["ADSCREENH"] = String(h)
         }
         env.removeValue(forKey: "ADFRAMEDIR")   // ensure no file transport
+        // Desktop seed: the wallpaper rendered at exactly this spawn's geometry,
+        // for the hosts' authentic pre-init screen seed (DesktopSeed.enabled is
+        // saver/app-only, so harness/census environments are untouched).
+        if DesktopSeed.enabled,
+           let w = Int(env["ADSCREENW"] ?? ""), let h = Int(env["ADSCREENH"] ?? ""),
+           let seed = DesktopSeed.seedPath(width: w, height: h) {
+            env["ADSEEDIMG"] = seed
+        }
         // Control values (only when the user has moved something off default;
         // Magic Turtle keeps its required ADCTRL from the recipe regardless).
         _injectControls(&env, recipe)

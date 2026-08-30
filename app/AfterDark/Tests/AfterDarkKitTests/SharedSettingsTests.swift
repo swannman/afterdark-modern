@@ -67,3 +67,24 @@ final class SharedSettingsTests: XCTestCase {
         try? FileManager.default.removeItem(atPath: (path as NSString).deletingLastPathComponent)
     }
 }
+
+final class DesktopSeedTests: XCTestCase {
+    // End-to-end on the build machine: resolve a wallpaper source, render, and
+    // check the exact P6 contract the hosts parse (header + w*h*3 payload).
+    // Skips (rather than fails) only if no wallpaper source exists at all.
+    func testSeedProducesHostParsablePPM() throws {
+        DesktopSeed.enabled = true
+        defer { DesktopSeed.enabled = false }
+        guard let path = DesktopSeed.seedPath(width: 856, height: 480) else {
+            throw XCTSkip("no wallpaper source resolvable in this environment")
+        }
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let header = Data("P6\n856 480\n255\n".utf8)
+        XCTAssertEqual(data.prefix(header.count), header)
+        XCTAssertEqual(data.count, header.count + 856 * 480 * 3)
+        // A real image, not a constant fill: some byte variety in the payload.
+        XCTAssertGreaterThan(Set(data.suffix(from: header.count).prefix(30000)).count, 8)
+        // Cache hit returns the same file.
+        XCTAssertEqual(DesktopSeed.seedPath(width: 856, height: 480), path)
+    }
+}

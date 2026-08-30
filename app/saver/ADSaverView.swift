@@ -199,6 +199,8 @@ public final class ADSaverView: ScreenSaverView {
             EmulatedHost.displayAspect = Double(bounds.width / bounds.height)
         }
         EmulatedHost.resolutionScale = 1.5
+        // Screen transformers get the desktop wallpaper as their starting screen.
+        DesktopSeed.enabled = true
         let h = EmulatedHost(module: module, settings: settings) { [weak self] img in
             guard let self else { return }
             // Store only; presentation happens on the animateOneFrame heartbeat

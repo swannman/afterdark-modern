@@ -3162,6 +3162,39 @@ int main(int argc, char** argv){
       dump_rng("seeded");
     }
   }
+  // AUTHENTIC PRE-INIT DESKTOP SEED (mirror of adhost68k's, addm 718/824). On a real
+  // Mac the screen HELD THE DESKTOP when a saver started; the blank is the MODULE's own
+  // DoBlank, so screen transformers (Bad Dog!, Shadow Agents) keep or chew what is
+  // there. ADSEEDIMG=<path> = raw fb_w*fb_h index bytes, or a binary P6 PPM of exactly
+  // fb_w x fb_h maxval 255 mapped through the live CLUT (final here — module palettes
+  // are already installed). No ADSEEDIMG, an unusable file, or ADNOSEED keeps the
+  // existing black clear, so census/harness baselines are byte-identical.
+  if(!getenv("ADNOSEED")){ const char* sp=getenv("ADSEEDIMG"); FILE* sf=(sp&&*sp)?fopen(sp,"rb"):nullptr;
+    if(sf){
+      std::vector<uint8_t> raw; { uint8_t b[65536]; size_t rn; while((rn=fread(b,1,sizeof(b),sf))>0) raw.insert(raw.end(),b,b+rn); }
+      fclose(sf);
+      const size_t n=(size_t)H.fb_w*H.fb_h; bool seeded=false;
+      if(raw.size()==n){
+        for(size_t i=0;i<n;i++) mem->write_u8(H.g_fb+(uint32_t)i, raw[i]);
+        fprintf(stderr,"[adhost] seed image: raw index file '%s' (%zu bytes)\n",sp,n); seeded=true;
+      } else if(raw.size()>15 && raw[0]=='P' && raw[1]=='6'){
+        size_t i=2; int hdr[3]={0,0,0}, hn=0;
+        while(i<raw.size() && hn<3){
+          while(i<raw.size() && isspace(raw[i])) i++;
+          if(i<raw.size() && raw[i]=='#'){ while(i<raw.size() && raw[i]!='\n') i++; continue; }
+          int v=0; bool any=false; while(i<raw.size() && isdigit(raw[i])){ v=v*10+(raw[i]-'0'); i++; any=true; }
+          if(!any) break; hdr[hn++]=v; }
+        if(hn==3 && i<raw.size() && hdr[0]==H.fb_w && hdr[1]==H.fb_h && hdr[2]==255){
+          i++;   // the single whitespace byte after maxval
+          if(raw.size()-i >= n*3){
+            for(size_t k=0;k<n;k++) mem->write_u8(H.g_fb+(uint32_t)k,
+              rgb_to_index((uint16_t)(raw[i+k*3]<<8),(uint16_t)(raw[i+k*3+1]<<8),(uint16_t)(raw[i+k*3+2]<<8)));
+            fprintf(stderr,"[adhost] seed image: P6 PPM '%s' %dx%d -> CLUT indices\n",sp,H.fb_w,H.fb_h); seeded=true; } }
+      }
+      if(!seeded) fprintf(stderr,"[adhost] seed image '%s' unusable (%zu bytes, need %zu raw or a %dx%d P6) -> unseeded\n",
+        sp,raw.size(),(size_t)H.fb_w*H.fb_h,H.fb_w,H.fb_h);
+    }
+  }
   call_main(0, "INIT");
   // ADSCANCB: after INIT, scan the whole faceplate region (frame/ADdl/tags) + the engine
   // TOC for any u32 that points into the MODULE code region [BASE_M, BASE_M+0x40000).
