@@ -39,6 +39,22 @@ public final class EmulatedHost {
     // spawn byte-identical environments to before this change.
     public static var durationSeconds: Int?
 
+    // Aspect ratio (width/height) of the presenting display. When set, the
+    // emulated screen widens from its 4:3 base to match, so frames fill a
+    // widescreen display edge-to-edge instead of pillarboxing. Only the saver
+    // assigns this (from its view bounds); nil keeps the classic 4:3 geometry,
+    // so adrender and the harnesses spawn byte-identical environments.
+    public static var displayAspect: Double?
+
+    // Width for the emulated screen at the lane's canonical height. Snapped to
+    // a multiple of 8 (even rowBytes, blit-friendly) and capped at 2x the 4:3
+    // base; displays narrower than 4:3 keep the base (aspect-fit letterboxes).
+    static func screenSize(baseW: Int, baseH: Int) -> (Int, Int) {
+        guard let a = displayAspect, a > Double(baseW) / Double(baseH) else { return (baseW, baseH) }
+        let w = min(((Int(Double(baseH) * a) + 4) / 8) * 8, baseW * 2)
+        return (w, baseH)
+    }
+
     public let module: ADModule
     private let onFrame: (CGImage) -> Void
 
@@ -409,15 +425,22 @@ public final class EmulatedHost {
             // the terminationHandler respawns any that self-exit.
             env["ADFRAMES"] = "900000"
             if recipe.lane == "l40" {
-                env["ADSCREENW"] = "640"; env["ADSCREENH"] = "480"
+                let (w, h) = Self.screenSize(baseW: 640, baseH: 480)
+                env["ADSCREENW"] = String(w); env["ADSCREENH"] = String(h)
                 env["ADLINKMODULE"] = "1"; env["ADDLLMAXI"] = "0"; env["ADSECSRATE"] = "1"
             } else {
-                env["ADSCREENW"] = "512"; env["ADSCREENH"] = "384"
+                let (w, h) = Self.screenSize(baseW: 512, baseH: 384)
+                env["ADSCREENW"] = String(w); env["ADSCREENH"] = String(h)
             }
         } else {
             env["ADRSRC"] = recipe.rsrcPath
             env["ADLIB"] = "AD4Library.rsrc"
             env["ADFRAMES"] = "900000"
+            // Widen from the recipe's own geometry (PPC recipes carry 640x480).
+            let baseW = Int(env["ADSCREENW"] ?? "") ?? 512
+            let baseH = Int(env["ADSCREENH"] ?? "") ?? 384
+            let (w, h) = Self.screenSize(baseW: baseW, baseH: baseH)
+            env["ADSCREENW"] = String(w); env["ADSCREENH"] = String(h)
         }
         env.removeValue(forKey: "ADFRAMEDIR")   // ensure no file transport
         // Control values (only when the user has moved something off default;

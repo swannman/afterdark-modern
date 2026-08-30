@@ -34,9 +34,11 @@ import Foundation
 // so there is nothing for a module and the cycle to negotiate; this is purely
 // the user's call.
 //
-// The stop LABELS below are copied from sUnt 500 (the resource whose name is
-// "Duration:") verbatim, including its inconsistent punctuation — "15 sec" with no
-// period next to "30 sec." with one — because that is what the control panel drew.
+// The stop LABELS derive from sUnt 500 (the resource whose name is "Duration:"),
+// with two deliberate departures from the original ladder: the punctuation is
+// normalized (the panel's "15 sec" / "30 sec." inconsistency is not worth
+// preserving in a popup), and the 45 min. stop is replaced by 15 min. — a gap
+// the original ladder had that matters for the Randomize rotation.
 public enum ADDuration {
     // Our stand-in for the original's 0xFFFFFFFF "Forever!" sentinel. Negative so it
     // can never collide with a real second count.
@@ -51,17 +53,17 @@ public enum ADDuration {
     // The 13 stops the real slider offered, in slider order (rsVl 503 / sUnt 500).
     public static let stops: [Stop] = [
         Stop("15 sec",      15),
-        Stop("30 sec.",     30),
-        Stop("1 min.",      60),
-        Stop("2 min.",     120),
-        Stop("5 min.",     300),
-        Stop("10 min.",    600),
-        Stop("30 min.",   1800),
-        Stop("45 min.",   2700),
+        Stop("30 sec",      30),
+        Stop("1 min",       60),
+        Stop("2 min",      120),
+        Stop("5 min",      300),
+        Stop("10 min",     600),
+        Stop("15 min",     900),
+        Stop("30 min",    1800),
         Stop("1 hour",    3600),
-        Stop("1 h. 30 m.", 5400),
-        Stop("2 h.",      7200),
-        Stop("6 h.",     21600),
+        Stop("1 h 30 m",  5400),
+        Stop("2 h",       7200),
+        Stop("6 h",      21600),
         Stop("Forever!", forever),
     ]
 

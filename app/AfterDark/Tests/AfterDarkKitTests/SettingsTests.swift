@@ -137,15 +137,14 @@ final class SettingsTests: XCTestCase {
 final class DurationTests: XCTestCase {
 
     func testLadderMatchesControlPanelResources() {
-        // rsVl 503, in slider order.
+        // rsVl 503 in slider order, with the two deliberate departures documented
+        // in ADDuration.swift: 45 min. is replaced by 15 min., punctuation dropped.
         XCTAssertEqual(ADDuration.stops.map(\.seconds),
-                       [15, 30, 60, 120, 300, 600, 1800, 2700, 3600, 5400, 7200, 21600,
+                       [15, 30, 60, 120, 300, 600, 900, 1800, 3600, 5400, 7200, 21600,
                         ADDuration.forever])
-        // sUnt 500 (the resource literally named "Duration:"), verbatim — including
-        // the inconsistent punctuation on the first two stops.
         XCTAssertEqual(ADDuration.stops.map(\.label),
-                       ["15 sec", "30 sec.", "1 min.", "2 min.", "5 min.", "10 min.",
-                        "30 min.", "45 min.", "1 hour", "1 h. 30 m.", "2 h.", "6 h.",
+                       ["15 sec", "30 sec", "1 min", "2 min", "5 min", "10 min",
+                        "15 min", "30 min", "1 hour", "1 h 30 m", "2 h", "6 h",
                         "Forever!"])
         XCTAssertEqual(ADDuration.label, "Duration:")
     }
@@ -154,7 +153,7 @@ final class DurationTests: XCTestCase {
     // makes an untouched preference a no-op.
     func testFactoryDefaultIsOneMinute() {
         XCTAssertEqual(ADDuration.defaultSeconds, 60)
-        XCTAssertEqual(ADDuration.stop(forSeconds: ADDuration.defaultSeconds).label, "1 min.")
+        XCTAssertEqual(ADDuration.stop(forSeconds: ADDuration.defaultSeconds).label, "1 min")
     }
 
     // A hand-edited defaults plist or a stale sidecar must not put the host on a
