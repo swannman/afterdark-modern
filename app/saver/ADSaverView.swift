@@ -176,6 +176,21 @@ public final class ADSaverView: ScreenSaverView {
         }
         cycleIndex = index % cycleList.count
         let module = cycleList[cycleIndex]
+        // Most modules keep their authored aspect (letterboxed on a mismatched
+        // display). A few generate content to a fixed grid that tops out well
+        // below the display's aspect and reads fine stretched — fill those edge
+        // to edge instead. Snake's maze caps at ~882x554 (≈3:2); aspect-fit would
+        // always pillarbox a 16:9 screen.
+        // Snake generates its maze to ≈3:2, so plain aspect-fit pillarboxes a
+        // widescreen display. Fill it with a UNIFORM (1:1, no distortion) scale
+        // that covers the display and crops the minor overflow; other modules
+        // keep their authored aspect, letterboxed.
+        let gravity: CALayerContentsGravity = module.id == "68k-snake" ? .resizeAspectFill : .resizeAspect
+        DispatchQueue.main.async {
+            CATransaction.begin(); CATransaction.setDisableActions(true)
+            self.frameLayer.contentsGravity = gravity
+            CATransaction.commit()
+        }
         host?.stop()
         frameLock.lock(); haveFrame = false; pendingFrame = nil; frameLock.unlock()
         DispatchQueue.main.async { self.frameLayer.contents = nil }

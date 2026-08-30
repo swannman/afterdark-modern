@@ -1993,6 +1993,41 @@ int main(int argc, char** argv){
   static const uint32_t kCapsBit   = 0x00020000;        // caps-state bit in capsObj[0]
   const bool CAPS_OFF = getenv("ADNOCAPS")!=nullptr;
   const bool CAPSLOG  = getenv("ADCAPSLOG")!=nullptr;
+  // Debug/diagnostic env vars read ONCE here (env is constant at runtime) and
+  // captured by the per-instruction hook below. getenv is an O(env) linear
+  // scan; calling ~30 per emulated instruction was the dominant non-emulation
+  // cost. Plain locals (not function-local statics, whose magic-static guard
+  // would re-add an atomic check per access).
+  const char* const _hk_ADADDLWATCH = getenv("ADADDLWATCH");
+  const char* const _hk_ADB1F8 = getenv("ADB1F8");
+  const char* const _hk_ADDF = getenv("ADDF");
+  const char* const _hk_ADDRAWFNS = getenv("ADDRAWFNS");
+  const char* const _hk_ADDRAWTRACE = getenv("ADDRAWTRACE");
+  const char* const _hk_ADDUMPLIST = getenv("ADDUMPLIST");
+  const char* const _hk_ADENGINE = getenv("ADENGINE");
+  const char* const _hk_ADERR = getenv("ADERR");
+  const char* const _hk_ADFBDUMP = getenv("ADFBDUMP");
+  const char* const _hk_ADFORCEFRAME = getenv("ADFORCEFRAME");
+  const char* const _hk_ADFRAMEWATCH = getenv("ADFRAMEWATCH");
+  const char* const _hk_ADNOSCREENFIX = getenv("ADNOSCREENFIX");
+  const char* const _hk_ADPCSAMPLE = getenv("ADPCSAMPLE");
+  const char* const _hk_ADR30 = getenv("ADR30");
+  const char* const _hk_ADRAWADDR = getenv("ADRAWADDR");
+  const char* const _hk_ADRAWLEN = getenv("ADRAWLEN");
+  const char* const _hk_ADRET = getenv("ADRET");
+  const char* const _hk_ADSNAPBLIT = getenv("ADSNAPBLIT");
+  const char* const _hk_ADSNAPH = getenv("ADSNAPH");
+  const char* const _hk_ADSNAPRAW = getenv("ADSNAPRAW");
+  const char* const _hk_ADSNAPW = getenv("ADSNAPW");
+  const char* const _hk_ADSPAWN = getenv("ADSPAWN");
+  const char* const _hk_ADTALLY = getenv("ADTALLY");
+  const char* const _hk_ADTESTCAPSAFTER = getenv("ADTESTCAPSAFTER");
+  const char* const _hk_ADVTBL = getenv("ADVTBL");
+  const char* const _hk_ADWATCH25 = getenv("ADWATCH25");
+  const char* const _hk_ADWATCHADDR = getenv("ADWATCHADDR");
+  const char* const _hk_ADWATCHPC = getenv("ADWATCHPC");
+  const char* const _hk_ADWATCHREGS = getenv("ADWATCHREGS");
+  const char* const _hk_ADWILDPC = getenv("ADWILDPC");
   emu.set_debug_hook([&](PPC32Emulator& e){
     auto& r = e.registers();
     uint32_t pc = r.pc;
@@ -2003,7 +2038,7 @@ int main(int argc, char** argv){
       // ADTESTCAPSAFTER=N (test lever): deterministically flip g_caps after N reads of
       // GetCapsLockChange — a frame-synced caps edge with no wall-clock/stdin confound,
       // for clean A/B. Default-off; never active in normal runs.
-      if(const char* ta=getenv("ADTESTCAPSAFTER")){ static long ec=0; static bool done=false;
+      if(const char* ta=_hk_ADTESTCAPSAFTER){ static long ec=0; static bool done=false;
         long thr=atol(ta); if(!done && ++ec>=thr){ g_caps=!g_caps; done=true;
           if(CAPSLOG) fprintf(stderr,"    [caps] TESTCAPSAFTER edge at entry %ld -> g_caps=%d\n",ec,g_caps?1:0); } }
       uint32_t tocp = r.r[2].u;               // r2 = libTOC at the fn's own entry
@@ -2105,7 +2140,7 @@ int main(int argc, char** argv){
         fprintf(stderr,"    ENGINE @%08X %-42s r3=%08X r4=%08X r5=%08X%s\n",pc,it->second.c_str(),r.r[3].u,r.r[4].u,r.r[5].u,extra.c_str());
       }
     }
-    if(getenv("ADRET")){
+    if(_hk_ADRET){
       static unordered_map<uint32_t,pair<string,uint32_t>>* pend=new unordered_map<uint32_t,pair<string,uint32_t>>();
       auto it=ad_fn_name.find(pc);
       if(it!=ad_fn_name.end() && (it->second.find("CalcMem")!=string::npos ||
@@ -2121,16 +2156,16 @@ int main(int argc, char** argv){
     if(pc==0x10010D38) fprintf(stderr,"    >>> IXHeap called from lr=%08X size=%08X\n", r.lr, r.r[4].u);
     // ADWATCHPC=hexaddr : log r3/r4/lr whenever the module PC hits that address
     // (used to catch longjmp(jb, err) and see who aborted INIT + with what code).
-    if(const char* wz=getenv("ADWATCHPC")){
+    if(const char* wz=_hk_ADWATCHPC){
       static uint32_t wpc=(uint32_t)strtoul(wz,0,16);
       if(pc==wpc){ fprintf(stderr,"    >>> WATCH pc=%08X r3=%08X r4=%08X(%d) lr=%08X (mod+%X)\n",
                           pc, r.r[3].u, r.r[4].u, (int)r.r[4].u, r.lr, r.lr-BASE_M);
-        if(getenv("ADWATCHREGS")) fprintf(stderr,"        r20=%08X r23=%08X r24=%08X r25=%08X r29=%08X r30=%08X r31=%08X\n",
+        if(_hk_ADWATCHREGS) fprintf(stderr,"        r20=%08X r23=%08X r24=%08X r25=%08X r29=%08X r30=%08X r31=%08X\n",
                           r.r[20].u,r.r[23].u,r.r[24].u,r.r[25].u,r.r[29].u,r.r[30].u,r.r[31].u); }
     }
     // ADADDLWATCH: log every D-form load that reads the 'ADdl' Deluxe blob, so we can
     // see which fields the failing (0x801) modules require beyond the version short.
-    if(getenv("ADADDLWATCH") && H.g_addl){
+    if(_hk_ADADDLWATCH && H.g_addl){
       uint32_t op=mem->read_u32b(pc); uint32_t prim=(op>>26)&0x3F;
       if(prim==32||prim==40||prim==34||prim==42||prim==33||prim==41||prim==35||prim==43){ // lwz/lhz/lbz/lha(+u)
         uint8_t ra=(op>>16)&0x1F; int32_t imm=(int16_t)(op&0xFFFF);
@@ -2143,7 +2178,7 @@ int main(int argc, char** argv){
     }
     // ADFRAMEWATCH: log D-form loads that read the engine "frame"/faceplate blob, so we
     // can see which frame fields gate the draw path (title->animation state machine).
-    if(getenv("ADFRAMEWATCH") && H.g_frame){
+    if(_hk_ADFRAMEWATCH && H.g_frame){
       uint32_t op=mem->read_u32b(pc); uint32_t prim=(op>>26)&0x3F;
       if(prim==32||prim==40||prim==34||prim==42||prim==33||prim==41||prim==35||prim==43){
         uint8_t ra=(op>>16)&0x1F; int32_t imm=(int16_t)(op&0xFFFF);
@@ -2157,11 +2192,11 @@ int main(int argc, char** argv){
       }
     }
     // ErrorMessage(code): log the module caller so we can locate 0x801 version checks.
-    if(pc==0x1000E8F0 && getenv("ADERR")) fprintf(stderr,"    >>> ErrorMessage(0x%X) from lr=%08X (module+%X)\n",
+    if(pc==0x1000E8F0 && _hk_ADERR) fprintf(stderr,"    >>> ErrorMessage(0x%X) from lr=%08X (module+%X)\n",
                                r.r[3].u, r.lr, r.lr-BASE_M);
     // Capture the module's virtual DrawFrame method address (vtable[0x0C]),
     // loaded into r12 by the sel-2 stub just before its trampoline call.
-    if(getenv("ADSPAWN")){
+    if(_hk_ADSPAWN){
       // FT DrawFrame spawn logic @module 0xBF28. Trace the time vs spawn-timer.
       if(pc==0x3000BF8C) fprintf(stderr,"    [spawn] enter BF28 TOC+3CC=%02X TOC+3D0=%08X\n",
                                  mem->read_u8(r.r[2].u+0x3CC), mem->read_u32b(r.r[2].u+0x3D0));
@@ -2199,7 +2234,7 @@ int main(int argc, char** argv){
         uint32_t g=mem->read_u32b(r.r[2].u+0x3A8);
         fprintf(stderr,"    [spawn] GetControlValue -> r3=%08X (ctrlArray[*TOC+3A8]=%08X)\n",r.r[3].u,g); } }
     }
-    if(getenv("ADDRAWTRACE")){
+    if(_hk_ADDRAWTRACE){
       // Who calls HideSprite / UpdateSpriteMovement? Find the containing loop fn.
       if(pc==0x10022DB8){ static int n=0; if(n++<4) fprintf(stderr,"    [dt] HideSprite(sprite=%08X) lr=%08X\n",r.r[3].u,r.lr); }
       if(pc==0x100205DC){ static int n=0; if(n++<4) fprintf(stderr,"    [dt] UpdateSpriteMovement(cs=%08X) lr=%08X\n",r.r[3].u,r.lr); }
@@ -2209,10 +2244,10 @@ int main(int argc, char** argv){
         if(cv){ uint32_t px=mem->read_u32b(cv+0x08); if(px) base=mem->read_u32b(px); }
         fprintf(stderr,"    [dt] *** DrawFrame__CompoundSequence(seq=%08X frame=%d canvas=%08X pixBase=%08X) lr=%08X\n",r.r[3].u,(int)(int16_t)r.r[4].u,cv,base,r.lr); } }
       // EXPERIMENT: force a valid frame so the draw gate ([sprite+0x44]>0) passes.
-      if(pc==0x100202CC && getenv("ADFORCEFRAME") && (int16_t)r.r[4].u==0)
-        r.r[4].u = (uint32_t)atoi(getenv("ADFORCEFRAME"));
+      if(pc==0x100202CC && _hk_ADFORCEFRAME && (int16_t)r.r[4].u==0)
+        r.r[4].u = (uint32_t)atoi(_hk_ADFORCEFRAME);
       // MoveThroughRelativeFrame entry: tally distinct sprites + valid-frame count.
-      if(pc==0x100202CC && getenv("ADTALLY")){ static uint32_t lo=~0u,hi=0; static int valid=0,zero=0,tot=0;
+      if(pc==0x100202CC && _hk_ADTALLY){ static uint32_t lo=~0u,hi=0; static int valid=0,zero=0,tot=0;
         uint32_t sp2=r.r[3].u; int16_t frame=(int16_t)mem->read_u16b(sp2+0x44);
         if(sp2<lo)lo=sp2; if(sp2>hi)hi=sp2; tot++; if(frame>0)valid++; else zero++;
         if(tot%333==0) fprintf(stderr,"    [tally] MTRF calls=%d spriteRange=%08X..%08X validFrame=%d zeroFrame=%d\n",tot,lo,hi,valid,zero); }
@@ -2258,14 +2293,14 @@ int main(int argc, char** argv){
         static int n=0; if(n++<40){ uint32_t code=mem->read_u32b(r.r[12].u); auto it2=ad_fn_name.find(code);
           fprintf(stderr,"    [dt] loop vcall lr=%08X -> %08X %s\n",r.lr,code,it2!=ad_fn_name.end()?it2->second.c_str():"?"); } }
     }
-    if(getenv("ADVTBL") && pc==0x30012480){
+    if(_hk_ADVTBL && pc==0x30012480){
       uint32_t tv=r.r[12].u, code=mem->read_u32b(tv), toc=mem->read_u32b(tv+4);
       fprintf(stderr,"    >>> sel2 DrawFrame TVector=%08X code=%08X toc=%08X (code off=%X)\n",
               tv, code, toc, code-BASE_M);
     }
     // DrawFrame structure probe: log module fields that gate the sub-draws, and
     // count entries to the candidate composite fns fn0xA890 / fn0xCFF8 / fn0xB2F8.
-    if(getenv("ADDF")){
+    if(_hk_ADDF){
       if(pc==0x3000BE40){ uint32_t m=r.r[3].u; static int n=0; if(n++<6)
         fprintf(stderr,"  [DF] enter mod=%08X +1E=%08X +22=%08X +26=%08X +2A=%08X\n",
           m,mem->read_u32b(m+0x1E),mem->read_u32b(m+0x22),mem->read_u32b(m+0x26),mem->read_u32b(m+0x2A)); }
@@ -2280,7 +2315,7 @@ int main(int argc, char** argv){
           pc-BASE_M,r.r[3].u,r.r[4].u,code,it2!=ad_fn_name.end()?it2->second.c_str():"?"); } }
     }
     // Trace entry to any engine draw/sprite fn by name (via ad_fn_name code map).
-    if(getenv("ADDRAWFNS")){
+    if(_hk_ADDRAWFNS){
       auto it=ad_fn_name.find(pc);
       if(it!=ad_fn_name.end()){
         const string& nm=it->second;
@@ -2296,7 +2331,7 @@ int main(int argc, char** argv){
     // Trace the per-sprite draw fn0xB1F8 (module 0x3000B1F8): entry count + the
     // polymorphic draw vcalls it dispatches ([vt+0x1C]@B288, [vt+0x74]@B2A4,
     // [vt+0x5C]@B2D0). At each, r12 = method TVector -> resolve engine fn + args.
-    if(getenv("ADB1F8")){
+    if(_hk_ADB1F8){
       if(pc==0x3000B1F8){ static int n=0; if(n++<12)
         fprintf(stderr,"  [B1F8] enter obj=%08X r4=%08X r5=%08X lr=%08X\n",r.r[3].u,r.r[4].u,r.r[5].u,r.lr); }
       if(pc==0x3000B288||pc==0x3000B2A4||pc==0x3000B2D0){
@@ -2319,7 +2354,7 @@ int main(int argc, char** argv){
       fprintf(stderr,"[rngseed] SRand entry #%ld: seed %08X -> %08X\n",++n,r.r[3].u,g_librng_seed);
       r.r[3].u = g_librng_seed;
     }
-    if(pc==0x1000E2E4 && !getenv("ADNOSCREENFIX")){
+    if(pc==0x1000E2E4 && !_hk_ADNOSCREENFIX){
       // GetMonitorInfo__PortableModule convergence point: r29 = the output XR
       // pointer, bounds fully computed. Our emulated Mac has no real GrayRgn /
       // GDevice list, so the engine computes a degenerate 0x0 monitor rect.
@@ -2330,18 +2365,18 @@ int main(int argc, char** argv){
       if(rp){
         mem->write_u16b(rp+0,0); mem->write_u16b(rp+2,0);
         mem->write_u16b(rp+4,(uint16_t)H.fb_w); mem->write_u16b(rp+6,(uint16_t)H.fb_h);
-        if(getenv("ADENGINE")) fprintf(stderr,"    [host] GetMonitorInfo XR -> l0,t0,r%d,b%d\n",H.fb_w,H.fb_h);
+        if(_hk_ADENGINE) fprintf(stderr,"    [host] GetMonitorInfo XR -> l0,t0,r%d,b%d\n",H.fb_w,H.fb_h);
       }
     }
     if(ANY_TRACE){ // debug region 2
-    if(const char* wa=getenv("ADWATCHADDR")){
+    if(const char* wa=_hk_ADWATCHADDR){
       static uint32_t addr=strtoul(wa,0,0); static uint32_t last=0xDEADBEEF;
       uint32_t v=0; try{v=mem->read_u32b(addr);}catch(...){}
       if(v!=last){ fprintf(stderr,"    [%08X] %08X -> %08X at pc=%08X(%s+%05X)\n",addr,last,v,pc,
                    (pc>=BASE_A&&pc<BASE_A+0x50000)?"adx":(pc>=BASE_M?"mod":"?"),
                    (pc>=BASE_A&&pc<BASE_A+0x50000)?pc-BASE_A:(pc>=BASE_M?pc-BASE_M:pc)); last=v; }
     }
-    if(getenv("ADWATCH25")){
+    if(_hk_ADWATCH25){
       static uint32_t last=0xFFFFFFFF;
       static bool inwin=false;
       if(pc==0x100085B8) inwin=true;
@@ -2353,18 +2388,18 @@ int main(int argc, char** argv){
         last=r.r[25].u;
       }
     }
-    if(getenv("ADDUMPLIST") && pc==0x10008640){ // lhax r4,[r25+r31] in LoadNoiseIDs loop
+    if(_hk_ADDUMPLIST && pc==0x10008640){ // lhax r4,[r25+r31] in LoadNoiseIDs loop
       fprintf(stderr,"    >>> @8640 r25=%08X r31=%08X r27=%08X read=%04X\n",
               r.r[25].u, r.r[31].u, r.r[27].u, mem->read_u16b(r.r[25].u + r.r[31].u));
     }
-    if(getenv("ADDUMPLIST") && pc==0x100085B8){ // LoadNoiseIDs entry: dump list r4, count r5
+    if(_hk_ADDUMPLIST && pc==0x100085B8){ // LoadNoiseIDs entry: dump list r4, count r5
       uint32_t lp=r.r[4].u, cnt=r.r[5].u; fprintf(stderr,"    >>> LoadNoiseIDs list=%08X cnt=%u : ",lp,cnt);
       for(uint32_t i=0;i<cnt+3 && i<20;i++) fprintf(stderr,"%04X ", mem->read_u16b(lp+i*2));
       fprintf(stderr,"\n");
     }
     if(pc==0x10007FDC) fprintf(stderr,"    >>> @7FDC r25=%08X [r25]=%08X r26=%08X r30=%08X\n",
         r.r[25].u, r.r[25].u?mem->read_u32b(r.r[25].u):0, r.r[26].u, r.r[30].u);
-    if(getenv("ADR30")){
+    if(_hk_ADR30){
       static uint32_t last_r30=0;
       if(r.r[30].u != last_r30){
         fprintf(stderr,"    r30: %08X -> %08X  at pc=%08X (%s+%06X)\n",last_r30,r.r[30].u,pc,
@@ -2373,19 +2408,19 @@ int main(int argc, char** argv){
         last_r30=r.r[30].u;
       }
     }
-    if(pc==0x10000004 && getenv("ADSNAPBLIT")){ // rleNewBlit: snapshot every Nth
-      static long n=0; long every=atol(getenv("ADSNAPBLIT"));
+    if(pc==0x10000004 && _hk_ADSNAPBLIT){ // rleNewBlit: snapshot every Nth
+      static long n=0; long every=atol(_hk_ADSNAPBLIT);
       if(every>0 && (n % every)==0){
         snap_all("blit"+to_string(n));
         // rleNewBlit(r3=RLE, r4=dstBuf, r5=...): dump the dest buffer raw.
-        if(getenv("ADSNAPRAW")){ int W=atoi(getenv("ADSNAPW")?:"512"), Hh=atoi(getenv("ADSNAPH")?:"384");
-          snap_ppm(string(getenv("ADFBDUMP"))+".blit"+to_string(n)+".dst.ppm", r.r[4].u, W, Hh, W); }
+        if(_hk_ADSNAPRAW){ int W=atoi(_hk_ADSNAPW?:"512"), Hh=atoi(_hk_ADSNAPH?:"384");
+          snap_ppm(string(_hk_ADFBDUMP)+".blit"+to_string(n)+".dst.ppm", r.r[4].u, W, Hh, W); }
         fprintf(stderr,"    rleNewBlit r3=%08X r4=%08X r5=%08X\n",r.r[3].u,r.r[4].u,r.r[5].u);
         fprintf(stderr,"      r4[0..48]:");
         for(int k=0;k<48;k+=4) fprintf(stderr," %08X",mem->read_u32b(r.r[4].u+k));
-        if(const char* rd=getenv("ADRAWADDR")){
-          uint32_t a=strtoul(rd,0,0), len=strtoul(getenv("ADRAWLEN")?:"0x80000",0,0);
-          FILE* rf=fopen((string(getenv("ADFBDUMP"))+".raw").c_str(),"wb");
+        if(const char* rd=_hk_ADRAWADDR){
+          uint32_t a=strtoul(rd,0,0), len=strtoul(_hk_ADRAWLEN?:"0x80000",0,0);
+          FILE* rf=fopen((string(_hk_ADFBDUMP)+".raw").c_str(),"wb");
           if(rf){ for(uint32_t k=0;k<len;k++){ uint8_t b=0; try{b=mem->read_u8(a+k);}catch(...){b=0;} fputc(b,rf);} fclose(rf);
                   fprintf(stderr,"      raw dump %08X..+%X -> .raw\n",a,len); }
         }
@@ -2404,18 +2439,18 @@ int main(int argc, char** argv){
               b=(int16_t)mem->read_u16b(pm+10),rr=(int16_t)mem->read_u16b(pm+12);
           fprintf(stderr,"      gw%zu port=%08X base=%08X rb=%d bounds=%d,%d,%d,%d\n",
                   i,port,base,rb,t,l,b,rr);
-          snap_ppm(string(getenv("ADFBDUMP"))+".blit"+to_string(n)+".gw"+to_string(i)+".ppm",
+          snap_ppm(string(_hk_ADFBDUMP)+".blit"+to_string(n)+".gw"+to_string(i)+".ppm",
                    base, rr-l, b-t, rb);
         }
       }
       n++;
     }
-    if(getenv("ADPCSAMPLE")){
+    if(_hk_ADPCSAMPLE){
       static uint64_t n=0; static uint32_t lo=0xFFFFFFFF, hi=0;
       if(pc<lo)lo=pc; if(pc>hi)hi=pc;
       if(++n % 2000000ULL == 0){ fprintf(stderr,"    [PCSAMPLE] n=%lluM pc=%08X lr=%08X range=[%08X,%08X]\n",(unsigned long long)(n/1000000),pc,r.lr,lo,hi); lo=0xFFFFFFFF; hi=0; }
     }
-    if(getenv("ADWILDPC")){
+    if(_hk_ADWILDPC){
       // Log any PC outside known code regions (engine, module, sentinels, RET_SENT).
       bool ok = (pc>=BASE_A && pc<BASE_A+0x40000) || (pc>=BASE_M && pc<BASE_M+0x60000)
              || (pc>=SENT_BASE && pc<SENT_BASE+0x100000) || pc==RET_SENT;

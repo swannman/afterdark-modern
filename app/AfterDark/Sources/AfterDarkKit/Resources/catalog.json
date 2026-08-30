@@ -3173,8 +3173,8 @@
         "{RSRC}"
       ],
       "env": {
-        "ADSCREENW": "920",
-        "ADSCREENH": "560"
+        "ADSCREENW": "870",
+        "ADSCREENH": "544"
       },
       "controlEnvVar": "ADCVSET",
       "controls": [
