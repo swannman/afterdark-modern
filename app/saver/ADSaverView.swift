@@ -615,12 +615,19 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
     }
 
     private func endSheet() {
-        // Both dismissal paths AND an explicit orderOut: leaving the window attached
-        // is what wedges System Settings' sheet host into never opening it again.
+        // TWO host contracts must both be satisfied, in this order:
+        // 1. NSApp.endSheet — the documented ScreenSaver dismissal. System Settings'
+        //    sheet host (the Wallpaper agent's LegacyScreenSaverModule) keys its
+        //    completion on THIS call; ending only via sheetParent.endSheet closes the
+        //    sheet visually but leaves Settings' modal-session bookkeeping armed, so
+        //    the Options button goes dead until Settings relaunches (live-debugged:
+        //    presentConfigureSheetWithCompletionBlock re-entered per click, main
+        //    thread idle, hostWindowModalSessionStatus polling forever).
+        // 2. Detach from any sheetParent + orderOut — leaving the window attached is
+        //    the OTHER wedge, where the sheet can never be presented again.
+        NSApp.endSheet(window)
         if let parent = window.sheetParent {
             parent.endSheet(window)
-        } else {
-            NSApp.endSheet(window)
         }
         window.orderOut(nil)
     }
