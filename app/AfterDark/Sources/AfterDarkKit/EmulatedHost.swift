@@ -688,9 +688,19 @@ public final class EmulatedHost {
             // CPU. Poll for resume without touching the pipe.
             if isPaused { Thread.sleep(forTimeInterval: 0.05); continue }
 
-            let chunk = handle.availableData      // blocks; empty == EOF
+            // availableData returns an AUTORELEASED NSData; on this raw thread the
+            // pool never drains, so without the explicit pool every chunk of the
+            // stream is retained until thread exit — a leak at exactly the stream
+            // bandwidth (~20MB/s in the appex, whose sandbox forces the stream
+            // fallback). The pool drains per read; Data's own retain keeps the
+            // bytes alive across the boundary.
+            let chunk = autoreleasepool { handle.availableData }   // blocks; empty == EOF
             if chunk.isEmpty { break }
             buf.append(chunk)
+            // Defensive resync: if the buffer grows huge without yielding a frame,
+            // the stream is something the parser doesn't understand — drop it
+            // rather than accumulate without bound.
+            if buf.count > 32 << 20 { buf.removeAll(keepingCapacity: true) }
 
             // Drain every complete frame currently buffered, but only decode &
             // publish the NEWEST (dropping intermediates). Under backpressure the
@@ -727,9 +737,11 @@ public final class EmulatedHost {
                 continue
             }
             let t0 = Date()
-            let img = tag == 8 ? Self.decodeP8(body, width: w, height: h)
-                               : Self.decodeRGB(body, width: w, height: h)
-            if let img { onFrame(img) }
+            autoreleasepool {
+                let img = tag == 8 ? Self.decodeP8(body, width: w, height: h)
+                                   : Self.decodeRGB(body, width: w, height: h)
+                if let img { onFrame(img) }
+            }
             let cost = Date().timeIntervalSince(t0)
             costEMA = costEMA * 0.8 + cost * 0.2
             // Adaptive cap: 60fps when the pipeline is cheap, else 30.
