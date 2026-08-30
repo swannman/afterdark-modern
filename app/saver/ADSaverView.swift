@@ -355,8 +355,10 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
     private let onDone: (String, Int) -> Void
 
     private let table = NSTableView()
-    // Which modules participate in the Randomize rotation (the checkbox column).
+    // Which modules participate in the Randomize rotation. The checkbox column
+    // only exists while Randomize is on; otherwise the list is a plain picker.
     private var includeSet = Set<String>()
+    private let checkColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("on"))
     private let randomize = NSButton(checkboxWithTitle: "Randomize checked", target: nil, action: nil)
     private let durationPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let moduleTitle = NSTextField(labelWithString: "")
@@ -386,9 +388,9 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
         table.headerView = nil
         table.rowHeight = 20
         table.style = .inset
-        let check = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("on"))
-        check.width = 22; check.minWidth = 22; check.maxWidth = 22
-        table.addTableColumn(check)
+        checkColumn.width = 22; checkColumn.minWidth = 22; checkColumn.maxWidth = 22
+        checkColumn.isHidden = true
+        table.addTableColumn(checkColumn)
         let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("m"))
         table.addTableColumn(col)
         let listScroll = NSScrollView(frame: NSRect(x: 16, y: 92, width: 224, height: 320))
@@ -400,6 +402,7 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
         randomize.frame = NSRect(x: 16, y: 420, width: 224, height: 20)
         randomize.target = self
         randomize.action = #selector(randomizeToggled)
+        randomize.title = "Randomize checked"
 
         // --- Right: the selected module's controls ---------------------------
         moduleTitle.frame = NSRect(x: 256, y: 414, width: 428, height: 22)
@@ -468,11 +471,8 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
     func refresh(currentSelection: String, currentDuration: Int) {
         durationPopup.selectItem(withTag: currentDuration)
         if durationPopup.selectedItem == nil { durationPopup.selectItem(withTag: ADDuration.defaultSeconds) }
-        if let ids = settings.randomizerSet, !ids.isEmpty {
-            includeSet = Set(ids)
-        } else {
-            includeSet = Set(modules.map { $0.id })
-        }
+        includeSet = Set(settings.randomizerSet ?? [])
+        checkColumn.isHidden = (currentSelection != cycleAllTag)
         table.reloadData()
         suppressSelectionCallback = true
         if currentSelection == cycleAllTag {
@@ -517,10 +517,8 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
     }
     private var suppressSelectionCallback = false
     func tableViewSelectionDidChange(_ notification: Notification) {
-        // A deliberate click on a module row means "run THIS module": drop out of
-        // Randomize, or the row choice would be silently ignored at OK. (Programmatic
-        // selection during refresh() doesn't count.)
-        if !suppressSelectionCallback { randomize.state = .off }
+        // With Randomize on, the checkboxes carry participation and row clicks just
+        // browse a module's controls; with it off, the selected row IS the choice.
         showControls(for: selectedModule())
     }
 
@@ -559,7 +557,22 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
     }
 
     // MARK: actions
-    @objc private func randomizeToggled() { /* run-mode only; list stays for editing */ }
+    @objc private func randomizeToggled() {
+        if randomize.state == .on {
+            includeSet = Set(settings.randomizerSet ?? [])   // explicit favorites; empty by default
+            checkColumn.isHidden = false
+        } else {
+            checkColumn.isHidden = true
+        }
+        // reloadData drops the row selection; keep it, or OK falls back to cycle-all.
+        let sel = table.selectedRow
+        table.reloadData()
+        if sel >= 0 {
+            suppressSelectionCallback = true
+            table.selectRowIndexes(IndexSet(integer: sel), byExtendingSelection: false)
+            suppressSelectionCallback = false
+        }
+    }
 
     @objc private func useDefaults() {
         guard let m = selectedModule() else { return }
@@ -579,7 +592,9 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
         let duration = durationPopup.selectedItem?.tag ?? ADDuration.defaultSeconds
         if duration != settings.doc.durationSeconds { settings.setDuration(duration) }
         let allIds = Set(modules.map { $0.id })
-        settings.setRandomizerSet(includeSet == allIds || includeSet.isEmpty ? nil : Array(includeSet).sorted())
+        if randomize.state == .on {
+            settings.setRandomizerSet(includeSet == allIds || includeSet.isEmpty ? nil : Array(includeSet).sorted())
+        }
         settings.setSelection(chosen)
         settings.save()
         onDone(chosen, duration)
