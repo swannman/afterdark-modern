@@ -11,8 +11,9 @@ swift run AfterDark          # first launch downloads assets, then the picker
 ```
 
 Global preferences: the **Duration** slider under the module list (the real
-control panel's 13-stop ladder, "15 sec." to "Forever!") sets how often a
-running module re-initializes, exactly as After Dark's Duration did. Caps Lock
+control panel's 13-stop ladder, "15 sec." to "Forever!") paces the screen
+saver's Randomize rotation, exactly as the original Randomizer's Duration
+did. A single selected module runs uninterrupted, also like the original. Caps Lock
 reaches every module that listens for it (Time Flies changes clock type,
 Rodger Dodger enters play mode, ...).
 

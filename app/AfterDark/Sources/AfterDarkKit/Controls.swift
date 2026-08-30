@@ -130,7 +130,6 @@ public final class ADDurationStore: ObservableObject {
         didSet {
             guard seconds != oldValue else { return }
             UserDefaults.standard.set(seconds, forKey: ADDuration.defaultsKey)
-            EmulatedHost.durationSeconds = seconds
             ADGroupHandoff.publish()
             // Don't re-stamp the document when the new value CAME from it.
             if !reloading {
@@ -148,8 +147,11 @@ public final class ADDurationStore: ObservableObject {
         let doc = ADSharedDocBox.snapshot()
         seconds = ADDuration.sanitize(doc.durationSeconds
             ?? UserDefaults.standard.object(forKey: ADDuration.defaultsKey) as? Int)
-        // didSet does not run for the initial assignment, so arm the host explicitly.
-        EmulatedHost.durationSeconds = seconds
+        // Duration is the Randomizer's switching interval (the saver's Randomize
+        // rotation reads it from the shared document). A single running module —
+        // including every app preview — is never restarted, as in the original,
+        // so the host cycle stays permanently disarmed here.
+        EmulatedHost.durationSeconds = ADDuration.forever
     }
 
     // Absorb a Duration change made in the saver's configure sheet.

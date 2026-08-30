@@ -1,7 +1,6 @@
 import ScreenSaver
 import AppKit
 import CoreGraphics
-import IOSurface
 import os
 
 // AfterDark.saver principal class. Reuses the app's EXACT emulation drive
@@ -41,14 +40,12 @@ public final class ADSaverView: ScreenSaverView {
     private let frameLayer = CALayer()
     private let frameLock = NSLock()
     private var haveFrame = false
-    // ONE reusable IOSurface is the whole display pipeline: every frame is drawn
-    // into the same buffer and the layer's contents identity never changes.
-    // Handing CA a NEW image object per frame — CGImage contents or NSImage
-    // draws alike — leaks frame-sized buffers in the locked-screen appex
-    // (~10-25MB/s in the field; the retainer sits below our code and differs
-    // from a normal windowed session, where the same code holds flat).
-    private var surface: IOSurface?
-    private var surfaceCtx: CGContext?
+    // Present by assigning the CGImage directly as the frame layer's contents —
+    // the one path field-proven to render inside the sandboxed appex.
+    // (IOSurface creation fails silently under the appex sandbox; per-frame
+    // NSImage draws leak via CG's image cache. The historic ~10-25MB/s leak was
+    // never presentation at all: it was the undrained autorelease pool in the
+    // stream reader, fixed in EmulatedHost.)
     // Latest-wins frame presentation: the host emits 30fps but a locked-screen
     // appex may drain the main queue far slower. Naive per-frame async blocks
     // queue unboundedly, each retaining its CGImage (a ~10MB/s leak in the
@@ -108,27 +105,9 @@ public final class ADSaverView: ScreenSaverView {
         CATransaction.commit()
     }
 
-    // Draw the frame into the single reusable surface and (re)point the layer
-    // at it. Same-object contents each time; CA uploads the current pixels.
     private func present(_ img: CGImage) {
-        if surface == nil || surface!.width != img.width || surface!.height != img.height {
-            let props: [IOSurfacePropertyKey: Any] = [
-                .width: img.width, .height: img.height,
-                .bytesPerElement: 4, .pixelFormat: kCVPixelFormatType_32BGRA]
-            guard let sf = IOSurface(properties: props) else { return }
-            surface = sf
-            surfaceCtx = CGContext(data: sf.baseAddress, width: img.width, height: img.height,
-                                   bitsPerComponent: 8, bytesPerRow: sf.bytesPerRow,
-                                   space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                   bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
-                                             | CGBitmapInfo.byteOrder32Little.rawValue)
-        }
-        guard let sf = surface, let ctx = surfaceCtx else { return }
-        sf.lock(options: [], seed: nil)
-        ctx.draw(img, in: CGRect(x: 0, y: 0, width: img.width, height: img.height))
-        sf.unlock(options: [], seed: nil)
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        frameLayer.contents = sf
+        frameLayer.contents = img
         CATransaction.commit()
     }
 
@@ -172,7 +151,7 @@ public final class ADSaverView: ScreenSaverView {
         host?.stop()
         host = nil
         frameLock.lock(); haveFrame = false; pendingFrame = nil; frameLock.unlock()
-        DispatchQueue.main.async { self.frameLayer.contents = nil; self.surface = nil; self.surfaceCtx = nil }
+        DispatchQueue.main.async { self.frameLayer.contents = nil }
         super.stopAnimation()
     }
 
@@ -190,18 +169,12 @@ public final class ADSaverView: ScreenSaverView {
         // sheet or in the app — newer edit wins); unset controls run at their
         // factory defaults, which EmulatedHost seeds authentically.
         let settings = saverSettings.snapshot(for: module)
-        // ONE Duration boundary = ONE teardown + init of the next pick, exactly
-        // like the original control panel: at each boundary the engine tore down and
-        // re-inited the next Randomizer pick (with a single enabled module the "next
-        // pick" was the same module again). So when this view is rotating across
-        // several modules IT owns the boundary and the
-        // host's own cycle is disarmed — otherwise both would fire at the same instant
-        // and the host would re-init a module we are about to throw away. With a single
-        // module there is no rotation and the host performs the authentic same-module
-        // re-init itself.
-        EmulatedHost.durationSeconds = (cycling && cycleList.count > 1)
-            ? ADDuration.forever
-            : durationSeconds
+        // Duration is the RANDOMIZER's switching interval (sUnt 500: "the
+        // per-Randomizer Duration"; the control panel's sVal 503 is its default).
+        // The original never restarted a single selected module — it ran until
+        // dismissed. So the host's own cycle is ALWAYS disarmed; when Randomize
+        // is on, this view owns the rotation on the wall clock.
+        EmulatedHost.durationSeconds = ADDuration.forever
         let h = EmulatedHost(module: module, settings: settings) { [weak self] img in
             guard let self else { return }
             // Store only; presentation happens on the animateOneFrame heartbeat
@@ -271,10 +244,8 @@ public final class ADSaverView: ScreenSaverView {
             startModule(at: 0)
             return
         }
-        // Re-arm the host's duration semantics in case Duration changed.
-        EmulatedHost.durationSeconds = (cycling && cycleList.count > 1)
-            ? ADDuration.forever
-            : durationSeconds
+        // Hosts never self-cycle (Duration paces only the Randomize rotation).
+        EmulatedHost.durationSeconds = ADDuration.forever
         if let m = currentModule, let old = oldValues {
             let new = saverSettings.snapshot(for: m)
             if new != old { host?.updateSettings(new) }
