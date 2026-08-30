@@ -527,8 +527,31 @@ public final class EmulatedHost {
     }
 
     // MARK: - Stall watchdog (on `queue`)
+    // Abandonment reaper. legacyScreenSaver on modern macOS often never calls
+    // stopAnimation and leaks old saver views — each leaked view's host kept
+    // emulating invisibly, and back-pressured ones were kill-respawned by the
+    // stall watchdog forever (observed live: 22 hosts under one appex, three
+    // spawned in the same second). The saver view stamps heartbeat() from every
+    // animateOneFrame; once armed, 15s without a stamp means nobody is
+    // presenting this host's frames — stop it outright, never respawn. The
+    // live view self-heals on its next heartbeat by respawning the module, so
+    // reaping during display sleep costs one re-init on wake. The app viewer
+    // and harnesses never call heartbeat(), so they are never reaped.
+    public func heartbeat() {
+        queue.async { [weak self] in self?.lastHeartbeatAt = Date() }
+    }
+    public var isReaped: Bool { stateLock.withLock { _reaped } }
+    private var lastHeartbeatAt: Date?
+    private let stateLock = NSLock()
+    private var _reaped = false
+
     private func _checkStall() {
         guard running, !paused else { return }   // paused => intentional stall
+        if let hb = lastHeartbeatAt, Date().timeIntervalSince(hb) > 15 {
+            stateLock.withLock { _reaped = true }
+            _stop()
+            return
+        }
         // 20s of silence BETWEEN frames means a wedged host; before the FIRST frame the
         // process is initializing, which is not a hang — allow 120s so no legitimate init
         // is ever executed mid-flight, while a truly hung init still recovers eventually.

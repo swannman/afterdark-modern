@@ -218,6 +218,13 @@ public final class ADSaverView: ScreenSaverView {
     }
 
     public override func animateOneFrame() {
+        // Keep-alive stamp: hosts that stop receiving these (leaked views the
+        // appex never tears down, display sleep) reap themselves; a live view
+        // whose host was reaped respawns the current module here.
+        if let h = host {
+            h.heartbeat()
+            if h.isReaped { startModule(at: cycleIndex); return }
+        }
         // Advance the cycle on the wall clock (single-module selections never advance).
         // The period is the user's Duration; "Forever!" means the
         // rotation never comes due at all.
