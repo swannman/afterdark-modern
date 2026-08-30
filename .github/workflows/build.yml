@@ -22,8 +22,8 @@ jobs:
       - name: Resolve emulator revision
         id: rd
         run: |
-          key=$(git ls-remote https://github.com/fuzziqersoftware/resource_dasm \
-                  refs/heads/master | shasum | cut -c1-16)
+          key=$(git ls-remote https://github.com/swannman/resource_dasm \
+                  refs/heads/afterdark-perf | shasum | cut -c1-16)
           echo "key=$key" >> "$GITHUB_OUTPUT"
 
       - name: Cache third_party
@@ -36,10 +36,13 @@ jobs:
         run: |
           if [ ! -f third_party/resource_dasm/build/libresource_file.a ]; then
             git clone https://github.com/fuzziqersoftware/phosg third_party/phosg
-            git clone https://github.com/fuzziqersoftware/resource_dasm third_party/resource_dasm
+            # Our perf fork: upstream master + MemoryContext arena-refcount fix
+            # (upstream PR #104) + the PPC decode cache. Rebase-and-retire when
+            # upstream absorbs them.
+            git clone -b afterdark-perf https://github.com/swannman/resource_dasm third_party/resource_dasm
             (cd third_party/phosg && cmake -S . -B build -DCMAKE_INSTALL_PREFIX=../local \
               && cmake --build build -j4 && cmake --install build)
-            (cd third_party/resource_dasm && cmake -S . -B build -DCMAKE_PREFIX_PATH=../local \
+            (cd third_party/resource_dasm && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=../local \
               && cmake --build build --target resource_file m68kdasm resource_dasm -j4)
           fi
 
