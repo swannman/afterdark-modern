@@ -33,9 +33,13 @@ public final class ADSaverView: ScreenSaverView {
     private var modules: [ADModule] = []
     private var haveAssets = false
 
-    // Frame published by the host reader thread; read on the main thread in draw().
+    // Frames are displayed by assigning CGImages directly to a dedicated layer:
+    // one GPU-composited contents swap per frame, no per-frame NSImage or
+    // draw(_:) invocation. (The NSImage-per-draw path leaked the appex to
+    // gigabytes within minutes at 30fps — CoreGraphics caches per unique image.)
+    private let frameLayer = CALayer()
     private let frameLock = NSLock()
-    private var currentFrame: CGImage?
+    private var haveFrame = false
 
     private var host: EmulatedHost?
     private var cycleList: [ADModule] = []
@@ -64,6 +68,10 @@ public final class ADSaverView: ScreenSaverView {
         animationTimeInterval = 1.0 / 30.0
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
+        frameLayer.contentsGravity = .resizeAspect
+        frameLayer.magnificationFilter = .nearest   // crisp pixels, like the old interpolation .none
+        frameLayer.backgroundColor = NSColor.black.cgColor
+        layer?.addSublayer(frameLayer)
 
         // Resolve assets from the app-group handoff BEFORE building the catalog
         // (ADPaths' roots are evaluated once, on first access). Bundled hosts live
@@ -76,6 +84,13 @@ public final class ADSaverView: ScreenSaverView {
         modules = ADSaverCatalog.load(from: Bundle(for: ADSaverView.self))
         let summary = "init preview=\(isPreview) haveAssets=\(haveAssets) modules=\(modules.count) hosts=\(hostsDir) duration=\(ADDuration.stop(forSeconds: durationSeconds).label)"
         log.info("\(summary, privacy: .public)")
+    }
+
+    public override func layout() {
+        super.layout()
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        frameLayer.frame = bounds
+        CATransaction.commit()
     }
 
     // MARK: - Selection
@@ -117,7 +132,8 @@ public final class ADSaverView: ScreenSaverView {
     public override func stopAnimation() {
         host?.stop()
         host = nil
-        frameLock.lock(); currentFrame = nil; frameLock.unlock()
+        frameLock.lock(); haveFrame = false; frameLock.unlock()
+        DispatchQueue.main.async { self.frameLayer.contents = nil }
         super.stopAnimation()
     }
 
@@ -126,7 +142,8 @@ public final class ADSaverView: ScreenSaverView {
         cycleIndex = index % cycleList.count
         let module = cycleList[cycleIndex]
         host?.stop()
-        frameLock.lock(); currentFrame = nil; frameLock.unlock()
+        frameLock.lock(); haveFrame = false; frameLock.unlock()
+        DispatchQueue.main.async { self.frameLayer.contents = nil }
         starting = true
         moduleStartedAt = Date()
 
@@ -149,9 +166,14 @@ public final class ADSaverView: ScreenSaverView {
         let h = EmulatedHost(module: module, settings: settings) { [weak self] img in
             guard let self else { return }
             self.frameLock.lock()
-            self.currentFrame = img
+            self.haveFrame = true
             self.starting = false
             self.frameLock.unlock()
+            DispatchQueue.main.async {
+                CATransaction.begin(); CATransaction.setDisableActions(true)
+                self.frameLayer.contents = img
+                CATransaction.commit()
+            }
         }
         host = h
         h.start()
@@ -222,27 +244,10 @@ public final class ADSaverView: ScreenSaverView {
         rect.fill()
 
         frameLock.lock()
-        let img = currentFrame
+        let showingFrames = haveFrame
         let isStarting = starting
         frameLock.unlock()
-
-        if let img {
-            // Aspect-fit into bounds with black letterbox bars, nearest-neighbor
-            // (crisp pixels). NSImage.draw(respectFlipped:) renders UPRIGHT in this
-            // (non-flipped) view — fixing the spike's vertical flip. Retina backing
-            // scale is handled by the drawRect context transform.
-            let vw = bounds.width, vh = bounds.height
-            let iw = CGFloat(img.width), ih = CGFloat(img.height)
-            guard iw > 0, ih > 0 else { return }
-            let s = min(vw / iw, vh / ih)
-            let dw = iw * s, dh = ih * s
-            let dst = NSRect(x: (vw - dw) / 2, y: (vh - dh) / 2, width: dw, height: dh)
-            let ns = NSImage(cgImage: img, size: NSSize(width: iw, height: ih))
-            ns.draw(in: dst, from: .zero, operation: .copy, fraction: 1.0,
-                    respectFlipped: true,
-                    hints: [.interpolation: NSImageInterpolation.none])
-            return
-        }
+        if showingFrames { return }   // the frame layer carries the pixels
 
         // No frame yet: guidance (assets missing) or a starting message.
         let msg: String
