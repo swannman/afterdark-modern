@@ -26,6 +26,10 @@ public struct ADSharedSettings: Codable {
     // preference sandboxes; this document is the one store every process shares.
     public var selectedModule: String?
     public var selectionStamp: Double?
+    // The Randomizer's participating modules (nil/empty = all) — the original
+    // Randomizer files were exactly this: a chosen subset rotated on Duration.
+    public var randomizerSet: [String]?
+    public var randomizerSetStamp: Double?
     // Flat control values, "moduleId.controlId" -> value (ADSettingsStore's shape).
     public var values: [String: Int]
     // moduleId -> last edit time for that module's values.
@@ -95,6 +99,10 @@ public struct ADSharedSettings: Codable {
                 out.selectedModule = d.selectedModule
                 out.selectionStamp = d.selectionStamp ?? 0
             }
+            if d.randomizerSetStamp != nil, (d.randomizerSetStamp ?? 0) >= (out.randomizerSetStamp ?? -1) {
+                out.randomizerSet = d.randomizerSet
+                out.randomizerSetStamp = d.randomizerSetStamp
+            }
             for (mod, stamp) in d.moduleStamps where stamp >= (out.moduleStamps[mod] ?? -1) {
                 out.moduleStamps[mod] = stamp
                 let prefix = mod + "."
@@ -129,6 +137,11 @@ public struct ADSharedSettings: Codable {
     public mutating func setSelection(_ moduleId: String, at time: Double = Date().timeIntervalSince1970) {
         selectedModule = moduleId
         selectionStamp = time
+    }
+
+    public mutating func setRandomizerSet(_ ids: [String]?, at time: Double = Date().timeIntervalSince1970) {
+        randomizerSet = (ids?.isEmpty == true) ? nil : ids
+        randomizerSetStamp = time
     }
 
     // MARK: - Process-level load/save

@@ -253,6 +253,12 @@ public final class ADSaverSettings {
 
     public var selection: String? { doc.selectedModule }
 
+    public var randomizerSet: [String]? { doc.randomizerSet }
+
+    public func setRandomizerSet(_ ids: [String]?) {
+        doc.setRandomizerSet(ids)
+    }
+
     public func save() {
         ADSharedSettings.saveFromSaver(doc)
     }

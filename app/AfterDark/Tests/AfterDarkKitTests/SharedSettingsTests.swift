@@ -44,6 +44,16 @@ final class SharedSettingsTests: XCTestCase {
         XCTAssertEqual(d.moduleStamps["m1"], 200)
     }
 
+    func testRandomizerSetMergeNewerWins() {
+        var a = ADSharedSettings(); a.setRandomizerSet(["m1","m2"], at: 100)
+        var b = ADSharedSettings(); b.setRandomizerSet(["m3"], at: 200)
+        XCTAssertEqual(ADSharedSettings.merged([a, b]).randomizerSet, ["m3"])
+        XCTAssertEqual(ADSharedSettings.merged([b, a]).randomizerSet, ["m3"])
+        // clearing back to "all" (nil) must also win by recency
+        var c = ADSharedSettings(); c.setRandomizerSet(nil, at: 300)
+        XCTAssertNil(ADSharedSettings.merged([b, c]).randomizerSet)
+    }
+
     func testRoundTripThroughDisk() {
         var d = ADSharedSettings()
         d.set(42, module: "m1", control: "c1", at: 123)

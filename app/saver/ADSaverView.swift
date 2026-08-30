@@ -124,16 +124,27 @@ public final class ADSaverView: ScreenSaverView {
         let sel = saverSettings.selection ?? Self.kCycleAll
         if sel == Self.kCycleAll {
             cycling = true
-            cycleList = emulatable
+            cycleList = rotationPool().shuffled()
         } else if let m = emulatable.first(where: { $0.id == sel }) {
             cycling = false
             cycleList = [m]
         } else {
-            // Unknown/native selection -> fall back to cycle-all.
             cycling = true
-            cycleList = emulatable
+            cycleList = rotationPool().shuffled()
         }
         cycleIndex = 0
+    }
+
+    // The Randomizer's participating modules: the checked subset from the
+    // Options sheet, or every module when none is stored (the original
+    // "All Displays" behavior). Shuffled per pass; every member shows once
+    // before any repeats.
+    private func rotationPool() -> [ADModule] {
+        if let ids = saverSettings.randomizerSet, !ids.isEmpty {
+            let pool = emulatable.filter { ids.contains($0.id) }
+            if !pool.isEmpty { return pool }
+        }
+        return emulatable
     }
 
     // MARK: - Animation lifecycle
@@ -157,6 +168,12 @@ public final class ADSaverView: ScreenSaverView {
 
     private func startModule(at index: Int) {
         guard !cycleList.isEmpty else { return }
+        if cycling, cycleList.count > 1, index >= cycleList.count {
+            // Full pass complete: reshuffle so order varies, but avoid an
+            // immediate repeat across the boundary.
+            let last = cycleList[cycleIndex].id
+            repeat { cycleList.shuffle() } while cycleList.count > 1 && cycleList[0].id == last
+        }
         cycleIndex = index % cycleList.count
         let module = cycleList[cycleIndex]
         host?.stop()
@@ -232,12 +249,19 @@ public final class ADSaverView: ScreenSaverView {
         if firstPoll { return }   // baseline only — don't restart on the first sight
 
         let oldSelection = saverSettings.selection ?? Self.kCycleAll
+        let oldSet = saverSettings.randomizerSet
         let currentModule = cycleList.indices.contains(cycleIndex) ? cycleList[cycleIndex] : nil
         let oldValues = currentModule.map { saverSettings.snapshot(for: $0) }
         saverSettings.reload()
         durationSeconds = saverSettings.durationSeconds(sidecarFallback: sidecarDuration)
 
         let newSelection = saverSettings.selection ?? Self.kCycleAll
+        if cycling, saverSettings.randomizerSet != oldSet {
+            log.info("randomizer set changed")
+            resolveSelection()
+            startModule(at: 0)
+            return
+        }
         if newSelection != oldSelection {
             log.info("selection changed -> \(newSelection, privacy: .public)")
             resolveSelection()
@@ -331,7 +355,9 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
     private let onDone: (String, Int) -> Void
 
     private let table = NSTableView()
-    private let randomize = NSButton(checkboxWithTitle: "Randomize \u{2014} cycle through all modules", target: nil, action: nil)
+    // Which modules participate in the Randomize rotation (the checkbox column).
+    private var includeSet = Set<String>()
+    private let randomize = NSButton(checkboxWithTitle: "Randomize \u{2014} rotate through the checked modules", target: nil, action: nil)
     private let durationPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let moduleTitle = NSTextField(labelWithString: "")
     private let controlsStack = NSStackView()
@@ -360,6 +386,9 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
         table.headerView = nil
         table.rowHeight = 20
         table.style = .inset
+        let check = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("on"))
+        check.width = 22; check.minWidth = 22; check.maxWidth = 22
+        table.addTableColumn(check)
         let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("m"))
         table.addTableColumn(col)
         let listScroll = NSScrollView(frame: NSRect(x: 16, y: 92, width: 224, height: 320))
@@ -439,6 +468,11 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
     func refresh(currentSelection: String, currentDuration: Int) {
         durationPopup.selectItem(withTag: currentDuration)
         if durationPopup.selectedItem == nil { durationPopup.selectItem(withTag: ADDuration.defaultSeconds) }
+        if let ids = settings.randomizerSet, !ids.isEmpty {
+            includeSet = Set(ids)
+        } else {
+            includeSet = Set(modules.map { $0.id })
+        }
         table.reloadData()
         suppressSelectionCallback = true
         if currentSelection == cycleAllTag {
@@ -460,6 +494,12 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
     func numberOfRows(in tableView: NSTableView) -> Int { modules.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let m = modules[row]
+        if tableColumn?.identifier.rawValue == "on" {
+            let cb = NSButton(checkboxWithTitle: "", target: self, action: #selector(includeToggled(_:)))
+            cb.state = includeSet.contains(m.id) ? .on : .off
+            cb.tag = row
+            return cb
+        }
         let cell = NSTableCellView()
         let fam = m.family == .ppc ? "PPC" : "68K"
         let tf = NSTextField(labelWithString: "\(m.name)  (\(fam))")
@@ -482,6 +522,13 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
         // selection during refresh() doesn't count.)
         if !suppressSelectionCallback { randomize.state = .off }
         showControls(for: selectedModule())
+    }
+
+    @objc private func includeToggled(_ sender: NSButton) {
+        let row = sender.tag
+        guard row >= 0, row < modules.count else { return }
+        if sender.state == .on { includeSet.insert(modules[row].id) }
+        else { includeSet.remove(modules[row].id) }
     }
 
     private func selectedModule() -> ADModule? {
@@ -531,6 +578,8 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
         }
         let duration = durationPopup.selectedItem?.tag ?? ADDuration.defaultSeconds
         if duration != settings.doc.durationSeconds { settings.setDuration(duration) }
+        let allIds = Set(modules.map { $0.id })
+        settings.setRandomizerSet(includeSet == allIds || includeSet.isEmpty ? nil : Array(includeSet).sorted())
         settings.setSelection(chosen)
         settings.save()
         onDone(chosen, duration)
