@@ -3187,9 +3187,33 @@ int main(int argc, char** argv){
         if(hn==3 && i<raw.size() && hdr[0]==H.fb_w && hdr[1]==H.fb_h && hdr[2]==255){
           i++;   // the single whitespace byte after maxval
           if(raw.size()-i >= n*3){
-            for(size_t k=0;k<n;k++) mem->write_u8(H.g_fb+(uint32_t)k,
-              rgb_to_index((uint16_t)(raw[i+k*3]<<8),(uint16_t)(raw[i+k*3+1]<<8),(uint16_t)(raw[i+k*3+2]<<8)));
-            fprintf(stderr,"[adhost] seed image: P6 PPM '%s' %dx%d -> CLUT indices\n",sp,H.fb_w,H.fb_h); seeded=true; } }
+            // Floyd-Steinberg through the live CLUT (mirrors adhost68k): nearest-
+            // colour alone posterizes photographic wallpapers; System 7 dithered.
+            const int W=H.fb_w, Hh2=H.fb_h;
+            std::vector<int> derr((size_t)(W+2)*3,0), dnext((size_t)(W+2)*3,0);
+            for(int y=0;y<Hh2;y++){
+              std::fill(dnext.begin(),dnext.end(),0);
+              for(int x=0;x<W;x++){
+                size_t k=(size_t)y*W+x;
+                int r=raw[i+k*3]  +derr[(size_t)(x+1)*3+0]/16;
+                int g=raw[i+k*3+1]+derr[(size_t)(x+1)*3+1]/16;
+                int b=raw[i+k*3+2]+derr[(size_t)(x+1)*3+2]/16;
+                r=r<0?0:r>255?255:r; g=g<0?0:g>255?255:g; b=b<0?0:b>255?255:b;
+                uint8_t idx=rgb_to_index((uint16_t)(r<<8),(uint16_t)(g<<8),(uint16_t)(b<<8));
+                mem->write_u8(H.g_fb+(uint32_t)k, idx);
+                uint32_t e=H.g_clut+8+(uint32_t)idx*8;
+                int er=r-(mem->read_u16b(e+2)>>8), eg=g-(mem->read_u16b(e+4)>>8), eb=b-(mem->read_u16b(e+6)>>8);
+                int ce[3]={er,eg,eb};
+                for(int c=0;c<3;c++){
+                  derr [(size_t)(x+2)*3+c]+=ce[c]*7;
+                  dnext[(size_t)(x+0)*3+c]+=ce[c]*3;
+                  dnext[(size_t)(x+1)*3+c]+=ce[c]*5;
+                  dnext[(size_t)(x+2)*3+c]+=ce[c]*1;
+                }
+              }
+              derr.swap(dnext);
+            }
+            fprintf(stderr,"[adhost] seed image: P6 PPM '%s' %dx%d -> CLUT indices (dithered)\n",sp,H.fb_w,H.fb_h); seeded=true; } }
       }
       if(!seeded) fprintf(stderr,"[adhost] seed image '%s' unusable (%zu bytes, need %zu raw or a %dx%d P6) -> unseeded\n",
         sp,raw.size(),(size_t)H.fb_w*H.fb_h,H.fb_w,H.fb_h);

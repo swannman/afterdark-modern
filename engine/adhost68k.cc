@@ -4413,8 +4413,35 @@ int main(int argc, char** argv){
         i++;   // the single whitespace byte after maxval
         if(raw.size()-i >= n*3){
           g_seed_img.resize(n);
-          for(size_t k=0;k<n;k++) g_seed_img[k]=C.rgb_to_index((uint16_t)(raw[i+k*3]<<8),(uint16_t)(raw[i+k*3+1]<<8),(uint16_t)(raw[i+k*3+2]<<8));
-          fprintf(stderr,"[adhost68k] seed image: P6 PPM '%s' %dx%d -> CLUT indices\n",p,C.fb_w,C.fb_h);
+          // Floyd-Steinberg error diffusion through the live CLUT. Nearest-colour
+          // alone posterizes photographic wallpapers into hard bands on smooth
+          // gradients; System 7 dithered photos on 8-bit displays too. Errors are
+          // stored x16 (the divisor) with one pad cell each side of the row.
+          const int W=C.fb_w, Hh=C.fb_h;
+          std::vector<int> derr((size_t)(W+2)*3,0), dnext((size_t)(W+2)*3,0);
+          for(int y=0;y<Hh;y++){
+            std::fill(dnext.begin(),dnext.end(),0);
+            for(int x=0;x<W;x++){
+              size_t k=(size_t)y*W+x;
+              int r=raw[i+k*3]  +derr[(size_t)(x+1)*3+0]/16;
+              int g=raw[i+k*3+1]+derr[(size_t)(x+1)*3+1]/16;
+              int b=raw[i+k*3+2]+derr[(size_t)(x+1)*3+2]/16;
+              r=r<0?0:r>255?255:r; g=g<0?0:g>255?255:g; b=b<0?0:b>255?255:b;
+              uint8_t idx=C.rgb_to_index((uint16_t)(r<<8),(uint16_t)(g<<8),(uint16_t)(b<<8));
+              g_seed_img[k]=idx;
+              uint32_t e=C.g_clut+8+(uint32_t)idx*8;
+              int er=r-(mem->read_u16b(e+2)>>8), eg=g-(mem->read_u16b(e+4)>>8), eb=b-(mem->read_u16b(e+6)>>8);
+              int ce[3]={er,eg,eb};
+              for(int c=0;c<3;c++){
+                derr [(size_t)(x+2)*3+c]+=ce[c]*7;
+                dnext[(size_t)(x+0)*3+c]+=ce[c]*3;
+                dnext[(size_t)(x+1)*3+c]+=ce[c]*5;
+                dnext[(size_t)(x+2)*3+c]+=ce[c]*1;
+              }
+            }
+            derr.swap(dnext);
+          }
+          fprintf(stderr,"[adhost68k] seed image: P6 PPM '%s' %dx%d -> CLUT indices (dithered)\n",p,C.fb_w,C.fb_h);
           return; } }
     }
     fprintf(stderr,"[adhost68k] seed image '%s' unusable (%zu bytes, need %zu raw or a %dx%d P6) -> synthetic\n",
