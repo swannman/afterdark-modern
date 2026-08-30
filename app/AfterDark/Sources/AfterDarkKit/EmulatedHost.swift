@@ -46,13 +46,22 @@ public final class EmulatedHost {
     // so adrender and the harnesses spawn byte-identical environments.
     public static var displayAspect: Double?
 
-    // Width for the emulated screen at the lane's canonical height. Snapped to
-    // a multiple of 8 (even rowBytes, blit-friendly) and capped at 2x the 4:3
-    // base; displays narrower than 4:3 keep the base (aspect-fit letterboxes).
+    // Linear scale on the classic geometry (1.5 = "720p-class": 68K 576-line,
+    // PPC/l40 720-line). Saver-only, like displayAspect; 1.0 everywhere else.
+    // Sharper procedural modules at the cost of pixel-proportional emulation
+    // work and relatively smaller fixed-size sprite art.
+    public static var resolutionScale: Double = 1.0
+
+    // Emulated screen size for a lane's classic base: scaled by resolutionScale,
+    // widened to displayAspect (never narrower than the base's own ratio), each
+    // axis snapped to a multiple of 8 (even rowBytes, blit-friendly). Width is
+    // capped at 2x the scaled base so an ultrawide can't explode the framebuffer.
     static func screenSize(baseW: Int, baseH: Int) -> (Int, Int) {
-        guard let a = displayAspect, a > Double(baseW) / Double(baseH) else { return (baseW, baseH) }
-        let w = min(((Int(Double(baseH) * a) + 4) / 8) * 8, baseW * 2)
-        return (w, baseH)
+        let snap = { (v: Double) in ((Int(v) + 4) / 8) * 8 }
+        let h = snap(Double(baseH) * resolutionScale)
+        let a = max(displayAspect ?? 0, Double(baseW) / Double(baseH))
+        let w = min(snap(Double(h) * a), snap(Double(baseW) * resolutionScale) * 2)
+        return (w, h)
     }
 
     public let module: ADModule

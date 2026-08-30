@@ -193,10 +193,12 @@ public final class ADSaverView: ScreenSaverView {
         // is on, this view owns the rotation on the wall clock.
         EmulatedHost.durationSeconds = ADDuration.forever
         // Widen the emulated screen to this display's aspect so frames reach the
-        // left/right edges (aspect-fit otherwise pillarboxes the 4:3 base).
+        // left/right edges (aspect-fit otherwise pillarboxes the 4:3 base), and
+        // render at 720p-class resolution (user's pick over classic 480-line).
         if bounds.width > 0, bounds.height > 0 {
             EmulatedHost.displayAspect = Double(bounds.width / bounds.height)
         }
+        EmulatedHost.resolutionScale = 1.5
         let h = EmulatedHost(module: module, settings: settings) { [weak self] img in
             guard let self else { return }
             // Store only; presentation happens on the animateOneFrame heartbeat
