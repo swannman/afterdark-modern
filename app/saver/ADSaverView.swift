@@ -40,6 +40,13 @@ public final class ADSaverView: ScreenSaverView {
     private let frameLayer = CALayer()
     private let frameLock = NSLock()
     private var haveFrame = false
+    // Latest-wins frame presentation: the host emits 30fps but a locked-screen
+    // appex may drain the main queue far slower. Naive per-frame async blocks
+    // queue unboundedly, each retaining its CGImage (a ~10MB/s leak in the
+    // field). At most ONE presentation block is ever in flight; newer frames
+    // replace pendingFrame instead of enqueueing.
+    private var pendingFrame: CGImage?
+    private var presentScheduled = false
 
     private var host: EmulatedHost?
     private var cycleList: [ADModule] = []
@@ -132,7 +139,7 @@ public final class ADSaverView: ScreenSaverView {
     public override func stopAnimation() {
         host?.stop()
         host = nil
-        frameLock.lock(); haveFrame = false; frameLock.unlock()
+        frameLock.lock(); haveFrame = false; pendingFrame = nil; frameLock.unlock()
         DispatchQueue.main.async { self.frameLayer.contents = nil }
         super.stopAnimation()
     }
@@ -142,7 +149,7 @@ public final class ADSaverView: ScreenSaverView {
         cycleIndex = index % cycleList.count
         let module = cycleList[cycleIndex]
         host?.stop()
-        frameLock.lock(); haveFrame = false; frameLock.unlock()
+        frameLock.lock(); haveFrame = false; pendingFrame = nil; frameLock.unlock()
         DispatchQueue.main.async { self.frameLayer.contents = nil }
         starting = true
         moduleStartedAt = Date()
@@ -168,10 +175,20 @@ public final class ADSaverView: ScreenSaverView {
             self.frameLock.lock()
             self.haveFrame = true
             self.starting = false
+            self.pendingFrame = img
+            let schedule = !self.presentScheduled
+            if schedule { self.presentScheduled = true }
             self.frameLock.unlock()
+            guard schedule else { return }
             DispatchQueue.main.async {
+                self.frameLock.lock()
+                let frame = self.pendingFrame
+                self.pendingFrame = nil
+                self.presentScheduled = false
+                self.frameLock.unlock()
+                guard let frame else { return }
                 CATransaction.begin(); CATransaction.setDisableActions(true)
-                self.frameLayer.contents = img
+                self.frameLayer.contents = frame
                 CATransaction.commit()
             }
         }
