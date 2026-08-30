@@ -16,7 +16,7 @@ cd "$(dirname "$0")"
 REPO="$(cd ../../ && pwd)"
 KIT="$REPO/app/AfterDark/Sources/AfterDarkKit"
 HOSTS_SRC="$REPO/engine"
-SIGN_ID="${AD_SIGN_ID:--}"
+SIGN_ID="${AD_SIGN_ID:-Apple Development: 3lemenopy@gmail.com (KL9QDVUFA3)}"
 
 NAME=AfterDark
 OUT="$NAME.saver"
@@ -45,6 +45,7 @@ xcrun swiftc \
     -Icshim \
     -framework ScreenSaver -framework AppKit -framework CoreGraphics -framework ImageIO \
     "$KIT/EmulatedHost.swift" \
+    "$KIT/DesktopSeed.swift" \
     "$KIT/ADPaths.swift" \
     "$KIT/ADDuration.swift" \
     "$KIT/ADSharedSettings.swift" \
