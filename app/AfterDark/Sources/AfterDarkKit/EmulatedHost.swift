@@ -25,7 +25,7 @@ public final class EmulatedHost {
     // GO/F lockstep over shared memory; the P8/P6 stdout stream is kept as a
     // transparent fallback (old host, or shm setup failure). Flipped off by
     // adrender --verify-emulation's P8-fallback pass to exercise the stdout path.
-    public static var shmEnabled = true
+    public static var shmEnabled = ProcessInfo.processInfo.environment["AD_NO_SHM"] == nil
 
     // The user's Duration preference, in seconds, or
     // ADDuration.forever for "Forever!" (never cycle). Applied by _buildEnv to every

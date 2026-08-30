@@ -55,7 +55,6 @@ public final class ADSaverView: ScreenSaverView {
     // field). At most ONE presentation block is ever in flight; newer frames
     // replace pendingFrame instead of enqueueing.
     private var pendingFrame: CGImage?
-    private var presentScheduled = false
 
     private var host: EmulatedHost?
     private var cycleList: [ADModule] = []
@@ -205,23 +204,14 @@ public final class ADSaverView: ScreenSaverView {
             : durationSeconds
         let h = EmulatedHost(module: module, settings: settings) { [weak self] img in
             guard let self else { return }
+            // Store only; presentation happens on the animateOneFrame heartbeat
+            // (guaranteed main-thread cadence), which coalesces naturally and has
+            // no schedulable state that can wedge.
             self.frameLock.lock()
             self.haveFrame = true
             self.starting = false
             self.pendingFrame = img
-            let schedule = !self.presentScheduled
-            if schedule { self.presentScheduled = true }
             self.frameLock.unlock()
-            guard schedule else { return }
-            DispatchQueue.main.async {
-                self.frameLock.lock()
-                let frame = self.pendingFrame
-                self.pendingFrame = nil
-                self.presentScheduled = false
-                self.frameLock.unlock()
-                guard let frame else { return }
-                self.present(frame)
-            }
         }
         host = h
         h.start()
@@ -237,6 +227,11 @@ public final class ADSaverView: ScreenSaverView {
             startModule(at: cycleIndex + 1)
         }
         pollSharedSettings()
+        frameLock.lock()
+        let frame = pendingFrame
+        pendingFrame = nil
+        frameLock.unlock()
+        if let frame { present(frame) }
         setNeedsDisplay(bounds)
     }
 
