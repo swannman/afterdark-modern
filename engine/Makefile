@@ -1,7 +1,10 @@
 # Depends on resource_dasm + phosg checked out under third_party/ (NOT a temp dir —
 # the build links their static libraries in place). To build them:
-#   cd ../../third_party/phosg && cmake -S . -B build -DCMAKE_INSTALL_PREFIX=../local && cmake --build build -j8 && cmake --install build
-#   cd ../resource_dasm && cmake -S . -B build -DCMAKE_PREFIX_PATH=../local && cmake --build build --target resource_file m68kdasm resource_dasm -j8
+#   cd ../../third_party/phosg && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=../local && cmake --build build -j8 && cmake --install build
+#   cd ../resource_dasm && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=../local && cmake --build build --target resource_file m68kdasm resource_dasm -j8
+# CMAKE_BUILD_TYPE=Release is LOAD-BEARING: cmake's default is empty = -O0, and an
+# unoptimized emulator runs every module ~5x slower (18.7s -> 3.8s Flying Toasters
+# init; 541ms -> ~100ms Swirling Magic frames). Output is byte-identical either way.
 TP=$(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../third_party)
 RD=$(TP)/resource_dasm
 PH=$(TP)/local

@@ -8380,6 +8380,35 @@ int main(int argc, char** argv){
       if(g_sticky_black_idx>=0){ uint32_t d=C.g_clut+8+(uint32_t)g_sticky_black_idx*8;
         mem->write_u16b(d+2,0); mem->write_u16b(d+4,0); mem->write_u16b(d+6,0); }
       if(!doInstall) ADSTUB("AA3F_SetEntries_noInstall");
+    } else if(opcode==0xA004){ // PBControlSync — register-based OS trap, param block in A0.
+      // Satori animates its "color animation" through the VIDEO DRIVER's Control call
+      // (csCode 3 = cscSetEntries), NOT _SetEntries: 10 calls per drawn frame, each
+      // sliding a 256-entry window 2 entries along its own color table — classic CLUT
+      // rotation. For video drivers csParam[0..1] holds a POINTER to a VDSetEntryRecord
+      // {csTable:ColorSpec*, csStart:s16, csCount:s16}; csStart<0 means match-by-value,
+      // same rule as _SetEntries above. The host never opens a real driver so every call
+      // carries ioCRefNum 0 — do not gate on it. csCode 34 (cscDirectSetEntries) is the
+      // same record in direct-index form. Anything else stays a no-op returning noErr,
+      // which is what the generic unhandled path always did.
+      uint32_t pb=r.a[0];
+      try{
+        uint16_t csCode = pb?mem->read_u16b(pb+26):0;
+        if(pb && (csCode==3 || csCode==34) && g_setentries){
+          uint32_t rec=mem->read_u32b(pb+28);
+          if(rec){
+            uint32_t tbl=mem->read_u32b(rec);
+            int16_t start=(int16_t)mem->read_u16b(rec+4), count=(int16_t)mem->read_u16b(rec+6);
+            if(tbl && count>=0) for(int i=0;i<=count;i++){
+              int idx = (start<0)? (int16_t)mem->read_u16b(tbl+(uint32_t)i*8) : start+i;
+              if(idx<0||idx>255) continue; uint32_t src=tbl+(uint32_t)i*8+2, dst=C.g_clut+8+(uint32_t)idx*8;
+              mem->write_u16b(dst+2, mem->read_u16b(src)); mem->write_u16b(dst+4, mem->read_u16b(src+2));
+              mem->write_u16b(dst+6, mem->read_u16b(src+4)); }
+            if(getenv("ADSELOG")) fprintf(stderr,"    PBControl cscSetEntries start=%d count=%d tbl=%08X\n",start,count,tbl);
+          }
+        } else if(pb && csCode!=3 && csCode!=34) ADSTUB("A004_PBControl_noop");
+        if(pb) mem->write_u16b(pb+16,0);   // ioResult = noErr
+      }catch(...){}
+      r.d[0].u=0;
     } else if(opcode==0xA8AD){ // PtInRect(pt:Point; r:Rect*):Boolean — [A7]=r(4),[A7+4]=pt(4),
       // [A7+8]=result; pop 8, Boolean byte at [A7].
       uint32_t rp=mem->read_u32b(r.a[7]); uint32_t ptL=mem->read_u32b(r.a[7]+4);
@@ -8516,12 +8545,17 @@ int main(int argc, char** argv){
           C.qd_penline(v.back().first,v.back().second,v.front().first,v.front().second); }   // FramePoly (pen)
         else { int miny=v[0].second,maxy=v[0].second;
           for(auto&p:v){ miny=std::min(miny,p.second); maxy=std::max(maxy,p.second); }
+          // Resolve the destination pixmap ONCE for the whole fill (the qd_penstamp
+          // pattern): qd_penpx re-resolves cur_pm per pixel — 7-8 emulated reads each —
+          // which turned Zooommm!'s big tube polygons into ~0.85s stalls per PaintPoly.
+          uint32_t base;int rb,bt,bl,bb,br;
+          if(C.cur_pm(base,rb,bt,bl,bb,br))
           for(int y=miny;y<=maxy;y++){ std::vector<int> xs;
             for(size_t i=0;i<v.size();i++){ auto a=v[i]; auto b=v[(i+1)%v.size()];
               int y0=a.second,y1=b.second,x0=a.first,x1=b.first;
               if((y0<=y&&y1>y)||(y1<=y&&y0>y)){ int x=x0+(int)((double)(y-y0)*(x1-x0)/(double)(y1-y0)); xs.push_back(x); } }
             std::sort(xs.begin(),xs.end());
-            for(size_t i=0;i+1<xs.size();i+=2) for(int x=xs[i];x<=xs[i+1];x++) C.qd_penpx(x,y); } }  // PaintPoly (pen pattern/mode)
+            for(size_t i=0;i+1<xs.size();i+=2) for(int x=xs[i];x<=xs[i+1];x++) C.qd_penpx_res(base,rb,bt,bl,bb,br,x,y); } }  // PaintPoly (pen pattern/mode)
         draw_ops++; }
     // ===================================================================================
     // BULK TOOLBOX TRAP FILL. All conventions below are verified against a live call-site
