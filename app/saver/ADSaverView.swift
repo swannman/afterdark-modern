@@ -329,13 +329,18 @@ public final class ADSaverView: ScreenSaverView {
     // MARK: - Configure sheet (the control panel)
     public override var hasConfigureSheet: Bool { true }
 
-    // ONE controller (and window) per view, reused across opens — System Settings'
-    // sheet host wedges when a saver hands it a fresh window each time. The
-    // controller refreshes its content from the document on every open.
+    // A FRESH controller (and window) on every open. The cached-window approach
+    // wedged across panel sessions: closing the Screen Saver panel (without
+    // quitting Settings) tears down the ViewBridge host session the cached
+    // window was bound to, so the next present goes nowhere — user repro:
+    // open Options / OK / close the Screen Saver panel / reopen / Options dead.
+    // (The old "fresh window wedges the host" lore predates the NSApp.endSheet
+    // dismissal fix and misattributed that wedge; with the completion firing
+    // correctly, a fresh window per open is what keeps every session clean.)
     private var configController: ADConfigController?
     public override var configureSheet: NSWindow? {
         saverSettings.reload()   // absorb edits from the app / another process
-        let ctl = configController ?? ADConfigController(
+        let ctl = ADConfigController(
             modules: emulatable,
             settings: saverSettings,
             cycleAllTag: Self.kCycleAll

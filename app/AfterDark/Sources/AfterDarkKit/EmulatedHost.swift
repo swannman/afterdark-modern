@@ -433,11 +433,17 @@ public final class EmulatedHost {
             // SIGPIPE reaps any orphan. Let finite savers run effectively forever;
             // the terminationHandler respawns any that self-exit.
             env["ADFRAMES"] = "900000"
+            // A recipe that carries its own geometry is a module with a proven
+            // sweet spot (Snake's maze caps at 882x554 — 920x560 is the largest
+            // screen it actually fills); honor it verbatim, no scaling/widening.
+            let pinned = recipe.env["ADSCREENW"] != nil && recipe.env["ADSCREENH"] != nil
             if recipe.lane == "l40" {
-                let (w, h) = Self.screenSize(baseW: 640, baseH: 480)
-                env["ADSCREENW"] = String(w); env["ADSCREENH"] = String(h)
+                if !pinned {
+                    let (w, h) = Self.screenSize(baseW: 640, baseH: 480)
+                    env["ADSCREENW"] = String(w); env["ADSCREENH"] = String(h)
+                }
                 env["ADLINKMODULE"] = "1"; env["ADDLLMAXI"] = "0"; env["ADSECSRATE"] = "1"
-            } else {
+            } else if !pinned {
                 let (w, h) = Self.screenSize(baseW: 512, baseH: 384)
                 env["ADSCREENW"] = String(w); env["ADSCREENH"] = String(h)
             }

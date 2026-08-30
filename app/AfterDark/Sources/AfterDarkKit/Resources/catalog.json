@@ -3172,7 +3172,10 @@
       "argsTemplate": [
         "{RSRC}"
       ],
-      "env": {},
+      "env": {
+        "ADSCREENW": "920",
+        "ADSCREENH": "560"
+      },
       "controlEnvVar": "ADCVSET",
       "controls": [
         {
