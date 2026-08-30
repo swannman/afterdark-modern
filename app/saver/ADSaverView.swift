@@ -329,14 +329,18 @@ public final class ADSaverView: ScreenSaverView {
     // MARK: - Configure sheet (the control panel)
     public override var hasConfigureSheet: Bool { true }
 
-    // A FRESH controller (and window) on every open. The cached-window approach
-    // wedged across panel sessions: closing the Screen Saver panel (without
-    // quitting Settings) tears down the ViewBridge host session the cached
-    // window was bound to, so the next present goes nowhere — user repro:
-    // open Options / OK / close the Screen Saver panel / reopen / Options dead.
-    // (The old "fresh window wedges the host" lore predates the NSApp.endSheet
-    // dismissal fix and misattributed that wedge; with the completion firing
-    // correctly, a fresh window per open is what keeps every session clean.)
+    // A fresh controller (and window) on every open — correct hygiene, nothing
+    // stale carried between opens.
+    //
+    // KNOWN OS LIMITATION (macOS 26, Apple FB19204084 / FB19201567): if the
+    // Screen Saver panel in System Settings is CLOSED and REOPENED without
+    // quitting Settings, Apple's legacyScreenSaver host silently fails to
+    // present the Options sheet again — configureSheet is called and returns a
+    // valid window, but the host never shows it. This is an unfixed framework
+    // bug that hits every third-party legacy screensaver; it does not reproduce
+    // in the standalone app. Verified independent of our dismissal path (fresh
+    // vs cached window, host-driven vs self-driven teardown all behave the
+    // same). Workaround for the user: configure in the app, or quit Settings.
     private var configController: ADConfigController?
     public override var configureSheet: NSWindow? {
         saverSettings.reload()   // absorb edits from the app / another process
@@ -397,6 +401,7 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
 
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 460),
                          styleMask: [.titled], backing: .buffered, defer: false)
+        w.isReleasedWhenClosed = false
         w.title = "After Dark"
         self.window = w
         super.init()
@@ -627,21 +632,12 @@ final class ADConfigController: NSObject, NSTableViewDataSource, NSTableViewDele
     }
 
     private func endSheet() {
-        // TWO host contracts must both be satisfied, in this order:
-        // 1. NSApp.endSheet — the documented ScreenSaver dismissal. System Settings'
-        //    sheet host (the Wallpaper agent's LegacyScreenSaverModule) keys its
-        //    completion on THIS call; ending only via sheetParent.endSheet closes the
-        //    sheet visually but leaves Settings' modal-session bookkeeping armed, so
-        //    the Options button goes dead until Settings relaunches (live-debugged:
-        //    presentConfigureSheetWithCompletionBlock re-entered per click, main
-        //    thread idle, hostWindowModalSessionStatus polling forever).
-        // 2. Detach from any sheetParent + orderOut — leaving the window attached is
-        //    the OTHER wedge, where the sheet can never be presented again.
+        // The module signals completion with NSApp.endSheet ONLY; the
+        // legacyScreenSaver host is registered as the sheet's didEnd handler and
+        // performs the orderOut/teardown itself. Doing our own orderOut/close/
+        // endSheet(parent) here races the host — verified to leave its modal
+        // bookkeeping inconsistent — so we signal and stop.
         NSApp.endSheet(window)
-        if let parent = window.sheetParent {
-            parent.endSheet(window)
-        }
-        window.orderOut(nil)
     }
 }
 
