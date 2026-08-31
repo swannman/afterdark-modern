@@ -354,6 +354,7 @@ static void adpc_load(adtoolbox::ToolboxCanvas& C){
     C.qd_clip_b=it->second.b; C.qd_clip_r=it->second.r; C.clip_rgn=it->second.rgn;
   } else { C.qd_clip_t=0; C.qd_clip_l=0; C.qd_clip_b=32767; C.qd_clip_r=32767; C.clip_rgn=0; }
 }
+static int16_t g_msg_result=0;   // Pascal result word of the last module message (see call_module)
 static bool g_gwtrack=false;        // track QDExtensions Get/SetGWorld -> cur_port
 static bool g_gwblank=false;        // PerformBlank fb-clear scope — {Fish World, Slow Burn} only
 // ADSBHITS (Slow Burn diagnostic, default-off): count entries at DisplayPop8 / UpdateScreen /
@@ -12120,6 +12121,14 @@ int main(int argc, char** argv){
     auto& rr = emu.registers();
     g_cm_phase=label;
     draw_ops=0;
+    // ---- ADgm message RESULT word ---------------------------------------------------------------
+    // module_main is a Pascal FUNCTION. Its epilogue (dispatcher @0x00102E8A on every classic ADgm
+    // module: `move.w [A6+0x16],[A6-2]; unlink; movea.l (A7)+,A0; lea A7,[A7+0x0E]; jmp (A0)`) writes a
+    // word result to [A6+0x16] and then pops the 14 argument bytes, so with the host's push order that
+    // word lands at exactly STACK_TOP. Clear it before each call so a non-zero read afterwards can only
+    // be a value THIS message wrote, never a leftover.
+    g_msg_result = 0;
+    try{ mem->write_u16b(STACK_TOP, 0); }catch(...){}
     if(dllMode){
       // two-A5 model: a large 4.0 module runs with A5 = its OWN module world so its 65KB of
       // globals are s16-addressable off a5_mod. Library/AD3 modules keep the shared lib510.a5.
@@ -12203,13 +12212,14 @@ int main(int argc, char** argv){
       if(getenv("ADTOPCATCHLOG")) fprintf(stderr,"[topcatch] %s(msg=%d): [A5-0x325E]<-jmpbuf %08X (libA5=%08X modA5=%08X)\n",
         label,msg,topJB,lib510.a5,lib510.twoA5?lib510.a5_mod:0);
     }
+    auto grab_result=[&]{ try{ g_msg_result=(int16_t)mem->read_u16b(STACK_TOP); }catch(...){ g_msg_result=0; } };
     try { emu.execute(); g_dll_budget=-1;
       if(getenv("ADDLLICNT")) fprintf(stderr,"[dllicnt] %s(msg=%d) instructions=%llu\n",label,msg,(unsigned long long)g_dll_used);
-      return true; }
+      grab_result(); return true; }
     catch(const exception& ex){
       g_dll_budget=-1;
       if(getenv("ADDLLICNT")) fprintf(stderr,"[dllicnt] %s(msg=%d) instructions=%llu (ended: %s)\n",label,msg,(unsigned long long)g_dll_used,ex.what());
-      if(strstr(ex.what(),"sentinel")) return true;   // clean per-message return
+      if(strstr(ex.what(),"sentinel")){ grab_result(); return true; }   // clean per-message return
       fprintf(stderr,"[adhost68k] %s(msg=%d) FAULT: %s pc=%08X a7=%08X\n",label,msg,ex.what(),rr.pc,rr.a[7]);
       if(getenv("ADFAULTDUMP")){ uint32_t p=rr.pc&~1u;
         fprintf(stderr,"    D:"); for(int i=0;i<8;i++) fprintf(stderr," %08X",rr.d[i].u);
@@ -12958,6 +12968,17 @@ int main(int argc, char** argv){
   // rebuild. Rate-limited (ADRESHOTCOOL frames) so a broken module cannot fault-loop the CPU; the
   // process cycle timer remains the coarse backstop. Default-ON; ADNORESHOT opts out.
   const bool g_reshot_on = !getenv("ADNORESHOT");
+  // ADDRAWRESULT=1 arms the draw-result contract above (default OFF while it is being measured:
+  // it changes the DRIVE for every module that returns non-zero from a draw, not just the one that
+  // motivated it). ADNODRAWRESULT is reserved as the opt-out if it is ever promoted to default.
+  // DEFAULT ON (addm 843): the AUTHENTIC engine contract — module_main is a
+  // Pascal FUNCTION whose word result lands at STACK_TOP; a non-zero DRAW
+  // result means "this shot is over" and the real engine re-inits before the
+  // next draw. Measured blast radius (3-way, 62 modules): lever-off inert
+  // 62/62; armed, exactly ONE module beyond Artist moves — Confetti Factory,
+  // restarting per its documented workshift gag (addm 739). ADNODRAWRESULT
+  // reverts to fault-driven-only reshots.
+  const bool g_drawresult_on = !getenv("ADNODRAWRESULT");
   const int  g_reshot_cool = getenv("ADRESHOTCOOL") ? atoi(getenv("ADRESHOTCOOL")) : 3;
   int  g_reshot_last = -100000; long g_reshot_n = 0; bool g_ever_drew_ok = false;
   for(int fN=0; fN<frames; fN++){
@@ -13166,6 +13187,22 @@ int main(int argc, char** argv){
         if(g_s4log) fprintf(stderr,"[cycle] fN=%d module cleared its instance slot -> re-init\n",fN);
       } }
     if(g_advance) s4_drew_ok = call_module(drawMsg, "draw");   // skip the plain draw on re-send frames (g_fb held)
+    // ---- DRAW-RESULT CONTRACT: the module asking to be rebuilt -----------------------------------
+    // A non-zero result from the DRAW message is the module telling the engine "this shot is over" or
+    // "I cannot continue" — the real engine disposes the instance and constructs a new one before it
+    // sends another draw. The host only ever reacted to a FAULT (the inter-shot rebuild below), so a
+    // module that tears its own object down on the way out gets one more draw through the dangling
+    // pointer first, and the fault that follows is the HOST's, not the module's. Structural and
+    // name-free: it can only arm for a module that actually writes a non-zero result word.
+    // Rate-limited on the same cooldown as the reshot so a module that returns non-zero every frame
+    // cannot spin the CPU re-initialising.
+    if(g_drawresult_on && g_advance && s4_drew_ok && g_msg_result!=0
+       && (fN - g_reshot_last) >= g_reshot_cool){
+      g_reshot_last = fN; g_reshot_n++;
+      if(g_s4log) fprintf(stderr,"[s4-result] fN=%d draw returned %d -> rebuild #%ld\n",fN,(int)g_msg_result,g_reshot_n);
+      call_module(0,"result-init");
+      if(!getenv("ADNOBLANK")) call_module(blankMsg,"result-blank");
+    }
     if(s4_warmup && s4_drew_ok && s4_fbhash()==s4_warm_base){   // frame-0 draw was visually INERT (silent layout)
       int wn=0;
       for(; wn<s4_warmup_cap; wn++){
