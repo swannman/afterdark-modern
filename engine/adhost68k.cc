@@ -8938,6 +8938,13 @@ int main(int argc, char** argv){
   // The args are a params block, the message/selector (word), the GrafPort, and a globals/frame block.
   uint32_t params = mem->allocate(0x400); mem->memset(params,0,0x400);
   uint32_t glob   = mem->allocate(0x400); mem->memset(glob,0,0x400);
+  // ADHEAPNUDGE2 (diagnostic, default off): same idea as ADHEAPNUDGE but at the LATE allocation point,
+  // just after params/glob — which is where feature work tends to add its own allocations. The two sites
+  // perturb different parts of the sequence and a fix must be invariant under BOTH. This is the site that
+  // matters in practice: on pre-fix main a bare mem->allocate(4) HERE was enough to make Fish! Pro's
+  // 0x02020016 init fault disappear (and 512 brought it back), which is how the ADVIDDCE attribution was
+  // shown to be a 324-byte heap nudge rather than a fix. Per the nudge-invariance rule, use both.
+  if(const char* z=getenv("ADHEAPNUDGE2")){ long n=atol(z); if(n>0) mem->allocate((size_t)n); }
   // ---- Unit table + video-driver DCE (ADVIDDCE) -------------------------------------------------
   // A saver that wants the screen's NuBus slot (to install a SLOT VBL task on the video card) walks
   // GDevice.gdRefNum -> GetDCtlEntry(refNum) -> DCtlEntry.dCtlSlot. The classic GetDCtlEntry glue is
