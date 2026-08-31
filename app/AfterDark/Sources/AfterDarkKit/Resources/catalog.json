@@ -117,6 +117,65 @@
       "credits": "By Bob Ting, Jeff Mott and P.J. Sonnichsen\n© 1996 Berkeley Systems, Inc."
     },
     {
+      "id": "68k-artist",
+      "displayName": "Artist",
+      "family": "68K",
+      "host": "engine/adhost68k",
+      "workingDir": "engine",
+      "rsrcPath": "deluxe/extracted/dlx/After Dark Deluxe (4/Artist/..namedfork/rsrc",
+      "argsTemplate": [
+        "{RSRC}"
+      ],
+      "env": {},
+      "controlEnvVar": "ADCVSET",
+      "lane": "std",
+      "controls": [
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "type": "popup",
+          "label": "Tool:",
+          "defaultValue": 3,
+          "options": [
+            "Aquarelle",
+            "Chalk",
+            "Pastel",
+            "Felt-tip /",
+            "Felt-tip \\",
+            "Felt-tip —",
+            "Felt-tip |",
+            "-",
+            "Random"
+          ]
+        },
+        {
+          "id": "c1001",
+          "resourceId": 1001,
+          "type": "slider",
+          "label": "Detail:",
+          "min": 0,
+          "max": 100,
+          "defaultValue": 100
+        },
+        {
+          "id": "c1002",
+          "resourceId": 1002,
+          "type": "slider",
+          "label": "Delay:",
+          "min": 0,
+          "max": 90,
+          "defaultValue": 15
+        },
+        {
+          "id": "c1003",
+          "resourceId": 1003,
+          "type": "button",
+          "label": "Pictures…",
+          "defaultValue": 8
+        }
+      ]
+    },
+    {
       "id": "ppc-bad-dog",
       "displayName": "Bad Dog!",
       "family": "PPC",

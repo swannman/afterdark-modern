@@ -985,6 +985,54 @@ static void pm_warn_direct(const char* op, int sdepth, int ddepth){
                  "This host's blit paths are indexed-only (1/2/4/8bpp); no 16/32bpp path exists.\n",
           op, sdepth, ddepth);
 }
+// ---- direct-colour (RGBDirect) pixel access ---------------------------------
+// A 16- or 32-bit pixmap stores RGB samples in the pixel itself: 32bpp is xRGB one byte per
+// component, 16bpp is 0RRRRRGGGGGBBBBB. Modules that want photographic quality ask NewGWorld
+// for a 32bpp offscreen, draw a picture into it and then read the samples back themselves, so
+// the buffer has to hold TRUE COLOUR — writing palette indices into it would hand the module
+// three quarters of a neighbouring pixel as its red channel.
+static inline void pm_get_rgb(const std::shared_ptr<ResourceDASM::MemoryContext>& mem,
+                              uint32_t addr, int depth, uint16_t& R, uint16_t& G, uint16_t& B){
+  if(depth==32){ R=(uint16_t)(mem->read_u8(addr+1)<<8); G=(uint16_t)(mem->read_u8(addr+2)<<8);
+                 B=(uint16_t)(mem->read_u8(addr+3)<<8); }
+  else { uint16_t v=(uint16_t)mem->read_u16b(addr);
+         R=(uint16_t)(((v>>10)&0x1F)<<11); G=(uint16_t)(((v>>5)&0x1F)<<11); B=(uint16_t)((v&0x1F)<<11); }
+}
+static inline void pm_put_rgb(const std::shared_ptr<ResourceDASM::MemoryContext>& mem,
+                              uint32_t addr, int depth, uint16_t R, uint16_t G, uint16_t B){
+  if(depth==32){ mem->write_u8(addr+0,0); mem->write_u8(addr+1,(uint8_t)(R>>8));
+                 mem->write_u8(addr+2,(uint8_t)(G>>8)); mem->write_u8(addr+3,(uint8_t)(B>>8)); }
+  else mem->write_u16b(addr,(uint16_t)(((R>>11)<<10)|((G>>11)<<5)|(B>>11)));
+}
+// Depth of the pixmap the CURRENT port draws into: 8 for the screen, for a classic B&W GrafPort
+// and for any indexed pixmap; 16/32 for a direct-colour GWorld. force_screen redirects every draw
+// to the 8bpp framebuffer, so it answers 8 regardless.
+static int cur_dst_depth(const std::shared_ptr<ResourceDASM::MemoryContext>& mem,
+                         const adtoolbox::ToolboxCanvas& C){
+  uint32_t port=C.cur_port?C.cur_port:C.g_port; if(!port||C.force_screen) return 8;
+  try{
+    if((mem->read_u16b(port+0x06)&0xC000)!=0xC000) return 8;
+    uint32_t pmh=mem->read_u32b(port+0x02); if(!pmh) return 8;
+    uint32_t pm=mem->read_u32b(pmh); if(!pm) return 8;
+    int ps=(int)mem->read_u16b(pm+0x20);
+    return (ps==16||ps==32)? ps : 8;
+  }catch(...){ return 8; }
+}
+// One pixel into a direct-colour destination, through the same clip / clip-region / port-origin /
+// pixmap-bounds pipeline ToolboxCanvas::qd_px uses, so a 32bpp GWorld clips identically to an
+// indexed one.
+static void qd_px_direct(const std::shared_ptr<ResourceDASM::MemoryContext>& mem,
+                         adtoolbox::ToolboxCanvas& C, int x, int y, int depth,
+                         uint16_t R, uint16_t G, uint16_t B){
+  uint32_t base;int rb,bt,bl,bb,br; if(!C.cur_pm(base,rb,bt,bl,bb,br)) return;
+  if(x<C.qd_clip_l||x>=C.qd_clip_r||y<C.qd_clip_t||y>=C.qd_clip_b) return;
+  if(C.clip_rgn && x>=0 && y>=0 && x<C.fb_w && y<C.fb_h){
+    auto it=C.rgn_masks.find(C.clip_rgn);
+    if(it!=C.rgn_masks.end() && !it->second[(size_t)y*C.fb_w+x]) return; }
+  int px=(x-C.qd_org_h)-bl, py=(y-C.qd_org_v)-bt;
+  if(px<0||py<0||px>=(br-bl)||py>=(bb-bt)) return;
+  pm_put_rgb(mem, base+(uint32_t)py*rb+(uint32_t)px*(depth/8), depth, R,G,B);
+}
 
 // ---- QuickDraw PICT interpreter (subset) ---------------------------------
 // Renders the common PICT opcodes into the 8-bit canvas. Covers PICT v2 (word
@@ -1007,10 +1055,12 @@ static bool draw_pict_rd(std::shared_ptr<ResourceDASM::MemoryContext> mem, adtoo
     auto& img = dec.image;
     size_t w=img.get_width(), h=img.get_height();
     if(!w||!h) return false;
+    int ddepth = cur_dst_depth(mem, C);
     for(size_t y=0;y<h;y++) for(size_t x=0;x<w;x++){
       uint32_t c=img.read(x,y);
-      uint8_t idx=C.rgb_to_index((uint16_t)(phosg::get_r(c)<<8),(uint16_t)(phosg::get_g(c)<<8),(uint16_t)(phosg::get_b(c)<<8));
-      C.qd_px(dstL+(int)x, dstT+(int)y, idx);
+      uint16_t R=(uint16_t)(phosg::get_r(c)<<8), G=(uint16_t)(phosg::get_g(c)<<8), B=(uint16_t)(phosg::get_b(c)<<8);
+      if(ddepth>8) qd_px_direct(mem, C, dstL+(int)x, dstT+(int)y, ddepth, R,G,B);
+      else C.qd_px(dstL+(int)x, dstT+(int)y, C.rgb_to_index(R,G,B));
     }
     return true;
   }catch(...){ return false; }
@@ -1057,7 +1107,14 @@ static void draw_pict(std::shared_ptr<ResourceDASM::MemoryContext> mem, adtoolbo
       int width=bR-bL, height=bB-bT;
       int pixelSize=1; uint32_t ctPtr=0; int ctCount=0; uint32_t q;
       if(isPixMap){
-        pixelSize=u16(pm+0x20);
+        // pixelSize. The PICT PixMap omits baseAddr, so its fields sit 4 below Inside Macintosh's
+        // offsets: rowBytes@0, bounds@2, pmVersion@0x0A, packType@0x0C, packSize@0x0E, hRes@0x12,
+        // vRes@0x16, pixelType@0x1A, pixelSize@0x1C, cmpCount@0x1E, cmpSize@0x20. Reading 0x20 gets
+        // cmpSize, which for every INDEXED depth happens to equal pixelSize (1/2/4/8) — which is why
+        // the wrong offset went unnoticed — but for direct colour it reads 5 on a 16bpp picture and
+        // 8 on a 32bpp one, so a true-colour picture was decoded as an 8bpp indexed image whose rows
+        // are four times too long. ADPICTCMPSIZE=1 restores the old read for A/B.
+        pixelSize = getenv("ADPICTCMPSIZE") ? u16(pm+0x20) : u16(pm+0x1C);
         // 24/32-bit direct color: the hand path below only knows 16-bit 5-5-5, so it would
         // mis-decode these entirely (Bogglins' 32bpp tile sprites -> nothing). Hand the WHOLE
         // picture to resource_dasm's QuickDraw engine, quantized to our palette, then stop.
@@ -4956,6 +5013,84 @@ int main(int argc, char** argv){
     (*blk_size)[h]=d.size(); (*blk_size)[p2]=d.size(); f->handles[key]=h; return h;
   };
 
+  // ---- HFS DIRECTORY + DATA-FORK layer (the picture-file modules' world) -----------------------
+  // The resource-fork server above answers "open this file's resource fork". A whole class of
+  // modules instead reads PICTURE FILES: Artist walks the AD folder tree with PBGetCatInfo, picks a
+  // file whose Finder type is 'PICT', and spools the picture out of its DATA fork with
+  // PBHOpen/PBGetEOF/PBSetFPos/PBRead. Against the old stub (every FSDispatch -> fnfErr, no data-fork
+  // traps at all) that search cannot succeed, so those modules take their "no pictures" error exit.
+  //
+  // The model: a directory identified by a dirID, exactly as HFS does it. dirID 2 is the volume root
+  // (here: the Deluxe folder that contains the module), every other directory gets a stable id the
+  // first time it is named. Only paths that really exist on disk are served; anything else keeps the
+  // honest fnfErr, so a module probing for a file we do not have still takes its fallback path.
+  // Serving the picture-file world is DEFAULT-ON, unlike the resource-fork server above (ADREALFS),
+  // because it cannot invent a success: every arm resolves a real path under the Deluxe folder or
+  // returns the same fnfErr the old stub returned, so a module probing for a file we do not have takes
+  // exactly the fallback it took before. ADNOFILEFS restores the "no filesystem at all" stub for A/B.
+  const bool g_filefs = getenv("ADREALFS") || !getenv("ADNOFILEFS");
+  auto fs_id2path = make_shared<std::map<int32_t,std::string>>();   // dirID -> disk path
+  auto fs_path2id = make_shared<std::map<std::string,int32_t>>();
+  (*fs_id2path)[2]=rf_root; (*fs_path2id)[rf_root]=2;
+  // Stable per-path dirID. The value is the same hash the pre-existing GetCatInfo arm already wrote
+  // into ioDirID, so directory ids modules may have cached do not move; the map just makes them
+  // invertible. (Collisions are resolved by probing upward, which cannot change an id already given.)
+  auto fs_dirid=[fs_id2path,fs_path2id](const std::string& disk)->int32_t{
+    auto it=fs_path2id->find(disk); if(it!=fs_path2id->end()) return it->second;
+    int32_t id = 100 + (int32_t)(std::hash<std::string>{}(disk)&0x7FFF);
+    while(fs_id2path->count(id)) id++;
+    (*fs_id2path)[id]=disk; (*fs_path2id)[disk]=id; return id;
+  };
+  auto fs_dirpath=[fs_id2path,rf_root](int32_t id)->std::string{
+    auto it=fs_id2path->find(id); return it==fs_id2path->end()? std::string() : it->second;
+  };
+  // Sorted directory listing, cached. HFS index order is the catalog's, which for these repacked
+  // folders is indistinguishable from name order; a stable order is what the enumeration needs.
+  auto fs_children=[](const std::string& dir)->const std::vector<std::string>&{
+    static std::map<std::string,std::vector<std::string>> cache;
+    auto it=cache.find(dir); if(it!=cache.end()) return it->second;
+    std::vector<std::string> v;
+    if(DIR* dp=opendir(dir.c_str())){ struct dirent* de;
+      while((de=readdir(dp))){ std::string n=de->d_name;
+        if(n=="."||n==".."||n==".DS_Store") continue; v.push_back(n); }
+      closedir(dp); std::sort(v.begin(),v.end()); }
+    return cache.emplace(dir,std::move(v)).first->second;
+  };
+  // Case-insensitive child lookup (HFS is case-insensitive; the repack's names are not guaranteed
+  // to match the module's spelling byte for byte).
+  auto fs_child=[fs_children](const std::string& dir, const std::string& name)->std::string{
+    auto lower=[](std::string s){ for(auto&c:s) c=(char)tolower((unsigned char)c); return s; };
+    std::string want=lower(name);
+    for(const auto& e : fs_children(dir)) if(lower(e)==want) return dir+"/"+e;
+    return "";
+  };
+  // Finder type of a real file, decided by CONTENT, not by name. A PICT file is a 512-byte zero
+  // header, then the picture's own 10-byte header (picSize + picFrame), then the version opcode:
+  // $11 $01 for a version-1 picture, $0011 $02FF for version 2 — the signature the Finder's stored
+  // type would have agreed with.
+  auto fs_ftype=[FOURCC](const std::string& path)->uint32_t{
+    FILE* f=fopen(path.c_str(),"rb"); if(!f) return 0;
+    unsigned char hdr[528]; size_t n=fread(hdr,1,sizeof hdr,f); fclose(f);
+    if(n<sizeof hdr) return 0;
+    for(int i=0;i<512;i++) if(hdr[i]) return 0;
+    const unsigned char* op=hdr+512+10;
+    if(op[0]==0x11 && op[1]==0x01) return FOURCC("PICT");                       // version 1
+    if(op[0]==0x00 && op[1]==0x11 && op[2]==0x02 && op[3]==0xFF) return FOURCC("PICT");  // version 2
+    return 0;
+  };
+  // Open data forks, keyed by the refNum handed back to the module. Refs start above the resource
+  // -fork range so the two servers can never confuse each other's numbers.
+  struct DFOpen { int16_t ref; std::string path; std::vector<uint8_t> data; uint32_t pos; };
+  auto df_open = make_shared<std::vector<DFOpen>>();
+  auto df_next = make_shared<int16_t>((int16_t)64);
+  auto df_find=[df_open](int16_t ref)->DFOpen*{ for(auto& f:*df_open) if(f.ref==ref) return &f; return nullptr; };
+  // "Is this param block's ioRefNum one of ours?" — asked in a trap-arm CONDITION, where a throw from
+  // an unreadable param block would surface to the caller as a module fault, so the read is guarded.
+  auto df_owns_ref=[df_find,mem](uint32_t pb)->bool{
+    if(!pb) return false;
+    try{ return df_find((int16_t)mem->read_u16b(pb+0x18))!=nullptr; }catch(...){ return false; }
+  };
+
   // Polygon recording state (OpenPoly/MoveTo/LineTo/ClosePoly/PaintPoly/FramePoly). The vertex list
   // between OpenPoly and ClosePoly is captured and drawn on Paint/Frame; shape savers (Shapes,
   // Sunburst) render blank without it.
@@ -6693,6 +6828,88 @@ int main(int argc, char** argv){
         if(getenv("ADFSLOG")||getenv("ADTRAPLOG")) fprintf(stderr,"      [AA52 sel=%u UNIMPL] D0=%08X\n",sel,r.d[0].u);
         r.d[0].u=0xFFFFFFD5;
       }
+    } else if(g_filefs && (base==0x000||base==0x001||base==0x002||base==0x011||base==0x044)
+              && (base==0x000 || df_owns_ref(r.a[0]))){
+      // Claimed only for a refNum THIS server opened. The trap-number low byte these five share is also
+      // worn by the Device Manager's Open/Close/Read/Control (Rodger Dodger issues a PBRead against a
+      // refNum it never opened here, and answering it at all collapses the module), so ownership of the
+      // refNum — not the trap number — is what says the call is ours.
+      // DATA-FORK File Manager: PBHOpen / PBClose / PBRead / PBGetEOF / PBSetFPos (A0=paramBlk).
+      // These are the traps a spooled-picture module drives after PBGetCatInfo has named the file:
+      // open the data fork, ask for its length, seek past the 512-byte PICT file header, and read.
+      // The whole fork is slurped once at open; these files are hundreds of KB, and holding the bytes
+      // makes the read/seek arithmetic exact without keeping host descriptors alive across frames.
+      // IOParam: ioResult@0x10 ioNamePtr@0x12 ioVRefNum@0x16 ioRefNum@0x18 ioPermssn@0x1B ioMisc@0x1C
+      //          ioBuffer@0x20 ioReqCount@0x24 ioActCount@0x28 ioPosMode@0x2C ioPosOffset@0x2E
+      //          ioDirID@0x30 (HFS variants only)
+      // `served` distinguishes "this server performed the call" from "an Open whose file we do not
+      // have". An unresolved Open must leave EXACTLY the pre-existing unhandled-trap answer (D0 = 0,
+      // param block untouched) so a Device Manager Open riding the same trap number is unaffected.
+      uint32_t pb=r.a[0]; int32_t err=0xFFFFFFD5; bool served=false;
+      const char* what="?";
+      if(!pb){ /* leave fnfErr */ }
+      else if(base==0x000){                                           // (PBH)Open — data fork
+        what="Open";
+        std::string nm; try{ uint32_t np=mem->read_u32b(pb+0x12);
+          if(np){ uint8_t L=mem->read_u8(np); for(int i2=0;i2<L;i2++) nm+=(char)mem->read_u8(np+1+i2); } }catch(...){}
+        // Same "only directories we published" rule as PBGetCatInfo above: a file is openable only if
+        // the caller reached its directory through our own chain.
+        int32_t parID=0; if(opcode&0x0200) try{ parID=(int32_t)mem->read_u32b(pb+0x30); }catch(...){}
+        std::string parent = fs_dirpath(parID);
+        if(parent.empty() && getenv("ADREALFS")) parent = rf_root;
+        std::string disk = (nm.empty()||parent.empty())? std::string() : fs_child(parent,nm);
+        struct stat st;
+        if(!disk.empty() && ::stat(disk.c_str(),&st)==0 && S_ISREG(st.st_mode)){
+          DFOpen f; f.ref=(*df_next)++; f.path=disk; f.pos=0;
+          if(FILE* fp=fopen(disk.c_str(),"rb")){
+            f.data.resize((size_t)st.st_size);
+            if(!f.data.empty()) { size_t got=fread(f.data.data(),1,f.data.size(),fp); f.data.resize(got); }
+            fclose(fp);
+            try{ mem->write_u16b(pb+0x18,(uint16_t)f.ref); }catch(...){}
+            df_open->push_back(std::move(f)); err=0; served=true;
+          }
+        }
+      } else {
+        int16_t ref=0; try{ ref=(int16_t)mem->read_u16b(pb+0x18); }catch(...){}
+        DFOpen* f=df_find(ref);
+        if(f){
+          served=true;
+          if(base==0x001){ what="Close";
+            for(size_t i2=0;i2<df_open->size();i2++) if(&(*df_open)[i2]==f){ df_open->erase(df_open->begin()+i2); break; }
+            err=0;
+          } else if(base==0x011){ what="GetEOF";                      // logical EOF -> ioMisc
+            try{ mem->write_u32b(pb+0x1C,(uint32_t)f->data.size()); }catch(...){} err=0;
+          } else if(base==0x044){ what="SetFPos";                     // ioPosMode 1=start 2=end 3=mark
+            int16_t mode=0; int32_t off=0;
+            try{ mode=(int16_t)mem->read_u16b(pb+0x2C); off=(int32_t)mem->read_u32b(pb+0x2E); }catch(...){}
+            int64_t np = mode==1? off : mode==2? (int64_t)f->data.size()+off :
+                         mode==3? (int64_t)f->pos+off : (int64_t)f->pos;
+            if(np<0) np=0;
+            if(np>(int64_t)f->data.size()){ np=(int64_t)f->data.size(); err=0xFFFFFFC1; }  // eofErr -39
+            else err=0;
+            f->pos=(uint32_t)np;
+            try{ mem->write_u32b(pb+0x2E,f->pos); }catch(...){}
+          } else if(base==0x002){ what="Read";
+            uint32_t buf=0, want=0; int16_t mode=0; int32_t off=0;
+            try{ buf=mem->read_u32b(pb+0x20); want=mem->read_u32b(pb+0x24);
+                 mode=(int16_t)mem->read_u16b(pb+0x2C); off=(int32_t)mem->read_u32b(pb+0x2E); }catch(...){}
+            if(mode==1) f->pos=(uint32_t)std::max<int32_t>(0,off);
+            else if(mode==2){ int64_t p2=(int64_t)f->data.size()+off; f->pos=(uint32_t)std::max<int64_t>(0,p2); }
+            else if(mode==3){ int64_t p2=(int64_t)f->pos+off; f->pos=(uint32_t)std::max<int64_t>(0,p2); }
+            uint32_t avail = f->pos<f->data.size()? (uint32_t)(f->data.size()-f->pos) : 0;
+            uint32_t got = std::min(want,avail);
+            if(buf) for(uint32_t i2=0;i2<got;i2++) try{ mem->write_u8(buf+i2,f->data[f->pos+i2]); }catch(...){ break; }
+            f->pos += got;
+            try{ mem->write_u32b(pb+0x28,got); mem->write_u32b(pb+0x2E,f->pos); }catch(...){}
+            err = (got<want)? 0xFFFFFFC1 : 0;                          // eofErr on a short read
+          }
+        }
+      }
+      if(served){ r.d[0].u=(uint32_t)err; try{ mem->write_u16b(pb+0x10,(uint16_t)(err&0xFFFF)); }catch(...){} }
+      else r.d[0].u=0;                                                // unclaimed: the old provisional noErr
+      if(getenv("ADFSLOG")||getenv("ADTRAPLOG"))
+        fprintf(stderr,"      [realfs] %s(A%03X) pb=%08X -> %s%d\n", what, opcode&0xFFF, pb,
+                served?"":"(unclaimed) ", served?err:0);
     } else if(base==0x060){ // FSDispatch/HFSDispatch (A260) — register-based (A0=paramBlk, D0=sel).
       // We have no filesystem, so honestly report file-not-found. Modules that probe for an
       // OPTIONAL data/prefs file (Clocks, Rat Race loop: Get1Resource STR# -> FSDispatch ->
@@ -6701,41 +6918,82 @@ int main(int argc, char** argv){
       uint32_t fsSel = r.d[0].u;            // capture BEFORE we overwrite D0 with the result
       uint32_t fsPB  = r.a[0];
       bool served=false;
+      // PBGetWDInfo (sel 7). The caller is asking "which directory is this working-directory
+      // refNum?" — for the AD folder search that is the System Folder, the place a real install
+      // keeps 'After Dark Files'. Our world has one volume whose root IS the folder holding the
+      // module, so answer with the root: vRefNum -1, dirID 2, procID 0. WDPBRec ioWDProcID@+0x1C,
+      // ioWDVRefNum@+0x20, ioWDDirID@+0x30.
+      if(g_filefs && (fsSel&0xFF)==0x07 && fsPB){
+        try{ mem->write_u16b(fsPB+16,0); mem->write_u16b(fsPB+22,0xFFFF);
+             mem->write_u32b(fsPB+0x1C,0); mem->write_u16b(fsPB+0x20,0xFFFF);
+             mem->write_u32b(fsPB+0x30,2); }catch(...){}
+        r.d[0].u=0; served=true;
+        if(getenv("ADTRAPLOG")||getenv("ADFSLOG")) fprintf(stderr,"      [realfs] GetWDInfo -> vRef=-1 dirID=2\n");
+      }
       // Under ADREALFS, PBGetCatInfo (sel 9) / PBGetFInfo (sel 8) answer HONESTLY for paths that
       // exist under the Deluxe folder. Everything else keeps the fnfErr default. ioNamePtr@+18.
-      if(getenv("ADREALFS") && ((fsSel&0xFF)==0x09 || (fsSel&0xFF)==0x08) && fsPB){
+      if(!served && g_filefs && ((fsSel&0xFF)==0x09 || (fsSel&0xFF)==0x08) && fsPB){
         std::string mac; try{ uint32_t np=mem->read_u32b(fsPB+18);
           if(np){ uint8_t L=mem->read_u8(np); for(int i2=0;i2<L;i2++) mac+=(char)mem->read_u8(np+1+i2); } }catch(...){}
+        // ioDirID@+48 names the directory the lookup/enumeration is relative to.
+        // ONLY ANSWER ABOUT DIRECTORIES WE PUBLISHED. A dirID we issued (2 = the volume root, or an id
+        // handed back by an earlier lookup) means the caller walked in through our own GetWDInfo/GetCatInfo
+        // chain and will keep walking through arms we serve. An id we never issued means the caller found
+        // its directory some other way, and answering "yes, that file exists" strands it: the follow-up
+        // OpenResFile/read belongs to the ADREALFS resource-fork server, which is off. MEASURED: without
+        // this rule, seven modules that probe for an optional data file by full path (Clocks asks for
+        // ':AD 3.0 Resources:AD 3.0 Sound', which really is on disk) stop taking their fallback and
+        // collapse to a single frame. Under ADREALFS the whole chain IS served, so the old flat
+        // Deluxe-root search stays available there.
+        int32_t parID=0; try{ parID=(int32_t)mem->read_u32b(fsPB+48); }catch(...){}
+        std::string parent = fs_dirpath(parID);
+        if(parent.empty() && getenv("ADREALFS")) parent = rf_root;
+        std::string disk;
+        if(!parent.empty()){
         // The engine's LinkModule locates files by DIRECTORY ENUMERATION (ioFDirIndex>0, empty name),
-        // not by name string. Serve index-N of the Deluxe root as a flat world: write the entry's name
-        // back through ioNamePtr, then fall through to the exists-path below.
-        if(mac.empty()){
-          int16_t fdIdx=0; try{ fdIdx=(int16_t)mem->read_u16b(fsPB+28); }catch(...){}
-          if(fdIdx>0){
-            static std::vector<std::string> ents; static bool edone=false;
-            if(!edone){ edone=true;
-              if(DIR* dp=opendir(rf_root.c_str())){ struct dirent* de;
-                while((de=readdir(dp))){ std::string n=de->d_name; if(n=="."||n=="..") continue; ents.push_back(n); }
-                closedir(dp); std::sort(ents.begin(),ents.end()); } }
-            if((size_t)fdIdx<=ents.size()){
-              mac=ents[fdIdx-1];
-              try{ uint32_t np=mem->read_u32b(fsPB+18);
-                if(np){ uint8_t L=(uint8_t)std::min<size_t>(mac.size(),63);
-                  mem->write_u8(np,L); for(int i2=0;i2<L;i2++) mem->write_u8(np+1+i2,(uint8_t)mac[i2]); } }catch(...){}
-              if(getenv("ADTRAPLOG")||getenv("ADFSLOG"))
-                fprintf(stderr,"      [realfs] dir-enum idx=%d -> '%s'\n", fdIdx, mac.c_str());
-            }
+        // not by name string. Serve index-N of the parent directory, writing the entry's name back
+        // through ioNamePtr the way PBGetCatInfo does.
+        int16_t fdIdx=0; try{ fdIdx=(int16_t)mem->read_u16b(fsPB+28); }catch(...){}
+        if(fdIdx>0){
+          const auto& ents = fs_children(parent);
+          if((size_t)fdIdx<=ents.size()){
+            mac=ents[fdIdx-1]; disk=parent+"/"+mac;
+            try{ uint32_t np=mem->read_u32b(fsPB+18);
+              if(np){ uint8_t L=(uint8_t)std::min<size_t>(mac.size(),63);
+                mem->write_u8(np,L); for(int i2=0;i2<L;i2++) mem->write_u8(np+1+i2,(uint8_t)mac[i2]); } }catch(...){}
+            if(getenv("ADTRAPLOG")||getenv("ADFSLOG"))
+              fprintf(stderr,"      [realfs] dir-enum idx=%d in %s -> '%s'\n", fdIdx, parent.c_str(), mac.c_str());
           }
+        } else if(!mac.empty()){
+          disk = fs_child(parent, mac);                       // name lookup inside the parent
+          // Repack fallback. A real install nests 'After Dark Images' inside 'After Dark Files' inside the
+          // System Folder; this extracted tree flattens that, leaving 'After Dark Files' an EMPTY stub and
+          // its contents as siblings. Only an empty parent can be such a stub, so the fallback cannot
+          // shadow a directory that really has the name in it.
+          if(disk.empty() && fs_children(parent).empty()) disk = rf_resolve(mac);
         }
-        std::string disk = mac.empty()? std::string() : rf_resolve(mac);
+        }
         if(!disk.empty()){
           struct stat st; bool isdir = (::stat(disk.c_str(),&st)==0) && S_ISDIR(st.st_mode);
           r.d[0].u=0; mem->write_u16b(fsPB+16,0);              // ioResult = noErr
           try{ mem->write_u8(fsPB+30, isdir?0x10:0x00); }catch(...){}   // ioFlAttrib dir bit
-          try{ mem->write_u32b(fsPB+48, 100 + (uint32_t)(std::hash<std::string>{}(disk)&0x7FFF)); }catch(...){}  // ioDirID/ioFlNum
+          try{ mem->write_u32b(fsPB+48, (uint32_t)fs_dirid(disk)); }catch(...){}  // ioDirID/ioFlNum
+          // ioFlFndrInfo@+0x20 for files (fdType/fdCreator/fdFlags) — this is what a picture search
+          // reads to decide "is this a PICT?". ioDrNmFls@+0x34 for directories = valence: the count
+          // that tells an enumerator how many indices exist.
+          try{
+            if(isdir){ mem->write_u16b(fsPB+0x34,(uint16_t)std::min<size_t>(fs_children(disk).size(),0x7FFF)); }
+            else { uint32_t ty=fs_ftype(disk);
+              mem->write_u32b(fsPB+0x20, ty);
+              mem->write_u32b(fsPB+0x24, ty?FOURCC("8BIM"):0u);
+              mem->write_u32b(fsPB+0x28, 0);                   // fdFlags: not an alias
+              mem->write_u32b(fsPB+0x36, (uint32_t)st.st_size);// ioFlLgLen (data fork)
+              mem->write_u32b(fsPB+0x3A, (uint32_t)st.st_size); }
+          }catch(...){}
           served=true;
           if(getenv("ADTRAPLOG")||getenv("ADFSLOG"))
-            fprintf(stderr,"      [realfs] GetCatInfo('%s') -> noErr (%s)\n", mac.c_str(), isdir?"dir":"file");
+            fprintf(stderr,"      [realfs] GetCatInfo('%s') -> noErr (%s) dirID=%d\n",
+              mac.c_str(), isdir?"dir":"file", fs_dirid(disk));
         }
       }
       if(!served && getenv("ADFSPROBEOK") && ((fsSel&0xFF)==0x08 || (fsSel&0xFF)==0x09) && fsPB){
@@ -7735,9 +7993,16 @@ int main(int argc, char** argv){
         if(srcEmpty && (getenv("ADCBTRACE")||getenv("ADCBGUARD")))
           fprintf(stderr,"    CopyBits SKIP (srcRect entirely outside src bounds) s[%d,%d,%d,%d] sbnd(%d,%d,%d,%d) src=%08X\n",
             st,sl,sb,sr,sbt,sbl,sbb,sbr,sbase);
-        // A direct-colour operand has no indexed reading. Copy nothing and warn once rather than feeding
-        // RGB bytes to the index loop below. Unreachable while every NewGWorld asks for 8bpp.
-        if(sdepth>8 || ddepth>8){ pm_warn_direct("CopyBits",sdepth,ddepth); srcEmpty=true; }
+        // DIRECT-COLOUR OPERANDS. A 16/32bpp pixmap holds RGB samples, so the indexed loop below cannot
+        // read or write it. A direct SOURCE is resolved per pixel to the destination palette's nearest
+        // index (the same resolution every RGBForeColor takes); a direct DESTINATION receives the
+        // source's colour as samples. Real QuickDraw does exactly this depth conversion — CopyBits is
+        // the trap that is allowed to change pixel format. A picture-quality module (Artist: a 32bpp
+        // offscreen it draws a PICT into and then presents) is otherwise blitting into a void.
+        bool srcDirect=(sdepth>8), dstDirect=(ddepth>8);
+        if((srcDirect||dstDirect) && getenv("ADNODIRECTBLIT")){
+          pm_warn_direct("CopyBits",sdepth,ddepth); srcEmpty=true; srcDirect=dstDirect=false; }
+        if(srcDirect && sdepth!=16 && sdepth!=32){ pm_warn_direct("CopyBits",sdepth,ddepth); srcEmpty=true; }
         // Real QuickDraw restricts the blit to the maskRgn (a RgnHandle); region-masked composites
         // (Spotlight's spotlight circles, Down the Drain/Frost&Fire/Globe/Nocturnes feedback masks) depend
         // on it. Resolve the handle -> region-data ptr -> scan-converted per-pixel mask (rgn_masks, built
@@ -7763,6 +8028,21 @@ int main(int argc, char** argv){
             bool sxOut=(sx<sbl||sx>=sbr);
             uint8_t px;
             if(srcClip && (syOut||sxOut)) continue;            // partial/shadow src -> leave dst untouched
+            else if(srcDirect || dstDirect){
+              uint16_t R,G,B;
+              if(srcDirect) pm_get_rgb(mem, sbase+(uint32_t)(sy-sbt)*srb+(uint32_t)(sx-sbl)*(sdepth/8), sdepth, R,G,B);
+              else { uint8_t si = (sdepth==2||sdepth==4)
+                       ? pm_get_idx(mem,sbase+(uint32_t)(sy-sbt)*srb,sx-sbl,sdepth)
+                       : mem->read_u8(sbase+(uint32_t)(sy-sbt)*srb+(sx-sbl));
+                     uint32_t e=C.g_clut+8+(uint32_t)si*8;
+                     R=(uint16_t)mem->read_u16b(e+2); G=(uint16_t)mem->read_u16b(e+4); B=(uint16_t)mem->read_u16b(e+6); }
+              if(dstDirect) pm_put_rgb(mem, dbase+(uint32_t)(ddy-dbt)*drb+(uint32_t)(ddx-dbl)*(ddepth/8), ddepth, R,G,B);
+              else { uint8_t di=C.rgb_to_index(R,G,B);
+                     if(di) nzsrc++;
+                     if(skipBG && (di==0 || (skipBGmatte && di==g_white_idx))) continue;
+                     mem->write_u8(dbase+(uint32_t)(ddy-dbt)*drb+(ddx-dbl), di); }
+              continue;
+            }
             else if(sdepth==1){
               // 1-bit source -> colour destination. QuickDraw expands the mask through the port's
               // fore/back colours; the boolean transfer modes 0..7 differ only in which colour each bit
@@ -8423,8 +8703,32 @@ int main(int argc, char** argv){
       uint32_t picP = picH? mem->read_u32b(picH) : 0;   // dereference handle
       int dT = dstRectP? (int16_t)mem->read_u16b(dstRectP)   : 0;
       int dL = dstRectP? (int16_t)mem->read_u16b(dstRectP+2) : 0;
-      if(picP){ uint32_t plen = blk_size->count(picP)? (*blk_size)[picP] : 0x20000;
-        try{ draw_pict(mem, C, picP, plen, dT, dL); }catch(...){} }
+      uint32_t plen = picP && blk_size->count(picP)? (*blk_size)[picP] : (picP?0x20000u:0u);
+      // SPOOLED PICTURE. The picture-file idiom hands DrawPicture a Picture record holding ONLY the
+      // 10-byte header (picSize + picFrame) read out of the file, and expects QuickDraw to pull the
+      // opcodes through the port's getPicProc bottleneck as it interprets them. Our interpreter reads
+      // the picture out of memory instead, so recognise the stub by its content — its 10 header bytes
+      // are, by construction, the 10 bytes the module just read from the open file — and interpret
+      // the file's own picture bytes from that point. Matching on the header rather than on "is the
+      // handle small" means an ordinary in-memory picture can never be mistaken for a spool.
+      if(picP && plen<=16 && !df_open->empty()){
+        uint8_t hdr[10]; bool okh=true;
+        for(int i2=0;i2<10;i2++){ try{ hdr[i2]=mem->read_u8(picP+i2); }catch(...){ okh=false; break; } }
+        for(auto& f : *df_open){
+          if(!okh || f.pos<10 || f.pos>f.data.size()) continue;
+          if(memcmp(&f.data[f.pos-10], hdr, 10)!=0) continue;
+          uint32_t start=f.pos-10, n=(uint32_t)(f.data.size()-start);
+          uint32_t tmp=mem->allocate(n?n:1);
+          for(uint32_t i2=0;i2<n;i2++) mem->write_u8(tmp+i2,f.data[start+i2]);
+          if(getenv("ADPICTLOG")) fprintf(stderr,"      DrawPicture SPOOL from %s @%u (%u bytes)\n",
+            f.path.c_str(), start, n);
+          try{ draw_pict(mem, C, tmp, n, dT, dL); }catch(...){}
+          mem->free(tmp);
+          f.pos=(uint32_t)f.data.size();      // QuickDraw consumes the picture to its end
+          picP=0; break;
+        }
+      }
+      if(picP){ try{ draw_pict(mem, C, picP, plen, dT, dL); }catch(...){} }
       if(getenv("ADPICTLOG")) fprintf(stderr,"      DrawPicture picH=%08X picP=%08X dst=(%d,%d)\n",picH,picP,dT,dL);
       if(getenv("ADDOMPICTCHAIN")){ fprintf(stderr,"[dompict] pc=%08X A4=%08X A6chain:",r.pc,r.a[4]);
         uint32_t fp=r.a[6]; for(int i=0;i<12 && fp>0x1000 && fp<0x2600000;i++){ uint32_t ret=0,nfp=0;
