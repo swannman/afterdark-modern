@@ -1782,10 +1782,13 @@ int main(int argc, char** argv){
   // We have no resource chain, so without this merge that lookup returns NULL and the AD3 runtime throws
   // ("Out of memory." from its STR# table), longjmp'ing out of the module ctor and leaving the instance
   // unpublished, so every message handler dereferences null and nothing renders.
-  // Merge NON-CODE resources only; the module's own always wins. OPT-IN via ADSHAREDRES=1: the merge is
-  // faithful but inert for the Clocks case, which requests aInf 0 — an id that exists in no file, i.e. a
-  // computed zero rather than a missing resource.
-  if(getenv("ADSHAREDRES")){          // OPT-IN: faithful, but inert for the Clocks case
+  // DEFAULT ON (addm 839): the 92-module off/on sweep showed exactly two DIFFERs, both gains
+  // (You Bet Your Head 1->23 distinct, Flying Toasters Pro 1->16), zero regressions. The shared
+  // file's aInf records win over a module's own (modelling the UseResFile the AD3 library performs
+  // before the lookup — our flat pool otherwise lets a stale local revision shadow the real one;
+  // Rat Race is the only corpus module shipping its own aInf 100). ADNOSHAREDRES reverts wholesale;
+  // ADNOSHAREDAINF reverts just the aInf precedence.
+  if(!getenv("ADNOSHAREDRES")){
     std::string mp2(argv[1]); const std::string tail2="/..namedfork/rsrc";
     if(mp2.size()>tail2.size() && mp2.compare(mp2.size()-tail2.size(),tail2.size(),tail2)==0) mp2.resize(mp2.size()-tail2.size());
     size_t sl=mp2.find_last_of('/');
@@ -1816,7 +1819,17 @@ int main(int argc, char** argv){
             else for(uint32_t t:ARTSHARE) if(t==typ){ want=true; break; }
             if(!want) continue;
           }
-          if(rez.count({typ,id})) continue;                   // module's own always wins
+          // The module's own copy normally wins — EXCEPT for 'aInf'. The AD3 library fetches art-class
+          // records through its SHARED-file object (MacXResourceFile::GetPlainResourceByID calls the
+          // "use resource file(refNum)" slot before the lookup), which this host stubs to a no-op: we
+          // have one flat pool, so a stale local copy shadows the shared one the library asked for.
+          // Rat Race is the worked example — its own 'aInf 100' is an OLDER FORMAT REVISION of the same
+          // 62-byte resource (14-byte header + 6 records) than the shared file's (22-byte header +
+          // 5 records, which is what this library version parses). Reading the local one yields a record
+          // count of 552 instead of 5. ADNOSHAREDAINF restores "module's own always wins" for A/B.
+          bool aInfWin = (typ==FOURCC("aInf") && !getenv("ADNOSHAREDAINF"));
+          if(rez.count({typ,id}) && !aInfWin) continue;       // module's own always wins
+          bool over = rez.count({typ,id})!=0;
           try{ auto res=sf.get_resource(typ,id); std::string dat=res->data;
             // ADAINFLOCAL: word[0] of an 'aInf' art-class record is the library's "this class's images
             // live in THIS database" flag. XArtDatabase::CacheImageInfo (@0x0101C514) tries each
@@ -1831,7 +1844,7 @@ int main(int argc, char** argv){
             // came from the shared file (the shared FONT class, aInf 100) is unreachable.
             if(typ==FOURCC("aInf") && dat.size()>=2 && !getenv("ADNOAINFLOCAL")
                && dat[0]==0 && dat[1]==0) dat[1]=1;
-            rez[{typ,id}]=dat; rez_ids[typ].push_back(id); add_name(typ,id,res->name); added++; }catch(...){}
+            rez[{typ,id}]=dat; if(!over){ rez_ids[typ].push_back(id); add_name(typ,id,res->name); } added++; }catch(...){}
         }
         fprintf(stderr,"[adhost68k] shared '%s': merged %zu resources\n", fn, added);
       } catch(const exception&){ /* shared file absent — leave as before */ }

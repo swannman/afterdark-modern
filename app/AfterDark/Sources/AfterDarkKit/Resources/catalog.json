@@ -858,6 +858,47 @@
       ]
     },
     {
+      "id": "68k-flying-toasters-pro",
+      "displayName": "Flying Toasters Pro",
+      "family": "68K",
+      "host": "engine/adhost68k",
+      "workingDir": "engine",
+      "rsrcPath": "deluxe/extracted/dlx/After Dark Deluxe (4/Flying Toasters Pro/..namedfork/rsrc",
+      "argsTemplate": [
+        "{RSRC}"
+      ],
+      "env": {},
+      "controlEnvVar": "ADCVSET",
+      "lane": "std",
+      "controls": [
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "type": "slider",
+          "label": "Objects:",
+          "min": 0,
+          "max": 100,
+          "defaultValue": 40
+        },
+        {
+          "id": "c1002",
+          "resourceId": 1002,
+          "type": "slider",
+          "label": "Music:",
+          "min": 0,
+          "max": 100,
+          "defaultValue": 25
+        },
+        {
+          "id": "c1003",
+          "resourceId": 1003,
+          "type": "toggle",
+          "label": "Karaoke",
+          "defaultValue": 0
+        }
+      ]
+    },
+    {
       "id": "flying-toasters",
       "displayName": "Flying Toasters!",
       "family": "68K",
@@ -3952,6 +3993,56 @@
       ],
       "about": "WARP!\n\nWarp to unknown galaxies with this module.\n\n“Speed” controls how fast the stars move by.\n“Number of Stars” controls the number of stars displayed.\n“Color” allows colored stars for those with color monitors.\n\nProgramming by Bruce Burkhalter and Andy Karn.\n©1989-94, Berkeley Systems, Inc.",
       "credits": "Warp! by Bruce Burkhalter and Andy Karn.\n©1989-94 Berkeley Systems Inc."
+    },
+    {
+      "id": "68k-you-bet-your-head",
+      "displayName": "You Bet Your Head",
+      "family": "68K",
+      "host": "engine/adhost68k",
+      "workingDir": "engine",
+      "rsrcPath": "deluxe/extracted/dlx/After Dark Deluxe (4/You Bet Your Head/..namedfork/rsrc",
+      "argsTemplate": [
+        "{RSRC}"
+      ],
+      "env": {},
+      "controlEnvVar": "ADCVSET",
+      "lane": "std",
+      "controls": [
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "type": "slider",
+          "label": "Contestants:",
+          "min": 0,
+          "max": 100,
+          "defaultValue": 60
+        },
+        {
+          "id": "c1001",
+          "resourceId": 1001,
+          "type": "slider",
+          "label": "Timer:",
+          "min": 0,
+          "max": 100,
+          "defaultValue": 0
+        },
+        {
+          "id": "c1002",
+          "resourceId": 1002,
+          "type": "slider",
+          "label": "Music:",
+          "min": 0,
+          "max": 100,
+          "defaultValue": 30
+        },
+        {
+          "id": "c1003",
+          "resourceId": 1003,
+          "type": "toggle",
+          "label": "Show Answers",
+          "defaultValue": 1
+        }
+      ]
     },
     {
       "id": "68k-zooommm",
