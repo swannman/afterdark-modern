@@ -2600,6 +2600,47 @@
       "credits": "By Vann Miller & Andrew Armstrong\n© 1996 Berkeley Systems, Inc."
     },
     {
+      "id": "68k-rat-race",
+      "displayName": "Rat Race",
+      "family": "68K",
+      "host": "engine/adhost68k",
+      "workingDir": "engine",
+      "rsrcPath": "deluxe/extracted/dlx/After Dark Deluxe (4/Rat Race/..namedfork/rsrc",
+      "argsTemplate": [
+        "{RSRC}"
+      ],
+      "env": {},
+      "controlEnvVar": "ADCVSET",
+      "lane": "std",
+      "controls": [
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "type": "slider",
+          "label": "Training:",
+          "min": 0,
+          "max": 100,
+          "defaultValue": 70
+        },
+        {
+          "id": "c1002",
+          "resourceId": 1002,
+          "type": "slider",
+          "label": "Music:",
+          "min": 0,
+          "max": 100,
+          "defaultValue": 30
+        },
+        {
+          "id": "c1001",
+          "resourceId": 1001,
+          "type": "toggle",
+          "label": "Race Track",
+          "defaultValue": 1
+        }
+      ]
+    },
+    {
       "id": "68k-rebound",
       "displayName": "Rebound",
       "family": "68K",

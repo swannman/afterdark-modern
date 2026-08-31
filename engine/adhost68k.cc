@@ -1801,8 +1801,37 @@ int main(int argc, char** argv){
         for(auto [typ,id] : sf.all_resources()){
           bool bad=false; for(uint32_t t:CODEISH) if(t==typ){ bad=true; break; }
           if(bad) continue;
+          // Merge only what the AD3 ART DATABASE needs from the shared file: its art-class records
+          // ('aInf'), the art-file table those name ('AFil'), and the shared font art itself
+          // (STFT/PiCT strikes, PAT#). The historical merge took EVERY non-code type, which also poured
+          // the shared file's sound/music banks into the pool — far more perturbation than the art path
+          // needs. ADSHAREDALL restores the wide merge; ADSHAREDTYPES=<list> overrides for A/B.
+          {
+            static const uint32_t ARTSHARE[]={FOURCC("aInf"),FOURCC("AFil"),FOURCC("STFT"),
+                                              FOURCC("PiCT"),FOURCC("PAT#")};
+            bool want=false;
+            if(getenv("ADSHAREDTYPES")){ char t4[5]={(char)(typ>>24),(char)(typ>>16),(char)(typ>>8),(char)typ,0};
+              want = strstr(getenv("ADSHAREDTYPES"), t4)!=nullptr; }
+            else if(getenv("ADSHAREDALL")) want=true;
+            else for(uint32_t t:ARTSHARE) if(t==typ){ want=true; break; }
+            if(!want) continue;
+          }
           if(rez.count({typ,id})) continue;                   // module's own always wins
-          try{ auto res=sf.get_resource(typ,id); rez[{typ,id}]=res->data; rez_ids[typ].push_back(id); add_name(typ,id,res->name); added++; }catch(...){}
+          try{ auto res=sf.get_resource(typ,id); std::string dat=res->data;
+            // ADAINFLOCAL: word[0] of an 'aInf' art-class record is the library's "this class's images
+            // live in THIS database" flag. XArtDatabase::CacheImageInfo (@0x0101C514) tries each
+            // ImageKind in turn and accepts one only if this->kindAvail[kind] (@this+0x2C) is non-zero
+            // OR that flag (cached at this+0x2A) is non-zero; when both are zero it exhausts the kind
+            // list and Throw(0x104)s, which the module reports as "Shared Resource not found."
+            // kindAvail is filled by XArtDatabase::CheckArtFiles, which IXArtDatabase (@0x0101BD4E)
+            // calls ONLY when the database was constructed with a non-empty art-file path — i.e. only
+            // when the module really opened the separate shared file. This host has no second resource
+            // file: we FLATTEN the shared file into one pool, so the "separate art file" distinction is
+            // gone and the shared classes' art is in fact local. Say so, or every class whose record
+            // came from the shared file (the shared FONT class, aInf 100) is unreachable.
+            if(typ==FOURCC("aInf") && dat.size()>=2 && !getenv("ADNOAINFLOCAL")
+               && dat[0]==0 && dat[1]==0) dat[1]=1;
+            rez[{typ,id}]=dat; rez_ids[typ].push_back(id); add_name(typ,id,res->name); added++; }catch(...){}
         }
         fprintf(stderr,"[adhost68k] shared '%s': merged %zu resources\n", fn, added);
       } catch(const exception&){ /* shared file absent — leave as before */ }
@@ -6544,7 +6573,24 @@ int main(int argc, char** argv){
         for(uint32_t i=0;i<c;i++){ uint8_t b=0; try{b=mem->read_u8(s+i);}catch(...){}
           if(b>=32&&b<127) t+=(char)b; else if(b==0||b<32) t+='.'; else { t+='?'; } if(b>127) pr=false; }
         if(pr||t.size()) fprintf(stderr,"    [bmtext] len=%u src=%08X \"%s\"\n",c,s,t.c_str()); }
-      for(uint32_t i=0;i<c;i++) mem->write_u8(d+i, mem->read_u8(s+i)); r.d[0].u=0;
+      // A BlockMove whose SOURCE runs off the end of its block is benign on a real Mac (the heap is one
+      // contiguous zone, so the tail just copies adjacent heap bytes) but fatal here: our blocks sit in
+      // exactly-sized arenas, so the first byte past the end throws "not within any arena" and kills the
+      // whole message. Rat Race does exactly this — XArtClassInfo::IXArtClassInfo (@0x0101B962) takes the
+      // record count from its 'aInf' class record and BlockMoves count*8 bytes out of it; its own aInf 100
+      // decompresses with a count of 552 instead of 5, so it asks for 4416 bytes out of a 62-byte handle.
+      // Copy what is readable and zero-fill the rest (deterministic, and the caller only reads the real
+      // records). ADNOBMGUARD restores the hard fault for A/B.
+      if(!getenv("ADNOBMGUARD")){
+        bool warned=false;
+        for(uint32_t i=0;i<c;i++){ uint8_t b=0;
+          try{ b=mem->read_u8(s+i); }
+          catch(...){ b=0;
+            if(!warned){ warned=true; if(getenv("ADBMTRACE")||getenv("ADBMGUARDLOG"))
+              fprintf(stderr,"    [bmguard] BlockMove src %08X readable for %u of %u bytes -> zero-fill tail (pc=%08X)\n",s,i,c,r.pc); } }
+          try{ mem->write_u8(d+i,b); }catch(...){ break; } }
+        r.d[0].u=0;
+      } else { for(uint32_t i=0;i<c;i++) mem->write_u8(d+i, mem->read_u8(s+i)); r.d[0].u=0; }
     } else if(base==0x01F){ // DisposePtr(p:Ptr) A0=ptr — actually free so per-frame alloc/free
       // reuses addresses instead of climbing the heap. Modules that double-buffer or page-flip
       // (e.g. Gravity: NewPtr a full-screen buffer every frame) otherwise march allocations up
@@ -7454,7 +7500,7 @@ int main(int argc, char** argv){
       // exactly big enough to hold one BIT per pixel can only be a 1-bit bitmap. Requiring rb < width keeps
       // every 8bpp pixmap (rb >= width, always) on the byte-per-pixel path, including the host-synthesized
       // GrafPort portBits whose rowBytes carries no PixMap flag — the flag bit alone is not safe to trust.
-      auto resolveBits=[&](uint32_t bits,uint32_t&base,int&rb,int&bt,int&bl,int&bb,int&br,int&depth){
+      auto resolveBitsRaw=[&](uint32_t bits,uint32_t&base,int&rb,int&bt,int&bl,int&bb,int&br,int&depth){
         uint32_t port = (bits>=2)? bits-2 : 0; bool isPort=(port==C.g_port||port==C.cur_port);
         for(uint32_t gw:C.gworlds) if(port==gw) isPort=true;
         uint32_t pmx=bits;                         // where the PixMap fields live
@@ -7473,6 +7519,21 @@ int main(int argc, char** argv){
         // host can name are trusted, anything else (0, garbage) keeps the default classification.
         if(isPort && !g_no_gwdepth){ int psz=0; try{ psz=(int)mem->read_u16b(pmx+0x20); }catch(...){}
           if(psz==1||psz==2||psz==4||psz==16||psz==32) depth=psz; }
+      };
+      // A BitMap*/PixMap* ARGUMENT can itself be a garbage pointer, not just its baseAddr: You Bet Your
+      // Head reaches CopyMask with a srcBits whose PixMap header sits at 0x07000000 (an uninitialised
+      // MacPixels field), so the resolver's header reads throw "not within any arena" BEFORE the
+      // cbBaseOK/cmBaseOK baseAddr guards below ever run — killing the whole draw call and blanking the
+      // frame. Shield the resolver and report an unresolvable operand as a NIL bitmap (base=0), which
+      // those guards already treat as "draw nothing", matching QuickDraw's NIL-baseAddr behaviour.
+      // Wrapping the REAL resolver rather than re-deriving the header address keeps the probe and the
+      // reads it protects from ever diverging. ADNOBITSPROBE opts out.
+      auto resolveBits=[&](uint32_t bits,uint32_t&base,int&rb,int&bt,int&bl,int&bb,int&br,int&depth){
+        if(getenv("ADNOBITSPROBE")){ resolveBitsRaw(bits,base,rb,bt,bl,bb,br,depth); return; }
+        try{ resolveBitsRaw(bits,base,rb,bt,bl,bb,br,depth); }
+        catch(...){ base=0; rb=0; bt=bl=bb=br=0; depth=8;
+          if(getenv("ADCMLOG")||getenv("ADCBTRACE"))
+            fprintf(stderr,"    QD bitmap operand %08X unresolvable -> NIL bitmap\n",bits); }
       };
       uint32_t sbase,dbase; int srb,drb,sbt,sbl,sbb,sbr,dbt,dbl,dbb,dbr,sdepth,ddepth;
       resolveBits(srcBits,sbase,srb,sbt,sbl,sbb,sbr,sdepth); resolveBits(dstBits,dbase,drb,dbt,dbl,dbb,dbr,ddepth);
@@ -7784,7 +7845,7 @@ int main(int argc, char** argv){
       // enough to hold one BIT per pixel can only be 1-bit. rb >= width is true for every 8bpp pixmap, so
       // they keep the byte-per-pixel path, including host-synthesized portBits whose rowBytes carries no
       // PixMap flag.
-      auto resolveBits=[&](uint32_t bits,uint32_t&base,int&rb,int&bt,int&bl,int&bb,int&br,int&depth){
+      auto resolveBitsRaw=[&](uint32_t bits,uint32_t&base,int&rb,int&bt,int&bl,int&bb,int&br,int&depth){
         uint32_t port = (bits>=2)? bits-2 : 0; bool isPort=(port==C.g_port||port==C.cur_port);
         for(uint32_t gw:C.gworlds) if(port==gw) isPort=true;
         uint32_t pmx=bits;
@@ -7803,6 +7864,21 @@ int main(int argc, char** argv){
         // host can name are trusted, anything else (0, garbage) keeps the default classification.
         if(isPort && !g_no_gwdepth){ int psz=0; try{ psz=(int)mem->read_u16b(pmx+0x20); }catch(...){}
           if(psz==1||psz==2||psz==4||psz==16||psz==32) depth=psz; }
+      };
+      // A BitMap*/PixMap* ARGUMENT can itself be a garbage pointer, not just its baseAddr: You Bet Your
+      // Head reaches CopyMask with a srcBits whose PixMap header sits at 0x07000000 (an uninitialised
+      // MacPixels field), so the resolver's header reads throw "not within any arena" BEFORE the
+      // cbBaseOK/cmBaseOK baseAddr guards below ever run — killing the whole draw call and blanking the
+      // frame. Shield the resolver and report an unresolvable operand as a NIL bitmap (base=0), which
+      // those guards already treat as "draw nothing", matching QuickDraw's NIL-baseAddr behaviour.
+      // Wrapping the REAL resolver rather than re-deriving the header address keeps the probe and the
+      // reads it protects from ever diverging. ADNOBITSPROBE opts out.
+      auto resolveBits=[&](uint32_t bits,uint32_t&base,int&rb,int&bt,int&bl,int&bb,int&br,int&depth){
+        if(getenv("ADNOBITSPROBE")){ resolveBitsRaw(bits,base,rb,bt,bl,bb,br,depth); return; }
+        try{ resolveBitsRaw(bits,base,rb,bt,bl,bb,br,depth); }
+        catch(...){ base=0; rb=0; bt=bl=bb=br=0; depth=8;
+          if(getenv("ADCMLOG")||getenv("ADCBTRACE"))
+            fprintf(stderr,"    QD bitmap operand %08X unresolvable -> NIL bitmap\n",bits); }
       };
       auto rdrect=[&](uint32_t p,int&t,int&l,int&b,int&rr){ t=(int16_t)mem->read_u16b(p);
         l=(int16_t)mem->read_u16b(p+2); b=(int16_t)mem->read_u16b(p+4); rr=(int16_t)mem->read_u16b(p+6); };
