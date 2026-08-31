@@ -5188,6 +5188,16 @@ int main(int argc, char** argv){
     bool trace = getenv("ADTRAPLOG") || traps<=60 || !nm;
     if(trace) fprintf(stderr,"  [trap %5llu] A%03X %-16s A7=%08X A0=%08X D0=%08X\n",
               (unsigned long long)traps, opcode&0xFFF, nm?nm:"???", r.a[7], r.a[0], r.d[0].u);
+    // ADREGTRAP=hex[,hex...]: full register + PC dump at the listed traps. Default-off diagnostic for
+    // reverse-engineering hand-rolled direct-to-screen blits, which bracket themselves with
+    // ShieldCursor/SwapMMUMode/ShowCursor and are otherwise invisible to a QuickDraw-level trace.
+    if(getenv("ADREGTRAP")){ static long nrt=0; std::string sp=getenv("ADREGTRAP"); bool hit=false;
+      size_t p=0; while(p<sp.size()){ size_t c=sp.find(',',p); std::string tok=sp.substr(p,c==std::string::npos?c:c-p);
+        if((uint16_t)strtoul(tok.c_str(),0,16)==opcode){ hit=true; break; } if(c==std::string::npos) break; p=c+1; }
+      if(hit && ++nrt<=120){ fprintf(stderr,"  [regtrap] A%03X pc=%08X D0=%08X D1=%08X D2=%08X D3=%08X\n",
+          opcode&0xFFF, r.pc, r.d[0].u, r.d[1].u, r.d[2].u, r.d[3].u);
+        fprintf(stderr,"            A0=%08X A1=%08X A2=%08X A3=%08X A4=%08X A5=%08X A6=%08X A7=%08X\n",
+          r.a[0],r.a[1],r.a[2],r.a[3],r.a[4],r.a[5],r.a[6],r.a[7]); } }
     // OS traps (A000-A7FF): trap number = low byte, bits 8-10 are flags.
     // Toolbox traps (A800-AFFF): dispatch on the full opcode.
     bool isToolbox = (opcode & 0x0800)!=0;
@@ -5503,6 +5513,23 @@ int main(int argc, char** argv){
         uint32_t spb=0,a0b=0; try{ spb=(uint32_t)mem->get_block_size(sp_top); }catch(...){}
         try{ a0b=(uint32_t)mem->get_block_size(r.a[0]); }catch(...){}
         if(spb>=0x6C && a0b>=4 && a0b<0x6C){ port=sp_top; r.a[7]+=4; }        // Pascal glue: pushed GrafPort outside A0
+        // STACK GrafPort, Pascal glue. The block-size test above only sees allocate()d (heap) blocks,
+        // so a caller whose GrafPort is an A6-frame LOCAL — `pea -0x238(A6) ; _OpenPort`, the plain
+        // Inside-Macintosh form, since OpenPort has no documented register variant — falls through it
+        // and gets misread as register glue. A0 is then whatever the caller last happened to load,
+        // and the handler both memsets 0x6C bytes over it and makes it the current port.
+        // Gravity does exactly this: its frame is {GrafPort @A6-0x238, BitMap @A6-0x22C, 1-bit pixel
+        // buffer @A6-0x21E} and A0 holds the BUFFER (it had just been stored as BitMap.baseAddr), so
+        // the port and its own bitmap became the same memory — the following EraseRect then zeroed
+        // the port along with the buffer and every later draw resolved a null pixmap.
+        // The forms are separable without knowing the module: with register glue nothing was pushed,
+        // so the top of stack is the caller's RETURN ADDRESS (a code pointer); with Pascal glue it is
+        // the pushed GrafPtr (a data pointer). Require the pushed value to be a writable non-code
+        // address with a whole GrafPort's worth of room. Opt out: ADNOPOSTACKPASCAL.
+        else if(!getenv("ADNOPOSTACKPASCAL") && !spIsCode && sp_top>=0x4000 && sp_top<0x03000000
+                && sp_top!=r.a[0] && [&]{ try{ (void)mem->read_u8(sp_top); (void)mem->read_u8(sp_top+0x6B); }
+                                          catch(...){ return false; } return true; }()){
+          port=sp_top; r.a[7]+=4; }
         else port=r.a[0];                                                     // register glue: A0, no pop
       }
       else { port=r.a[0]; }                                                   // register glue: A0, no pop
@@ -5533,6 +5560,10 @@ int main(int argc, char** argv){
       // rowBytes(2), bounds(8)) into cur_port's inline portBits at +0x02. pop 4.
       uint32_t bm=mem->read_u32b(r.a[7]); r.a[7]+=4;
       uint32_t port=C.cur_port?C.cur_port:C.g_port;
+      if(getenv("ADPORTBITSLOG")){ fprintf(stderr,"    [SetPortBits] bm=%08X port=%08X base=%08X rb=%d bnds[%d,%d,%d,%d]\n",
+          bm, port, bm?mem->read_u32b(bm):0, bm?(int)(int16_t)mem->read_u16b(bm+4):0,
+          bm?(int)(int16_t)mem->read_u16b(bm+6):0, bm?(int)(int16_t)mem->read_u16b(bm+8):0,
+          bm?(int)(int16_t)mem->read_u16b(bm+10):0, bm?(int)(int16_t)mem->read_u16b(bm+12):0); }
       if(bm && port){ for(int i=0;i<14;i++) mem->write_u8(port+0x02+i, mem->read_u8(bm+i)); }
     } else if(opcode==0xA879){ // SetClip(rgnH) — install a per-pixel clip ONLY for a genuine
       // non-rectangular shape; a full-screen / bounds-only region leaves clipping untouched
@@ -7249,16 +7280,39 @@ int main(int argc, char** argv){
       uint32_t rp=mem->read_u32b(r.a[7]); r.a[7]+=(opcode==0xA8BB)?8:4;
       int t=(int16_t)mem->read_u16b(rp),l=(int16_t)mem->read_u16b(rp+2),
           b=(int16_t)mem->read_u16b(rp+4),rr2=(int16_t)mem->read_u16b(rp+6);
-      if(getenv("ADOVALTRACE")) fprintf(stderr,"    Oval [%d,%d,%d,%d] fg=%d bg=%d\n",t,l,b,rr2,C.qd_fg,C.qd_bg);
+      if(getenv("ADOVALTRACE")){ uint32_t obase=0;int orb=0,obt=0,obl=0,obb=0,obr=0; bool ok=C.cur_pm(obase,orb,obt,obl,obb,obr);
+        fprintf(stderr,"    Oval [%d,%d,%d,%d] fg=%d bg=%d port=%08X dst=%08X rb=%d bnds[%d,%d,%d,%d]%s\n",
+          t,l,b,rr2,C.qd_fg,C.qd_bg,C.cur_port?C.cur_port:C.g_port, ok?obase:0, orb,obt,obl,obb,obr,
+          (ok&&obase==C.g_fb)?" SCREEN":" offscreen"); }
       rgn_ext(l,t); rgn_ext(rr2,b);   // framed-shape extent into OpenRgn capture (no-op unless recording)
       if(rgn_rec){ rgn_rec_ovals++; rgn_ov[0]=(int16_t)t; rgn_ov[1]=(int16_t)l; rgn_ov[2]=(int16_t)b; rgn_ov[3]=(int16_t)rr2; }
       if(getenv("ADOVALPC")){ static long op=0; if(op++<3) fprintf(stderr,"    [OvalPC] pc=%08X rectptr=%08X\n",r.pc,rp); }
       uint8_t col = (opcode==0xA8B9)?C.qd_bg:C.qd_fg;                         // EraseOval uses bg
       double cx=(l+rr2)/2.0, cy=(t+b)/2.0, rx=(rr2-l)/2.0, ry=(b-t)/2.0;
       if(rx<1)rx=1; if(ry<1)ry=1;
+      auto oval_in=[&](int x,int y)->bool{ double nx=(x+0.5-cx)/rx, ny=(y+0.5-cy)/ry; return nx*nx+ny*ny<=1.0; };
+      // FrameOval OUTLINES the ellipse; only Paint/Erase/Invert/Fill fill it. This handler filled for all
+      // five, so every FrameOval came out a solid disc — which silently destroys any module that reads the
+      // result back rather than just looking at it. Gravity draws its ball template with ONE FrameOval into
+      // a 1-bit BitMap and then reconstructs each row's span from the outline with BitTst, as
+      // 2*(left-arc thickness) + (gap between the arcs); a filled disc makes the "arc" the whole row, so the
+      // spans came out ~2x too wide and the blitter's 15-long unrolled copy jumped out of its own table.
+      // QuickDraw's frame of a shape is the shape MINUS the shape inset by the pen size, so the outline is
+      // a closed band that thickens where the curve runs shallow (the flat top/bottom of a circle) — not a
+      // thin 4-connected boundary. Gravity depends on exactly that: it halves the first and last row's run
+      // because there the two arcs have merged into one wide horizontal run.
+      // ADFRAMEOVALFILL=1 restores the filled FrameOval.
+      double irx=rx-(C.pen_sw>0?C.pen_sw:1), iry=ry-(C.pen_sh>0?C.pen_sh:1);
+      auto oval_inner=[&](int x,int y)->bool{ if(irx<=0||iry<=0) return false;
+        double nx=(x+0.5-cx)/irx, ny=(y+0.5-cy)/iry; return nx*nx+ny*ny<=1.0; };
+      bool oval_frame = (opcode==0xA8B7) && !getenv("ADFRAMEOVALFILL");
+      // 1-bit destination arm, same as Frame/Paint/Erase/InvertRect above: write BITS, not bytes.
+      uint32_t o1b;int o1rb,o1bt,o1bl,o1bb,o1br; bool oval1bit=ad_dst1bit(o1b,o1rb,o1bt,o1bl,o1bb,o1br);
       for(int y=t;y<b;y++) for(int x=l;x<rr2;x++){
-        double nx=(x+0.5-cx)/rx, ny=(y+0.5-cy)/ry;
-        if(nx*nx+ny*ny<=1.0) C.qd_px(x,y,col);                               // true ellipse, not bbox
+        if(!oval_in(x,y)) continue;                                          // true ellipse, not bbox
+        if(oval_frame && oval_inner(x,y)) continue;                          // interior of the pen-inset ellipse
+        if(oval1bit) ad_put1(o1b,o1rb,o1bt,o1bl,o1bb,o1br,x,y, opcode==0xA8B9?0:(opcode==0xA8BA?-1:1));
+        else C.qd_px(x,y,col);
       }
     } else if(opcode==0xA8BE||opcode==0xA8BF||opcode==0xA8C0||opcode==0xA8C1||opcode==0xA8C2){ // Frame/Paint/Erase/Invert/Fill Arc
       // Real arc traps (Vertigo uses PaintArc 0xA8BF). Pascal args: rect(ptr) pushed first/deepest,
@@ -8799,9 +8853,35 @@ int main(int argc, char** argv){
     } else if(opcode==0xA8C6||opcode==0xA8C7){ // FramePoly/PaintPoly(poly) — [A7]=polyH; pop 4.
       // FramePoly outlines the captured vertices with the pen colour; PaintPoly does an even-odd
       // scanline fill.
+      // VERTEX SOURCE. A PolyHandle does not have to come from OpenPoly: Polygon is a public,
+      // documented QuickDraw record — {polySize:INTEGER; polyBBox:Rect; polyPoints:ARRAY OF Point} —
+      // and building one directly in memory (then Paint/FramePoly'ing it, often many times) is the
+      // standard way to draw a fixed shape without re-recording it. A recording-only model draws
+      // NOTHING for those callers. Mountains is exactly this shape: it never calls OpenPoly (0
+      // A8CB traps) and issues 4678 PaintPoly + 2048 FramePoly on hand-built records, so its whole
+      // terrain was silently discarded. Handles the host itself recorded keep using the recorded
+      // vertices, so OpenPoly callers are unchanged. Opt out with ADNOGUESTPOLY.
       uint32_t h=mem->read_u32b(r.a[7]); r.a[7]+=4;
+      std::vector<std::pair<int,int>> gpv;
+      const std::vector<std::pair<int,int>>* vsrc=nullptr;
       auto it=poly_pts->find(h);
-      if(it!=poly_pts->end() && it->second.size()>=2){ auto& v=it->second;
+      if(it!=poly_pts->end()) vsrc=&it->second;
+      else if(h && !getenv("ADNOGUESTPOLY")){
+        // polySize counts the WHOLE record in bytes: 10 (header) + 4*npoints. Validate before
+        // trusting the memory: >= 2 points, word-count consistent, and a sane upper bound.
+        try{ uint32_t pb=mem->read_u32b(h);
+          if(pb){ uint32_t sz=mem->read_u16b(pb);
+            if(sz>=18 && sz<=0x4000 && ((sz-10)&3)==0){ uint32_t n=(sz-10)/4; gpv.reserve(n);
+              for(uint32_t i=0;i<n;i++){ int py=(int16_t)mem->read_u16b(pb+10+i*4);      // Point = (v,h)
+                                         int px=(int16_t)mem->read_u16b(pb+12+i*4);
+                                         gpv.push_back({px,py}); }
+              vsrc=&gpv; } } }catch(...){ vsrc=nullptr; }
+      }
+      if(getenv("ADPOLYLOG")){ static long np=0; if(++np<=40)
+        fprintf(stderr,"    [poly] %s h=%08X src=%s n=%zu%s\n", opcode==0xA8C6?"FramePoly":"PaintPoly",
+                h, it!=poly_pts->end()?"recorded":(vsrc?"guest":"NONE"), vsrc?vsrc->size():0,
+                (vsrc&&vsrc->size()>=2)?"":"  <- DROPPED"); }
+      if(vsrc && vsrc->size()>=2){ auto& v=*vsrc;
         if(opcode==0xA8C6){ for(size_t i=0;i+1<v.size();i++) C.qd_penline(v[i].first,v[i].second,v[i+1].first,v[i+1].second);
           C.qd_penline(v.back().first,v.back().second,v.front().first,v.front().second); }   // FramePoly (pen)
         else { int miny=v[0].second,maxy=v[0].second;
@@ -9916,6 +9996,11 @@ int main(int argc, char** argv){
       "ADLOWSPMAX","ADMEAD","ADMEMAT","ADNCTRACE","ADNOBUGSDEPTH",
       "ADNOISEPROBE","ADNOKEYPUMP","ADNONULLRTS","ADNOTICKSPIN","ADNULLCALL","ADPCDUMP",
       "ADPCHI","ADPCHIMAX","ADPCHIU","ADPCSAMPLE","ADPCTRACE","ADPCTRACEMAX","ADPCTRACEN","ADPLOTWATCH",
+      "ADPCREGS","ADPCREGSMAX","ADPCREGSMEM",
+      // ADBBTRACE (the per-FRAME basic-block tracer) arms g_bbtrace_on only when its frame arrives,
+      // i.e. AFTER this install point — like ADBBTRACEINIT below it must be listed here or a lean run
+      // silently writes an EMPTY trace file.
+      "ADBBTRACE","ADBBTRACEFRAME","ADBBLO","ADBBHI",
       "ADPROBEA0","ADRD2HIST","ADRDFEED","ADRDLOG","ADREGAT","ADREGPC","ADRESOLVE","ADRPSDRIFT","ADRPSDRIFTALL",
       "ADRPSDRIFTN","ADSBCC","ADSBHITS","ADSBLOG","ADSBRNG","ADSBUBW","ADSFMEMDUMP","ADSTKPC","ADSYMDUMP",
       // Every lever that steers executed code must arm the full hook.
@@ -10361,6 +10446,19 @@ int main(int argc, char** argv){
         uint32_t bblo = CENV("ADBBLO")?(uint32_t)strtoul(CENV("ADBBLO"),0,16):0x00100000;
         uint32_t bbhi = CENV("ADBBHI")?(uint32_t)strtoul(CENV("ADBBHI"),0,16):0x00130000;
         if(rr.pc>=bblo && rr.pc<bbhi){ g_bbtrace_last=rr.pc; if(g_bbtrace_n++ < 300000) fprintf(g_bbtrace_fp,"%08X\n",rr.pc); } }
+      // ADPCREGS=hex[,hex...]: full register dump at each listed PC (default-off diagnostic).
+      if(CENV("ADPCREGS")){ static std::vector<uint32_t> pcs=[](){ std::vector<uint32_t> v; std::string sp=CENV("ADPCREGS");
+          size_t q=0; while(q<sp.size()){ size_t c=sp.find(',',q); v.push_back((uint32_t)strtoul(sp.substr(q,c==std::string::npos?c:c-q).c_str(),0,16));
+            if(c==std::string::npos) break; q=c+1; } return v; }();
+        static long pn=0; long cap=CENV("ADPCREGSMAX")?atol(CENV("ADPCREGSMAX")):40;
+        for(uint32_t a : pcs) if(rr.pc==a && pn++<cap){
+          fprintf(stderr,"    [pcregs %08X] D0=%08X D1=%08X D2=%08X D4=%08X D6=%08X D7=%08X\n",
+            rr.pc, rr.d[0].u, rr.d[1].u, rr.d[2].u, rr.d[4].u, rr.d[6].u, rr.d[7].u);
+          fprintf(stderr,"                  A0=%08X A1=%08X A2=%08X A3=%08X A4=%08X A6=%08X A7=%08X\n",
+            rr.a[0],rr.a[1],rr.a[2],rr.a[3],rr.a[4],rr.a[6],rr.a[7]);
+          if(CENV("ADPCREGSMEM")){ for(int q=0;q<4;q++){ fprintf(stderr,"                  [A%d=%08X]:",q,rr.a[q]);
+              for(int k=0;k<16;k++){ int v=-1; try{ v=mem->read_u8(rr.a[q]+k);}catch(...){}
+                if(v<0) fprintf(stderr," ??"); else fprintf(stderr," %02X",v); } fprintf(stderr,"\n"); } } } }
       if(CENV("ADREGPC")){ static uint32_t rpc=(uint32_t)strtoul(CENV("ADREGPC"),0,16); static int rn=0;
         if(rr.pc==rpc && rn++<60){ uint8_t a0c=0; try{a0c=mem->read_u8(rr.a[0]+0xC);}catch(...){}
           fprintf(stderr,"    [regpc %08X #%d] D0=%08X D6=%08X A0=%08X [A0+C].b=%02X A4=%08X\n",

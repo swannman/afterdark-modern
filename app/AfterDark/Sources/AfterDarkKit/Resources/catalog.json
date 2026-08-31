@@ -1169,6 +1169,54 @@
       "credits": "Globe by Jack Eastman.\n©1991-93 Berkeley Systems Inc."
     },
     {
+      "id": "68k-gravity",
+      "displayName": "Gravity",
+      "family": "68K",
+      "host": "engine/adhost68k",
+      "workingDir": "engine",
+      "rsrcPath": "deluxe/extracted/dlx/After Dark Deluxe (4/Gravity/..namedfork/rsrc",
+      "argsTemplate": [
+        "{RSRC}"
+      ],
+      "env": {},
+      "controlEnvVar": "ADCVSET",
+      "lane": "std",
+      "controls": [
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "type": "slider",
+          "label": "Number of Balls:",
+          "min": 0,
+          "max": 98,
+          "defaultValue": 28
+        },
+        {
+          "id": "c1001",
+          "resourceId": 1001,
+          "type": "slider",
+          "label": "Diameter:",
+          "min": 0,
+          "max": 90,
+          "defaultValue": 72
+        },
+        {
+          "id": "c1002",
+          "resourceId": 1002,
+          "type": "toggle",
+          "label": "Leave trails",
+          "defaultValue": 1
+        },
+        {
+          "id": "c1003",
+          "resourceId": 1003,
+          "type": "toggle",
+          "label": "Collisions",
+          "defaultValue": 0
+        }
+      ]
+    },
+    {
       "id": "ppc-guernsey-madness",
       "displayName": "Guernsey Madness",
       "family": "PPC",
@@ -1894,6 +1942,83 @@
       ],
       "about": "MODERN ART™\n\nMONDRIAN generates homages to the work of the Dutch painter Piet Mondrian (1872-1944). These images more closely resemble the work of Mondrian's colleague, Theo van Doesberg, who painted the same stuff but never seemed to get it quite right.\nROTHKO generates displays not dissimilar from the work of the Russian-born American Abstract Expressionist painter Mark Rothko (1903-1970).\nPOLLOCK reminds us ever so slightly of the work of Jackson Pollock (1912-1956), the American Abstract Expressionist drip painter.\n\nSplotch artwork by Igor Gasowski (1957- ).",
       "credits": "Modern Art by J. Eastman and B. Burkhalter.\n©1991-93 Berkeley Systems Inc."
+    },
+    {
+      "id": "68k-mountains",
+      "displayName": "Mountains",
+      "family": "68K",
+      "host": "engine/adhost68k",
+      "workingDir": "engine",
+      "rsrcPath": "deluxe/extracted/dlx/After Dark Deluxe (4/Mountains/..namedfork/rsrc",
+      "argsTemplate": [
+        "{RSRC}"
+      ],
+      "env": {},
+      "controlEnvVar": "ADCVSET",
+      "lane": "std",
+      "controls": [
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "type": "popup",
+          "label": "Image:",
+          "defaultValue": 14,
+          "options": [
+            "No Water:",
+            "Frame",
+            "Shell",
+            "Sheet",
+            "Surface",
+            "Solid",
+            "Water:",
+            "Frame",
+            "Shell",
+            "Sheet",
+            "Surface",
+            "Solid",
+            "-",
+            "Random"
+          ]
+        },
+        {
+          "id": "c1001",
+          "resourceId": 1001,
+          "type": "popup",
+          "label": "Planet:",
+          "defaultValue": 11,
+          "options": [
+            "Mercury",
+            "Venus",
+            "Earth",
+            "Mars",
+            "Jupiter",
+            "Saturn",
+            "Uranus",
+            "Neptune",
+            "Pluto",
+            "-",
+            "Random"
+          ]
+        },
+        {
+          "id": "c1002",
+          "resourceId": 1002,
+          "type": "slider",
+          "label": "Refinement:",
+          "min": 0,
+          "max": 100,
+          "defaultValue": 34
+        },
+        {
+          "id": "c1003",
+          "resourceId": 1003,
+          "type": "slider",
+          "label": "Zoom:",
+          "min": 0,
+          "max": 100,
+          "defaultValue": 70
+        }
+      ]
     },
     {
       "id": "68k-mowin-man",
