@@ -467,6 +467,18 @@ static bool g_no_relres=false;    // ADNORELRES     — disable ReleaseResource/
 // makes guest time advance in proportion to WORK DONE, so a module comparing two guest timestamps
 // across a heavy computation reads an absurd elapsed time. ADTICKCYCLES=256 restores that clock.
 static uint32_t g_tick_cycles=65536;
+// ---- VBL task drive (ADVBLFIRE) ----------------------------------------------------------------
+// Classic savers that own their own game clock install a VBLTask (VInstall / SlotVInstall) and let the
+// 60.15 Hz vertical-blank interrupt step the simulation; the AD engine's per-frame DoDrawFrame then only
+// PRESENTS whatever state the VBL advanced. Lunatic Fringe is built that way (VInstall glue @0x001007C6,
+// SlotVInstall glue @0x0010084A, selected by the "device supports slot VBL" flag [A4+0x3FB7]). The host
+// has no interrupts, so without this the task never runs and the game state is frozen at frame 0.
+// VBLTask layout: qLink(0,4) qType(4,2) vblAddr(6,4) vblCount(0xA,2) vblPhase(0xC,2). Real VBL semantics:
+// every interrupt decrements vblCount; on 0 the manager calls vblAddr with A0 = the task pointer and
+// leaves the count at 0 (the task re-arms it itself, or stays dormant).
+static uint32_t g_vbl_tp=0, g_vbl_addr=0, g_vbl_ret=0;
+static bool     g_vbl_firing=false;
+static uint32_t g_vbl_period=0;      // instructions between simulated VBL interrupts (0 = disabled)
 // ADCALLHIST call-site histograms (instrumentation).
 static std::map<uint32_t,std::map<std::tuple<uint32_t,uint16_t,uint16_t>,unsigned long long>> g_ch_hist;
 static std::map<uint32_t,std::set<uint32_t>> g_ch_objs;
@@ -1808,8 +1820,7 @@ int main(int argc, char** argv){
     // Derive the library path from the module path (sibling dir), overridable by
     // ADLIBPATH. argv[1] = ".../<Deluxe folder>/<Module>/..namedfork/rsrc".
     std::string libpath;
-    if(getenv("ADLIBPATH")) libpath = getenv("ADLIBPATH");
-    else {
+    {
       std::string mp = argv[1];
       const char* NF = "/..namedfork/rsrc";
       size_t nf = mp.rfind(NF);
@@ -1834,6 +1845,36 @@ int main(int argc, char** argv){
       struct stat st;
       if(want40 && ::stat(ad4.c_str(),&st)==0) libpath = ad4;
       else libpath = (::stat(ad3.c_str(),&st)==0) ? ad3 : ad4;
+      // ADLIBPATH names the library the LANE wants. That is a default, not a licence to bind a module
+      // against a library that does not export the fragments it imports: import binding is by ordinal
+      // key, so mounting the wrong major version does not fail loudly — it silently resolves each import
+      // to whatever export happens to sit at that key. Fish! Pro under the lane-40 ADLIBPATH=AD4Library
+      // is the worked example: it imports AD3_* but gets the LIB510_* set, 459 of its 6043 code imports
+      // go unresolved, and its 1-argument allocator import binds to a 2-argument `rtd #8` routine that
+      // pops 4 bytes too many — the caller's closing `movem.l (A7)+` then reloads from the wrong slots and
+      // its `rts` returns to 0x486A0000. Under the AD 3.0 library the same module binds 5973 ok / 0
+      // unresolved. So when the override disagrees with what the module's own dll# import list names,
+      // the module wins. ADFORCELIBPATH restores the unconditional override for A/B.
+      if(const char* lp=getenv("ADLIBPATH")){
+        std::string want = lp;
+        if(!getenv("ADFORCELIBPATH")){
+          // The AD 4.0 library carries per-fragment NAME tables (imports bind by name); the AD 3.0 C
+          // library has none. That is the version discriminator, read off the file rather than its name.
+          auto probe40=[&](const std::string& p)->int{      // 1 = 4.0, 0 = 3.0, -1 = unreadable
+            try{ ResourceFile f(parse_resource_fork(phosg::load_file(p)));
+                 for(int16_t id=128; id<=141; id++)
+                   try{ if(!f.get_resource(FOURCC("NAME"),id)->data.empty()) return 1; }catch(const exception&){}
+                 return 0; }catch(const exception&){ return -1; } };
+          int got = probe40(want);
+          if(got>=0 && (got==1)!=want40 && ::stat(libpath.c_str(),&st)==0 && libpath!=want){
+            fprintf(stderr,"[lib510] ADLIBPATH names the AD %s library but this module imports the AD %s set"
+                           " -> using '%s' (ADFORCELIBPATH overrides)\n",
+                    got==1?"4.0":"3.0", want40?"4.0":"3.0", libpath.c_str());
+            want = libpath;
+          }
+        }
+        libpath = want;
+      }
     }
     static const struct { int16_t id; const char* nm; } FRAGS[] = {
       {128,"Runtime"},{129,"LIB510_admod"},{130,"LIB510_ANSI"},{131,"LIB510_Audio"},
@@ -2070,11 +2111,25 @@ int main(int argc, char** argv){
         // cascading into misaligned movem restores that trash callee-saved registers -> garbage vtable
         // pointer faults. Page-aligning makes the arena == the allocated block (no free tail) so allocate()
         // falls back to the low heap; it only grows the module's unused a5-above region, leaving
-        // a5_mod/TV/data layout unchanged. Gated to is40 (AD 4.0 LIB510), which covers both twoA5 and
-        // single-A5 4.0 modules — all share the XHeap allocator. AD3 modules (is40=0) keep the exact blockSz.
-        if(is40){ size_t pg=mem->get_page_size(); if(pg) blockSz=(uint32_t)((blockSz + (pg-1)) & ~(pg-1)); }
+        // a5_mod/TV/data layout unchanged.
+        // The ragged tail is not is40-specific: an AD3 (is40=0) load leaves one too, and there it is
+        // actively harmful because the AD3 path does NOT extend the low heap, so the tail is the SMALLEST
+        // free block in the context and allocate() prefers it for every small NewPtr. Blocks then pack
+        // against the arena's page-rounded end and any struct-field read a few bytes past a short block
+        // faults ("not within any arena") — while the SAME overrun lands harmlessly mid-heap once the
+        // block sits elsewhere. That is what made Fish! Pro a heap-layout knife-edge: its 8-byte
+        // IXResourceFile `this` landed flush at 0x02020000, so the ADdl +0x1A handler's write at this+0x1E
+        // fell off the end, and any 16-byte shift in earlier allocation moved the victim instead of
+        // removing the cliff. Page-align unconditionally so the arena == the block and no allocation can
+        // ever sit in the A5 block's page padding. ADNOA5PAGEALIGN opts out (A/B).
+        if(!getenv("ADNOA5PAGEALIGN")){ size_t pg=mem->get_page_size(); if(pg) blockSz=(uint32_t)((blockSz + (pg-1)) & ~(pg-1)); }
         const uint32_t A5_BLOCK=0x02000000;
         mem->allocate_at(A5_BLOCK, blockSz); mem->memset(A5_BLOCK,0,blockSz);
+        // ADHEAPNUDGE=<decimal bytes> (diagnostic, default off): burn one dynamic allocation of that size
+        // up front so every later NewPtr/NewHandle shifts. A fix for an out-of-bounds access must be
+        // INVARIANT under this; if a nudge changes whether a module faults, the cliff is still there and
+        // only the victim moved (the Fish! Pro knife-edge, ledger addm 787).
+        if(const char* hn=getenv("ADHEAPNUDGE")){ long n=atol(hn); if(n>0) mem->allocate((size_t)n); }
         // Single-A5 4.0 modules need the same contiguous low-heap extension as twoA5. With the page-align
         // above their dynamic NewPtr/NewHandle route out of the A5 arena, but the default 1MB low heap
         // (0x4000..0xFE000) overflows and they spill into tight EXACTLY-sized fresh arenas where a struct
@@ -2646,7 +2701,15 @@ int main(int argc, char** argv){
           // self-ref across every fragment onto ONE code island. Gate the fallback on value!=0 so value==0
           // reaches the own-DATA branch, and on deAlias so single-A5 loads keep the plain fallback.
           bool dataToCodeFallback=false;
-          if(wantData && s.kind==0 && (value!=0 || !deAlias)){
+          // ADZERODATA (experiment): apply the value==0 exclusion in the SINGLE-A5 world too. The
+          // comment above is right for both worlds — value==0 is the own-DATA self-reference sentinel,
+          // not a keyed import — but the `|| !deAlias` term re-admits it for single-A5 loads, where
+          // resolveKey(0,code) matches an arbitrary key12==0 island and EVERY own-data self-ref in
+          // EVERY library fragment collapses onto that one TV slot (787 sites on Hula Twins -> A5+0x78A0).
+          // Default ON (the correct rule for both worlds); ADNOZERODATA reverts to the
+          // pre-836 behaviour for A/B.
+          bool zeroData = !getenv("ADNOZERODATA");
+          if(wantData && s.kind==0 && (value!=0 || (!deAlias && !zeroData))){
             auto sc=resolveKey(f,value,/*wantData=*/false);
             if(sc.kind==1){ s=sc; dataToCodeFallback=true; }
           }
@@ -3392,6 +3455,9 @@ int main(int argc, char** argv){
         // stacked outside the signed-16 A5 window on a single-A5 load — so it selects Bugs and Daredevil
         // Dan (Nirvana's MODULE_130 is near at A5-0x7BB0 and is excluded). ADNOBUGSEXT and
         // ADNOBUGSDATABAND opt out.
+        // Cursor just past whatever the MODULE_130 band below consumed, so the extra-fragment pass that
+        // follows it can pack additional far fragments without overlapping it. Stays 0 if no band was laid.
+        uint32_t bandEnd=0;
         AdLibFragment* m130=nullptr; for(auto& mf:lib510.modFrags) if(mf.id==130) m130=&mf;
         bool m130Far = m130 && !m130->data.empty()
                     && (int64_t)m130->dataBase - (int64_t)lib510.a5 < -0x8000;
@@ -3458,8 +3524,65 @@ int main(int argc, char** argv){
               if(!getenv("ADBUGSBANDMODONLY")) for(auto& f:lib510.frags){ uint32_t n=redirectFrag(f); totLib+=n; }
               for(auto& f:lib510.modFrags){ uint32_t n=redirectFrag(f); totMod+=n; }
               tot=totLib+totMod;
+              bandEnd = bandBase + ((dataSz + 0xF) & ~0xFu);
               fprintf(stderr,"[bugs-databand] Bugs DATA-band: mirrored MODULE_130 DATA %uB -> near A5-0x8000, redirected %u refs (lib=%u mod=%u)\n",dataSz,tot,totLib,totMod);
             }
+          }
+        }
+        // ---- far module-fragment DATA band, remaining fragments ----
+        // The band above handles MODULE_130 only. A single-A5 dll# module can stack a THIRD fragment's DATA
+        // outside the signed-16 A5 window too (Fish! Pro: MODULE_130 at A5-0xB4B8 *and* MODULE_131 at
+        // A5-0x11E04, both far). The ddDealias mirror cannot take them either — its cell sits just above the
+        // shared data stub and only ~0xCE0 bytes remain inside s16 there, so both fragments log
+        // "no near room -> stays clamped". A clamped fragment has EVERY (d16,A5) reference into its DATA
+        // collapsed onto the one zeroed data-stub cell by ADA5DISPGUARD, so any C++ vtable living in that
+        // DATA reads all-null and every virtual dispatch through it becomes `jsr 0`. In Fish! Pro that is
+        // MODULE_131's vtable: the Fish constructor's `jsr [[obj]+0xB8]` calls through the null slot, the
+        // callee-clean method never pops its 10 bytes of arguments, and the constructor's closing
+        // `movem.l (A7)+,D3-D7/A2-A4` therefore reloads from 10 bytes off -> A2 (the returned `this`) comes
+        // back 0 -> module_main publishes a null instance into storage[0] -> every later blank/draw message
+        // dereferences null and returns immediately. The seabed painted during init stays on screen and
+        // nothing ever animates.
+        // Fix: keep packing far fragments up from where the MODULE_130 band ended (or A5-0x8000 if none was
+        // laid). Same invariants as that band — the destination must be all-zero (never clobber a live
+        // global) and every rewritten displacement must land inside s16 — so a module with one far fragment
+        // is bit-identical to before by construction. ADNOFARBAND opts out.
+        if(!lib510.twoA5 && !getenv("ADNOBUGSEXT") && !getenv("ADNOFARBAND")){
+          uint32_t cur = bandEnd ? bandEnd : (uint32_t)((int64_t)lib510.a5 - 0x8000);
+          for(auto& mf : lib510.modFrags){
+            if(&mf==m130 && bandEnd) continue;                                   // already banded above
+            if(mf.data.empty()) continue;
+            if((int64_t)mf.dataBase - (int64_t)lib510.a5 >= -0x8000) continue;    // already s16-near
+            uint32_t sz=(uint32_t)mf.data.size();
+            if((int64_t)(cur + sz) - (int64_t)lib510.a5 > 0x7FF0){
+              fprintf(stderr,"[far-band] WARN no near room for %s (sz=0x%X) -> stays clamped\n",mf.libName.c_str(),sz); continue; }
+            bool freeBand=true;                                                   // never clobber a live global
+            for(uint32_t o=0;o<sz && freeBand;o++){ uint8_t b=0; try{b=mem->read_u8(cur+o);}catch(...){} if(b)freeBand=false; }
+            if(!freeBand){ fprintf(stderr,"[far-band] %s: destination A5%+d not free -> skipped\n",
+                             mf.libName.c_str(),(int)((int64_t)cur-(int64_t)lib510.a5)); continue; }
+            // Copy the POST-reloc DATA image so the near mirror inherits DRLT-patched vtable slots.
+            for(uint32_t o=0;o<sz;o++){ uint8_t b=0; try{b=mem->read_u8(mf.dataBase+o);}catch(...){} try{mem->write_u8(cur+o,b);}catch(...){} }
+            uint32_t nfix=0;
+            auto redirect=[&](AdLibFragment& f){
+              for(auto& r : f.creRecs){
+                if(r.kind!=0xFFFF) continue;
+                int16_t origD16=0; if(r.off+2<=f.code.size()) origD16=(int16_t)(((uint8_t)f.code[r.off]<<8)|(uint8_t)f.code[r.off+1]);
+                uint32_t target=0; bool have=false;
+                if(r.addend==0){ if(&f==&mf){ target=mf.dataBase+(uint32_t)(int32_t)origD16; have=true; } }
+                else { auto s=resolveKey(f, r.addend, /*wantData=*/true);
+                       if(s.kind==2 && s.frag==&mf){ target=mf.dataBase+s.off+(uint32_t)(int32_t)origD16; have=true; } }
+                if(!have) continue;
+                if(target < mf.dataBase || target >= mf.dataBase+sz) continue;    // DATA-image only
+                int32_t nd=(int32_t)((int64_t)cur+(target-mf.dataBase)-(int64_t)lib510.a5);
+                if(nd<-32768 || nd>32767) continue;
+                try{ mem->write_u16b(f.codeBase+r.off,(uint16_t)(int16_t)nd); nfix++; }catch(...){}
+              }
+            };
+            if(!getenv("ADBUGSBANDMODONLY")) for(auto& f:lib510.frags) redirect(f);
+            for(auto& f:lib510.modFrags) redirect(f);
+            fprintf(stderr,"[far-band] mirrored %s DATA %uB -> near A5%+d, redirected %u refs\n",
+              mf.libName.c_str(), sz, (int)((int64_t)cur-(int64_t)lib510.a5), nfix);
+            cur += (sz + 0xF) & ~0xFu;
           }
         }
         // ---- ADSFBAND: post-reloc vptr mirror (the copy-after-relocate half) ----
@@ -4352,6 +4475,7 @@ int main(int argc, char** argv){
   mem->write_u32b(0x08A4, gdh);   // MainDevice
   mem->write_u32b(0x0CC8, gdh);   // TheGDevice (current)
 
+
   M68KEmulator emu(mem);
   uint64_t traps=0;
   long draw_ops=0;
@@ -4669,6 +4793,8 @@ int main(int argc, char** argv){
   g_nobool       = (getenv("ADNOBOOLFIX")!=nullptr);   // Boolean-result-slot A/B lever
   g_no_relres    = (getenv("ADNORELRES")!=nullptr);
   if(getenv("ADTICKCYCLES")){ long v=strtol(getenv("ADTICKCYCLES"),0,0); if(v>0) g_tick_cycles=(uint32_t)v; }
+  // ADVBLFIRE=<instructions per simulated vertical-blank interrupt> (1 = the 4096 default).
+  if(getenv("ADVBLFIRE")){ long v=strtol(getenv("ADVBLFIRE"),0,0); g_vbl_period=(v>1)?(uint32_t)v:4096u; }
   if(getenv("ADCALLHIST")) atexit(ch_dump);   // temporary diagnostic
   if(getenv("ADSGP")) atexit(sgp_dump);       // temporary diagnostic
   g_no_fpenv     = (getenv("ADNOFPENV")!=nullptr);
@@ -5259,6 +5385,7 @@ int main(int argc, char** argv){
       else         mem->write_u16b(r.a[7], ne?0x0100:0);
     } else if(opcode==0xA873){ // SetPort(port) — pop 4; retarget drawing
       uint32_t p=mem->read_u32b(r.a[7]); r.a[7]+=4;
+      if(getenv("ADLUNPORT")) fprintf(stderr,"[lunport] SetPort port=%08X pc=%08X a6=%08X (was cur=%08X)\n",p,r.pc,r.a[6],C.cur_port);
       adpq_save(C); C.cur_port = p?p:C.g_port;               // the outgoing port keeps its colours
       adpc_load(C);   // the new current port brings its OWN clipRgn with it
       adpq_load(C);   // ...and the new port brings its OWN fgColor/bkColor
@@ -5849,6 +5976,21 @@ int main(int argc, char** argv){
         if(g_tm_primed && !g_pf_hook_installed && g_pf_install_hook) g_pf_install_hook(); }
     } else if(opcode==0xA059){ // RmvTime(tmTaskPtr A0) — remove the task.
       g_tm_primed=false;
+    } else if((opcode==0xA033||opcode==0xA06F) && getenv("ADVBLFIRE")){ // VInstall(A0=VBLTask) / SlotVInstall(A0=VBLTask, D0.w=slot)
+      // Record the task; the debug hook simulates the 60 Hz interrupt (see g_vbl_* decl). Both traps
+      // return OSErr in D0. Only one task is tracked — the savers that use this own the screen and
+      // install exactly one.
+      if(r.a[0]){
+        g_vbl_tp=r.a[0]; try{ g_vbl_addr=mem->read_u32b(r.a[0]+6); }catch(...){ g_vbl_addr=0; }
+        if(g_vbl_addr && !g_pf_hook_installed && g_pf_install_hook) g_pf_install_hook();
+        if(getenv("ADVBLLOG")) fprintf(stderr,"    [VBL] %s task=%08X vblAddr=%08X count=%u pc=%08X\n",
+          opcode==0xA033?"VInstall":"SlotVInstall",g_vbl_tp,g_vbl_addr,
+          (unsigned)mem->read_u16b(g_vbl_tp+0xA),r.pc);
+      }
+      r.d[0].u=0;   // noErr
+    } else if((opcode==0xA034||opcode==0xA070) && getenv("ADVBLFIRE")){ // VRemove / SlotVRemove
+      if(r.a[0]==g_vbl_tp){ g_vbl_addr=0; g_vbl_tp=0; g_vbl_firing=false; }
+      r.d[0].u=0;
     } else if(opcode==0xA9C6){ // Secs2Date(D0=seconds since 1904-01-01, A0=&DateTimeRec)
       // The run-once-then-inert LIFE/PATTERNS class (Life & All, Guernsey Madness, Einstein, Slow Burn,
       // Frost & Fire) gates its per-frame generation-step on the WALL-CLOCK time-of-day CHANGING:
@@ -5955,8 +6097,10 @@ int main(int argc, char** argv){
         fprintf(stderr,"[canvaspixmap] obj=%08X +0x38<-pmh=%08X(pm=%08X base=%08X rb=%d) +0x04<-1\n",
           co,pmh,pm,C.g_fb,C.fb_w);
       }
-      if(getenv("ADADDLLOG")) fprintf(stderr,"    [ADdl +0x1A canvas-setup] arg0(params)=%08X canvasObj=%08X +0x1E<-%08X (arg1=%08X)\n",
-        arg0, canvasObj, g_dll_canvasbs, mem->read_u32b(r.a[7]+8));
+      if(getenv("ADADDLLOG")){ uint32_t retpc=mem->read_u32b(r.a[7]);
+        auto bs=[&](uint32_t p)->long{ auto it=blk_size->find(p); return it!=blk_size->end()? (long)it->second : -1; };
+        fprintf(stderr,"    [ADdl +0x1A canvas-setup] caller=%08X arg0(params)=%08X(sz=%ld) canvasObj=%08X(sz=%ld) +0x1E<-%08X (arg1=%08X)\n",
+          retpc, arg0, bs(arg0), canvasObj, bs(canvasObj), g_dll_canvasbs, mem->read_u32b(r.a[7]+8)); }
       uint32_t ret=mem->read_u32b(r.a[7]); mem->write_u32b(r.a[7]+12, ret); r.a[7]+=12;  // callee-clean 3 longs
     } else if(opcode==0xAAF0){ // ADdl LinkModule(&struct,&entryOut,"module_main",dll#Handle,params) -> errW
       // Stack: [A7]=ret, +4=&struct, +8=&entryOut, +12=name, +16=dll#Handle, +20=params, +24=errW slot.
@@ -7190,6 +7334,7 @@ int main(int argc, char** argv){
       uint32_t pp=mem->read_u32b(r.a[7]); r.a[7]+=4;
       uint32_t cur=C.cur_port?C.cur_port:C.g_port;
       if(pp) mem->write_u32b(pp, cur);
+      if(getenv("ADLUNPORT")) fprintf(stderr,"[lunport] GetPort -> %08X pc=%08X a6=%08X dst=%08X\n",cur,r.pc,r.a[6],pp);
       if(getenv("ADTRAPLOG")) fprintf(stderr,"      GetPort -> %08X\n",cur);
       if(getenv("ADBADPORT") && (cur&0xFFFF0000)==0x4EFA0000){
         fprintf(stderr,"[BADPORT] GetPort returns garbage cur_port=%08X pc=%08X (cur_port=%08X g_port=%08X)\n",cur,r.pc,C.cur_port,C.g_port); }
@@ -8793,6 +8938,31 @@ int main(int argc, char** argv){
   // The args are a params block, the message/selector (word), the GrafPort, and a globals/frame block.
   uint32_t params = mem->allocate(0x400); mem->memset(params,0,0x400);
   uint32_t glob   = mem->allocate(0x400); mem->memset(glob,0,0x400);
+  // ---- Unit table + video-driver DCE (ADVIDDCE) -------------------------------------------------
+  // A saver that wants the screen's NuBus slot (to install a SLOT VBL task on the video card) walks
+  // GDevice.gdRefNum -> GetDCtlEntry(refNum) -> DCtlEntry.dCtlSlot. The classic GetDCtlEntry glue is
+  //     unit = -(refNum+1);  DCE = ((DCtlHandle*)UTableBase)[unit]
+  // reading UTableBase from low memory 0x011C. The host left 0x011C zero AND gdRefNum zero, so Lunatic
+  // Fringe's glue @0x00100810 indexed a null unit table at 0xFFFFFFFC and its init faulted before it
+  // could install anything. Publish a real (small) unit table with one video DCE and give the screen
+  // GDevice that driver's refNum. dCtlSlot=0 is the built-in-video answer, which steers a caller that
+  // branches on it to the plain VInstall path rather than SlotVInstall.
+  if(!getenv("ADNOVIDDCE")){   // default ON: every real Mac had a unit table; ADNOVIDDCE = A/B lever
+    const uint16_t kUnits=64, kVidUnit=32, kVidRefNum=(uint16_t)(-(int)kVidUnit-1);   // refNum -33
+    uint32_t utab = mem->allocate(kUnits*4); mem->memset(utab,0,kUnits*4);
+    uint32_t dce  = mem->allocate(0x40);     mem->memset(dce,0,0x40);
+    mem->write_u16b(dce+0x04, 0x6C00);          // dCtlFlags: dRAMBased | ctlEnable | drvrActive
+    mem->write_u16b(dce+0x18, kVidRefNum);      // dCtlRefNum
+    mem->write_u8  (dce+0x28, 0);               // dCtlSlot   (built-in video)
+    mem->write_u8  (dce+0x29, 0);               // dCtlSlotId
+    uint32_t dceh = mem->allocate(4); mem->write_u32b(dceh, dce);
+    mem->write_u32b(utab + 4u*kVidUnit, dceh);
+    mem->write_u32b(0x011C, utab);              // UTableBase
+    mem->write_u16b(0x01D2, kUnits);            // UnitNtryCnt
+    mem->write_u16b(gdev+0x00, kVidRefNum);     // GDevice.gdRefNum
+    if(getenv("ADVBLLOG")) fprintf(stderr,"[adhost68k] video DCE: UTableBase=%08X unit=%u DCE=%08X gdRefNum=%d\n",
+      utab,(unsigned)kVidUnit,dce,(int)(int16_t)kVidRefNum);
+  }
   // Synthesize the After Dark 68K parameter block that the module reads (the analog
   // of the PPC faceplate frame). RE'd from the msg-2 draw handler @ADgm 0x1EC:
   //   [params+0x06].w  gates FillRgn (draw-enable flag)  -> set 1
@@ -9363,6 +9533,30 @@ int main(int argc, char** argv){
     // (only when the LIB510 world + module fragment are loaded); classic modules never reach here.
     if(lib510.loaded && !lib510.modFrags.empty())
       mem->write_u32b(addl+0x1A, trapstub(0xAAF3));
+    // ...except that attribution is WRONG, and it is wrong destructively. The call-site scan recorded
+    // above already found that +0x1A's only callers are IXResourceFile's two sites; a live census across
+    // Clocks / Rebound / Nirvana / Rat Race / Ray / Fish! Pro confirms every one of them enters through the
+    // SAME site (return address 0x0101B054), which reserves a 2-byte result with `subq.w #2,A7`, pushes
+    // three longs, and reads the result back with `move.w (A7)+,D0` to branch on. No canvas code reaches
+    // this slot at all. Two consequences of pointing it at the 0xAAF3 canvas handler:
+    //   1. the handler never writes the 2-byte OSErr, so every module branches on stack garbage; and
+    //   2. it writes a 4-byte Handle at `canvasObj+0x1E`, where canvasObj is IXResourceFile's `this` — an
+    //      8-BYTE NewPtr block in every module measured. That is a 26-byte overrun on every dll# load.
+    // It is normally invisible because the overrun lands mid-heap, which is exactly why Fish! Pro looked
+    // like a heap-layout knife-edge rather than a bug: with the A5 arena's page-padding tail in play its
+    // 8-byte block landed flush against the arena end and the same overrun became a hard fault.
+    // Install the shape the call site actually asks for — pop the three longs, return noErr in the word —
+    // so the resource file reports "opened" and nothing is written out of bounds. ADADDL1ACANVAS restores
+    // the 0xAAF3 canvas trapstub for A/B.
+    if(lib510.loaded && !lib510.modFrags.empty() && !getenv("ADADDL1ACANVAS")){
+      uint32_t s1a = mem->allocate(10);
+      mem->write_u16b(s1a+0, 0x205F);            // movea.l (A7)+,A0   pop return address
+      mem->write_u16b(s1a+2, 0x4FEF);            // lea (12,A7),A7     drop the three longs
+      mem->write_u16b(s1a+4, 0x000C);
+      mem->write_u16b(s1a+6, 0x4257);            // clr.w (A7)         result slot = 0 (noErr)
+      mem->write_u16b(s1a+8, 0x4ED0);            // jmp (A0)
+      mem->write_u32b(addl+0x1A, s1a);
+    }
     if(lib510.loaded && !lib510.modFrags.empty() && getenv("ADLINKMODULE")){
       mem->write_u32b(addl+0x3E, trapstub(0xAAF0));     // LinkModule
       mem->write_u32b(addl+0x0A, trapstub(0xAAF1));     // getModuleEntry
@@ -9633,7 +9827,7 @@ int main(int argc, char** argv){
       "ADTHROWDUMP","ADTHROWMAX","ADTMLOG","ADUIBASE","ADWATCH","ADWATCHMAX","ADXHP","ADXHPMAX",
       // Not read inside the hook body, but they ARM state the hook branches on (g_bbtrace_on is set
       // AFTER this install point, so it must be gated here or a lean run would silently drop its trace).
-      "ADBBTRACEINIT","ADINITTRACE","ADSBGATE","ADIMPTRACE","ADIMPMAX","ADWATCHADDR","ADPCLOG","ADFINDPAGE",
+      "ADBBTRACEINIT","ADINITTRACE","ADSBGATE","ADIMPTRACE","ADIMPMAX","ADWATCHADDR","ADPCLOG","ADPCREG","ADFINDPAGE",
       "ADDLLICNT",   // reports the exact per-message instruction count; the lean path derives it from cycles()
     };
     bool pf_lean = !lim && !watchA && !pclogA && !findpg && !impTrace
@@ -9759,6 +9953,24 @@ int main(int argc, char** argv){
         // handler); this compare only exists for the ADPFNOSENTTRAP A/B.
         if(!k_senttrap && rr.pc==RET_SENT){ if(PFC) g_duty[PFD_RETSENT]++; throw runtime_error("module returned to sentinel (message handled)"); }
         // Time Manager one-shot fire (see g_tm_* decl).
+        // VBL task drive (see g_vbl_* decl): simulate the 60 Hz vertical-blank interrupt for a task the
+        // module installed with VInstall/SlotVInstall. Decrement vblCount every g_vbl_period instructions; on 0
+        // inject a call to vblAddr with A0 = the task pointer (the classic register convention), and detect its
+        // rts back to the injected return to end the fire.
+        if(g_vbl_firing){ if(rr.pc==g_vbl_ret) g_vbl_firing=false; }
+        else if(g_vbl_period && g_vbl_addr && g_vbl_tp){
+          static long vblc=0;
+          if((++vblc % (long)g_vbl_period)==0){
+            uint16_t cnt=0; try{ cnt=mem->read_u16b(g_vbl_tp+0xA); }catch(...){}
+            if(cnt>1){ try{ mem->write_u16b(g_vbl_tp+0xA,(uint16_t)(cnt-1)); }catch(...){} }
+            else if(cnt==1){
+              try{ mem->write_u16b(g_vbl_tp+0xA,0); }catch(...){}
+              g_vbl_ret=rr.pc; g_vbl_firing=true;
+              rr.a[7]-=4; try{ mem->write_u32b(rr.a[7], g_vbl_ret); }catch(...){}
+              rr.a[0]=g_vbl_tp; rr.pc=g_vbl_addr;
+            }
+          }
+        }
         if(g_tm_firing){ if(rr.pc==g_tm_ret) g_tm_firing=false; }
         else if(g_tm_primed && g_tm_addr>=0x00100000 && g_tm_addr<0x00400000){
           static long tmc=0; if((++tmc % 20000)==0){
@@ -10832,6 +11044,24 @@ int main(int argc, char** argv){
       // Time Manager one-shot fire (see g_tm_* decl): a primed TMTask's completion routine (tmAddr) clears a
       // busy flag the module then spin-waits on. Inject a call to tmAddr (~every 20000 instrs) so the flag
       // clears and the spin breaks; detect the task's rts back to the injected return to end the fire.
+      // VBL task drive (see g_vbl_* decl): simulate the 60 Hz vertical-blank interrupt for a task the
+      // module installed with VInstall/SlotVInstall. Decrement vblCount every g_vbl_period instructions; on 0
+      // inject a call to vblAddr with A0 = the task pointer (the classic register convention), and detect its
+      // rts back to the injected return to end the fire.
+      if(g_vbl_firing){ if(rr.pc==g_vbl_ret) g_vbl_firing=false; }
+      else if(g_vbl_period && g_vbl_addr && g_vbl_tp){
+        static long vblc=0;
+        if((++vblc % (long)g_vbl_period)==0){
+          uint16_t cnt=0; try{ cnt=mem->read_u16b(g_vbl_tp+0xA); }catch(...){}
+          if(cnt>1){ try{ mem->write_u16b(g_vbl_tp+0xA,(uint16_t)(cnt-1)); }catch(...){} }
+          else if(cnt==1){
+            try{ mem->write_u16b(g_vbl_tp+0xA,0); }catch(...){}
+            g_vbl_ret=rr.pc; g_vbl_firing=true;
+            rr.a[7]-=4; try{ mem->write_u32b(rr.a[7], g_vbl_ret); }catch(...){}
+            rr.a[0]=g_vbl_tp; rr.pc=g_vbl_addr;
+          }
+        }
+      }
       if(g_tm_firing){ if(rr.pc==g_tm_ret) g_tm_firing=false; }
       else if(g_tm_primed && g_tm_addr>=0x00100000 && g_tm_addr<0x00400000){
         static long tmc=0; if((++tmc % 20000)==0){
@@ -10960,6 +11190,18 @@ int main(int argc, char** argv){
           FILE* f=fopen(dpath,"wb");
           if(f){ for(uint32_t a=dlo;a<dhi;a++){ uint8_t b=0; try{b=mem->read_u8(a);}catch(...){} fputc(b,f); }
             fclose(f); fprintf(stderr,"[dumpat] pc=%08X %08X..%08X -> %s\n",dpc,dlo,dhi,dpath); } } }
+      // ADPCREG=<hexpc>[,<maxhits>]: dump the full register file each time PC hits <hexpc>. A generic
+      // "what is this call actually seeing" probe (RE only; default off, full hook).
+      if(CENV("ADPCREG")){
+        static uint32_t pcreg=0; static long pcregMax=20, pcregN=0; static bool pcregInit=false;
+        if(!pcregInit){ pcregInit=true; const char* v=CENV("ADPCREG"); pcreg=(uint32_t)strtoul(v,0,16);
+          const char* c=strchr(v,','); if(c) pcregMax=atol(c+1); }
+        if(rr.pc==pcreg && pcregN<pcregMax){ pcregN++;
+          fprintf(stderr,"    [PCREG %08X #%ld] D:",pcreg,pcregN); for(int i=0;i<8;i++) fprintf(stderr," %08X",rr.d[i].u);
+          fprintf(stderr,"  A:"); for(int i=0;i<8;i++) fprintf(stderr," %08X",rr.a[i]);
+          fprintf(stderr,"  code:"); for(int i=0;i<8;i++){ uint16_t w=0; try{w=mem->read_u16b(rr.pc+2*i);}catch(...){} fprintf(stderr," %04X",w); }
+          fprintf(stderr,"\n"); }
+      }
       if(pclogA && rr.pc==pclogA){
         uint32_t a1=0,a2=0; try{a1=mem->read_u32b(rr.a[7]+4);}catch(...){} try{a2=mem->read_u32b(rr.a[7]+8);}catch(...){}
         // dump the bytes at the first arg (the candidate string ptr) and one deref level

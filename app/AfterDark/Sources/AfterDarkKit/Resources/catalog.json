@@ -1,63 +1,6 @@
 {
   "modules": [
     {
-      "id": "flying-toasters",
-      "displayName": "Flying Toasters!",
-      "family": "68K",
-      "host": "engine/adhost68k",
-      "workingDir": "engine",
-      "rsrcPath": "deluxe/extracted/dlx/After Dark Deluxe (4/Flying Toasters!/..namedfork/rsrc",
-      "argsTemplate": [
-        "{RSRC}"
-      ],
-      "env": {
-        "ADLIBPATH": "AD4Library.rsrc"
-      },
-      "controlEnvVar": "ADCVSET",
-      "controls": [
-        {
-          "id": "count",
-          "resourceId": 1000,
-          "type": "slider",
-          "label": "Objects:",
-          "min": 2,
-          "max": 100,
-          "defaultValue": 25
-        },
-        {
-          "id": "toaster",
-          "resourceId": 1001,
-          "type": "popup",
-          "label": "Toaster:",
-          "options": [
-            "Adults",
-            "Babies",
-            "-",
-            "Random"
-          ],
-          "defaultValue": 1
-        },
-        {
-          "id": "music",
-          "resourceId": 1002,
-          "type": "slider",
-          "label": "Music:",
-          "min": 0,
-          "max": 100,
-          "defaultValue": 80
-        },
-        {
-          "id": "karaoke",
-          "resourceId": 1003,
-          "type": "toggle",
-          "label": "Display Karaoke",
-          "defaultValue": 1
-        }
-      ],
-      "about": "FLYING TOASTERS!\n\nToaster meets toaster, toasters fall in love\nToasters get married,\nBaby Toasterettes!\nSo much toast, yet not enough dough for college.\n\n“Objects” determines how many objects are on screen.\n\n“Toaster” determines whether baby toasters or adult toasters fly across your screen. “Random” selects one of the two.\n\n“Music” determines the length of the music.\n\nCheck “Display Karaoke” to show the lyrics.\n\nProgramming by Brock Wagenaar\nArt by Bob Ting\nSound and music by P.J. Sonnichsen\n©1996 Berkeley Systems, Inc.",
-      "credits": "By B.Ting, B.Wagenaar, & P.J. Sonnichsen\n©1996 Berkeley Systems, Inc."
-    },
-    {
       "id": "ppc-art-critic",
       "displayName": "Art Critic",
       "family": "PPC",
@@ -78,6 +21,60 @@
         "ADDRAWSEL": "3"
       },
       "controlEnvVar": "ADCTRL",
+      "controls": [
+        {
+          "id": "c1001",
+          "resourceId": 1001,
+          "label": "Critic Appears:",
+          "defaultValue": 100,
+          "type": "slider",
+          "min": 0,
+          "max": 100
+        },
+        {
+          "id": "c1002",
+          "resourceId": 1002,
+          "label": "Duration:",
+          "defaultValue": 0,
+          "type": "slider",
+          "min": 0,
+          "max": 100
+        },
+        {
+          "id": "c1003",
+          "resourceId": 1003,
+          "label": "Display:",
+          "defaultValue": 2,
+          "type": "popup",
+          "options": [
+            "In order",
+            "Random"
+          ]
+        },
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "label": "Pictures",
+          "defaultValue": 8,
+          "type": "button"
+        }
+      ],
+      "about": "ART CRITIC\n\nClick on “Pictures” and select the folder containing the gifs, jpegs and/or picts that you want. All images in the selected folder will be displayed. Images over a megabyte in size will not display. Large images may take a few seconds to display.\n\n“Critic Appears” determines how often the critic appears.\n\n“Duration” determines how long the images will remain on your screen.\n\n“Display” determines whether the images will display randomly or in order.\n\nProgramming by Jeff Mott\nArt by Bob Ting\nAdditional art by Craig Foster\nSound by P.J. Sonnichsen\n© 1996 Berkeley Systems, Inc.",
+      "credits": "By Bob Ting, Jeff Mott and P.J. Sonnichsen\n© 1996 Berkeley Systems, Inc."
+    },
+    {
+      "id": "68k-art-critic",
+      "displayName": "Art Critic",
+      "family": "68K",
+      "host": "engine/adhost68k",
+      "workingDir": "engine",
+      "lane": "l40",
+      "rsrcPath": "deluxe/extracted/dlx/After Dark Deluxe (4/Art Critic/..namedfork/rsrc",
+      "argsTemplate": [
+        "{RSRC}"
+      ],
+      "env": {},
+      "controlEnvVar": "ADCVSET",
       "controls": [
         {
           "id": "c1001",
@@ -151,907 +148,6 @@
       ],
       "about": "BAD DOG!\n\nSit . . . sit . . . siiiit . . . sit . . . please sit . . . SIT . . . sit . . . sit . . . pleeeease sit . . . pretty please sit . . . Bad Dog SIT! Sit . . . c’mon sit . . .\n\nOK, stand . . . good dog.\n\nCheck “Clear Screen First” for a black background.\n\nBackground will become black after two hours for better screen saving.\n\nProgramming by Shiraz Akmal\nArt by Craig Foster, Joe Kauffman, Jarir Maani, Laura Tullio\n3D art by Stephen Ekstrom\nSound by P.J. Sonnichsen\n© 1996 Berkeley Systems, Inc.",
       "credits": "C.Foster,J.Kauffman,L.Tullio,S.Akmal & P.J.\n© 1996 Berkeley Systems, Inc."
-    },
-    {
-      "id": "ppc-cyb3r-w-t",
-      "displayName": "CYb3r W@t",
-      "family": "PPC",
-      "host": "engine/adhost",
-      "workingDir": "engine",
-      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/CYb3r W@t",
-      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/CYb3r W@t/..namedfork/rsrc",
-      "argsTemplate": [
-        "ADShared40.pef",
-        "{COPY}",
-        "100000000"
-      ],
-      "env": {
-        "ADUSPERCALL": "100000",
-        "ADTICKSTEP": "10",
-        "ADSCREENW": "640",
-        "ADSCREENH": "480",
-        "ADDRAWSEL": "3"
-      },
-      "controlEnvVar": "ADCTRL",
-      "controls": [
-        {
-          "id": "c1000",
-          "resourceId": 1000,
-          "label": "Color:",
-          "defaultValue": 6,
-          "type": "popup",
-          "options": [
-            "Cyan",
-            "Blue",
-            "Amber",
-            "Green",
-            "-",
-            "Random"
-          ]
-        }
-      ],
-      "about": "CYb3r W@t\n\nCyber what?\n\n“Color” allows you to select your favorite color or choose random and see them all.\n\nProgramming by Mark Palange and Alan Kaiser\nArt by Jarir Maani and Craig Foster\nSound by P.J. Sonnichsen\n©1996 Berkeley Systems, Inc.",
-      "credits": "By J. Maani, C. Foster, M. Palange & P.J.\n©1996 Berkeley Systems Inc."
-    },
-    {
-      "id": "ppc-fish-world",
-      "displayName": "Fish World",
-      "family": "PPC",
-      "host": "engine/adhost",
-      "workingDir": "engine",
-      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Fish World",
-      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Fish World/..namedfork/rsrc",
-      "argsTemplate": [
-        "ADShared40.pef",
-        "{COPY}",
-        "100000000"
-      ],
-      "env": {
-        "ADUSPERCALL": "100000",
-        "ADTICKSTEP": "10",
-        "ADSCREENW": "640",
-        "ADSCREENH": "480",
-        "ADDRAWSEL": "3"
-      },
-      "controlEnvVar": "ADCTRL",
-      "controls": [
-        {
-          "id": "c1001",
-          "resourceId": 1001,
-          "label": "Show Background",
-          "defaultValue": 1,
-          "type": "toggle"
-        },
-        {
-          "id": "c1000",
-          "resourceId": 1000,
-          "label": "Select Fish…",
-          "defaultValue": 8,
-          "type": "button"
-        }
-      ],
-      "about": "FISH WORLD\n\nCats above, cats below\nCats pace to and fro\nCats will pounce, cats will play\nCats will circle ’round all day\nPaw gets wet, ooops slipped right in\nPoor fishies, the day looks grim!\n\n“Select Fish…” allows you to select the fish to view.\n\nCheck “Show Background” to see the sea floor.\n\nHit “Caps-lock” to tap on the glass and scare the fish.\n\nProgramming by Scott Garcia\nArt by Jarir Maani and Joe Kauffman\n3D Models by Viewpoint Datalabs International Inc.\nSound by P.J. Sonnichsen\nBased on Fish! by Tom & Ed’s Bogus Software.\n©1996 Berkeley Systems, Inc.",
-      "credits": "By J. Maani, J. Kauffman, S. Garcia & P.J.\n©1996 Berkeley Systems Inc."
-    },
-    {
-      "id": "ppc-guernsey-madness",
-      "displayName": "Guernsey Madness",
-      "family": "PPC",
-      "host": "engine/adhost",
-      "workingDir": "engine",
-      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Guernsey Madness",
-      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Guernsey Madness/..namedfork/rsrc",
-      "argsTemplate": [
-        "ADShared40.pef",
-        "{COPY}",
-        "100000000"
-      ],
-      "env": {
-        "ADUSPERCALL": "100000",
-        "ADTICKSTEP": "10",
-        "ADSCREENW": "640",
-        "ADSCREENH": "480",
-        "ADDRAWSEL": "3"
-      },
-      "controlEnvVar": "ADCTRL",
-      "controls": [
-        {
-          "id": "c1001",
-          "resourceId": 1001,
-          "label": "Music:",
-          "defaultValue": 99,
-          "type": "slider",
-          "min": 0,
-          "max": 100
-        },
-        {
-          "id": "c1000",
-          "resourceId": 1000,
-          "label": "Flavor:",
-          "defaultValue": 13,
-          "type": "popup",
-          "options": [
-            "Vanilla",
-            "Chocolate",
-            "Strawberry",
-            "Blueberry",
-            "Grape",
-            "Banana",
-            "Lemon-Lime",
-            "Rainbow Splash",
-            "Bubble Gum",
-            "Cinnamon",
-            "Mint",
-            "-",
-            "Tutti-Frutti"
-          ]
-        }
-      ],
-      "about": "GUERNSEY MADNESS\n\nIt is a warm August evening and the sun starts to dip below a flat horizon. A warm wind travels across the plains and stirs a gentle rhythm from the prairie grass. You step out behind the grange hall with a large mug of cider in hand. Leaning against the porch railing you take a sip and watch the colors of the herd in the twilight.\n\n“Flavor” determines the colors of the cows. “Tutti Frutti” shows a random display of all the colors.\n\n“Music” determines how long the music plays while you ponder the meaning of cow-ness.\n\nProgramming by Andrew Armstrong\nArt by Stephen Ekstrom\n3D model from Viewpoint Datalabs International Inc.\nSound and music by P.J. Sonnichsen\n©1996 Berkeley Systems, Inc.",
-      "credits": "By S. Ekstrom, A. Armstrong & P.J.\n© 1996 Berkeley Systems, Inc."
-    },
-    {
-      "id": "ppc-life-all",
-      "displayName": "Life & All",
-      "family": "PPC",
-      "host": "engine/adhost",
-      "workingDir": "engine",
-      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Life & All",
-      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Life & All/..namedfork/rsrc",
-      "argsTemplate": [
-        "ADShared40.pef",
-        "{COPY}",
-        "100000000"
-      ],
-      "env": {
-        "ADUSPERCALL": "100000",
-        "ADTICKSTEP": "10",
-        "ADSCREENW": "640",
-        "ADSCREENH": "480",
-        "ADDRAWSEL": "3"
-      },
-      "controlEnvVar": "ADCTRL",
-      "controls": [
-        {
-          "id": "c1001",
-          "resourceId": 1001,
-          "label": "Years:",
-          "defaultValue": 62,
-          "type": "slider",
-          "min": 0,
-          "max": 100
-        },
-        {
-          "id": "c1000",
-          "resourceId": 1000,
-          "label": "Calculate:",
-          "defaultValue": 1,
-          "type": "popup",
-          "options": [
-            "Life",
-            "Universe",
-            "Everything",
-            "Nothing",
-            "Love",
-            "Money"
-          ]
-        }
-      ],
-      "about": "LIFE & ALL\n\nTake a moment to calculate the meaning of life.\n\n“Calculate” determines which of the complex questions of life you want to figure out.\n\n“Years” determines how many millions of years this calculation will take.\n\nThese controls are not real. They have no affect on the actual module. They’re just part of the joke.\n\nProgramming by Kendall J. Redburn\nImages provided by Image Club Graphics\nImage Club Web site: http://www.imageclub.com\nAdditional art by Craig Foster & Joe Kauffman\nSound by P.J. Sonnichsen\n©1996 Berkeley Systems, Inc.",
-      "credits": "By K.Redburn, Image Club Graphics & P.J.\n©1996 Berkeley Systems, Inc."
-    },
-    {
-      "id": "ppc-magic-turtle",
-      "displayName": "Magic Turtle",
-      "family": "PPC",
-      "host": "engine/adhost",
-      "workingDir": "engine",
-      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Magic Turtle",
-      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Magic Turtle/..namedfork/rsrc",
-      "argsTemplate": [
-        "ADShared40.pef",
-        "{COPY}",
-        "100000000"
-      ],
-      "env": {
-        "ADUSPERCALL": "12000",
-        "ADTICKSTEP": "20",
-        "ADSCREENW": "640",
-        "ADSCREENH": "480",
-        "ADDRAWSEL": "3",
-        "ADCTRL": "255,0,255,255,255,255,255,255,255,255,255,255,255,255,255,255"
-      },
-      "controlEnvVar": "ADCTRL",
-      "controls": [
-        {
-          "id": "c1000",
-          "resourceId": 1000,
-          "label": "Speed:",
-          "defaultValue": 100,
-          "type": "slider",
-          "min": 0,
-          "max": 100
-        },
-        {
-          "id": "c1001",
-          "resourceId": 1001,
-          "label": "Display:",
-          "defaultValue": 10,
-          "type": "popup",
-          "options": [
-            "Program 1",
-            "Program 2",
-            "Program 3",
-            "Program 4",
-            "Program 5",
-            "Program 6",
-            "Program 7",
-            "Program 8",
-            "-",
-            "Random"
-          ]
-        },
-        {
-          "id": "c1002",
-          "resourceId": 1002,
-          "label": "Show Edit Message",
-          "defaultValue": 1,
-          "type": "toggle"
-        }
-      ],
-      "about": "MAGIC TURTLE\n\nMagic Turtle makes turtle magic.\n\n“Speed” determines how fast the Turtle draws.\n\n“Display” determines which of the eight programs will be displayed.\n\nCheck “Show Edit Message” to be reminded how to edit or create your turtle program.\n\nPress “Caps-lock” to display the edit window where you can create your program.\n\nClick on “?” on the edit window to display the full help text.\n\nOriginal concept by Scott Kelley\nProgramming by Andrew Armstrong\nArt by Jarir Maani\n©1996 Berkeley Systems, Inc.",
-      "credits": "By Jarir Maani & Andrew Armstrong\n©1996 Berkeley Systems Inc."
-    },
-    {
-      "id": "ppc-marbles",
-      "displayName": "Marbles!",
-      "family": "PPC",
-      "host": "engine/adhost",
-      "workingDir": "engine",
-      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Marbles!",
-      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Marbles!/..namedfork/rsrc",
-      "argsTemplate": [
-        "ADShared40.pef",
-        "{COPY}",
-        "100000000"
-      ],
-      "env": {
-        "ADUSPERCALL": "100000",
-        "ADTICKSTEP": "10",
-        "ADSCREENW": "640",
-        "ADSCREENH": "480",
-        "ADDRAWSEL": "3"
-      },
-      "controlEnvVar": "ADCTRL",
-      "controls": [
-        {
-          "id": "c1000",
-          "resourceId": 1000,
-          "label": "Marbles:",
-          "defaultValue": 50,
-          "type": "slider",
-          "min": 0,
-          "max": 100
-        },
-        {
-          "id": "c1001",
-          "resourceId": 1001,
-          "label": "Pattern:",
-          "defaultValue": 10,
-          "type": "popup",
-          "options": [
-            "Custom 1",
-            "Custom 2",
-            "Custom 3",
-            "Custom 4",
-            "Custom 5",
-            "Custom 6",
-            "Custom 7",
-            "Custom 8",
-            "-",
-            "Random"
-          ]
-        },
-        {
-          "id": "c1002",
-          "resourceId": 1002,
-          "label": "Show Edit Message",
-          "defaultValue": 1,
-          "type": "toggle"
-        }
-      ],
-      "about": "MARBLES!\n\nIf you didn’t have glass on your monitor, the marbles would jump out and bounce on your desk.\n\n“Marbles” determines how many marbles you want to appear.\n\n“Pattern” determines which setup of pins will display on your screen. “Random” displays the different setups randomly. To customize your pins, choose one of the “Custom” settings, run the module, press “Caps-lock” and click and drag the pins onto the screen. To delete a pin, drag it to the top of the screen.\n\nCheck “Show Edit Message” to be reminded how to customize your pins.\n\nProgramming by Andrew Armstrong\nArt by Joe Kauffman and Stephen Ekstrom\nSound by P.J. Sonnichsen\n©1996 Berkeley Systems, Inc.",
-      "credits": "By J.Kauffman, S.Ekstrom, A. Armstrong & PJ\n©1996 Berkeley Systems, Inc."
-    },
-    {
-      "id": "ppc-out-n-about",
-      "displayName": "Out ’n About",
-      "family": "PPC",
-      "host": "engine/adhost",
-      "workingDir": "engine",
-      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Out ’n About",
-      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Out ’n About/..namedfork/rsrc",
-      "argsTemplate": [
-        "ADShared40.pef",
-        "{COPY}",
-        "100000000"
-      ],
-      "env": {
-        "ADUSPERCALL": "100000",
-        "ADTICKSTEP": "10",
-        "ADSCREENW": "640",
-        "ADSCREENH": "480",
-        "ADDRAWSEL": "3"
-      },
-      "controlEnvVar": "ADCTRL",
-      "controls": [
-        {
-          "id": "c1000",
-          "resourceId": 1000,
-          "label": "Crowd:",
-          "defaultValue": 40,
-          "type": "slider",
-          "min": 0,
-          "max": 100
-        }
-      ],
-      "about": "OUT ’N ABOUT\n\nComplaints about the service should be directed to the cafe management, not to the employees of Berkeley Systems or their families.\n\n“Crowd” controls the amount of activity.\n\nProgramming by Peter A. Kemmer\nArt by Craig Foster\nSound by P.J. Sonnichsen\n© 1996 Berkeley Systems, Inc.",
-      "credits": "By C. Foster, P. Kemmer & P.J.\n©1996 Berkeley Systems Inc."
-    },
-    {
-      "id": "ppc-points-of-view",
-      "displayName": "Points of View",
-      "family": "PPC",
-      "host": "engine/adhost",
-      "workingDir": "engine",
-      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Points of View",
-      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Points of View/..namedfork/rsrc",
-      "argsTemplate": [
-        "ADShared40.pef",
-        "{COPY}",
-        "100000000"
-      ],
-      "env": {
-        "ADUSPERCALL": "100000",
-        "ADTICKSTEP": "10",
-        "ADSCREENW": "640",
-        "ADSCREENH": "480",
-        "ADDRAWSEL": "3",
-        "ADMAINCODE": "300074F4"
-      },
-      "controlEnvVar": "ADCTRL",
-      "controls": [
-        {
-          "id": "c1000",
-          "resourceId": 1000,
-          "label": "New Shapes:",
-          "defaultValue": 10,
-          "type": "slider",
-          "min": 0,
-          "max": 100
-        },
-        {
-          "id": "c1001",
-          "resourceId": 1001,
-          "label": "Color:",
-          "defaultValue": 6,
-          "type": "popup",
-          "options": [
-            "White",
-            "Yellow",
-            "Green",
-            "Blue",
-            "-",
-            "Random"
-          ]
-        },
-        {
-          "id": "c1002",
-          "resourceId": 1002,
-          "label": "Bigger Dots",
-          "defaultValue": 1,
-          "type": "toggle"
-        },
-        {
-          "id": "c1003",
-          "resourceId": 1003,
-          "label": "Music Choice…",
-          "defaultValue": 8,
-          "type": "button"
-        }
-      ],
-      "about": "POINTS OF VIEW\n\nThey say that matter is made up of empty space and points of light. What does this say about our points of view?\n\n“New Shapes” determines how often the shapes change.\n\n“Color” chooses the color of the dots.\n\nCheck “Bigger Dots” for BIG dots.\n\n“Music Choice” allows you to control the music.\n\nMacintosh Programming by Arnold Kim\nPC Programming by Brock Wagenaar\nArt by Jarir Maani and Joe Kauffman\nMusic by P.J. Sonnichsen\n©1996 Berkeley Systems, Inc.",
-      "credits": "By J.Kauffman, A.Kim, B. Wagenaar & P.J.\n©1996 Berkeley Systems, Inc."
-    },
-    {
-      "id": "ppc-psycho-deli",
-      "displayName": "Psycho Deli",
-      "family": "PPC",
-      "host": "engine/adhost",
-      "workingDir": "engine",
-      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Psycho Deli",
-      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Psycho Deli/..namedfork/rsrc",
-      "argsTemplate": [
-        "ADShared40.pef",
-        "{COPY}",
-        "100000000"
-      ],
-      "env": {
-        "ADGM": "1",
-        "ADSCREENW": "640",
-        "ADSCREENH": "480"
-      },
-      "controlEnvVar": "ADCTRL",
-      "controls": [
-        {
-          "id": "c1001",
-          "resourceId": 1001,
-          "label": "Speed:",
-          "defaultValue": 100,
-          "type": "slider",
-          "min": 0,
-          "max": 100
-        },
-        {
-          "id": "c1002",
-          "resourceId": 1002,
-          "label": "Number of Knots:",
-          "defaultValue": 100,
-          "type": "slider",
-          "min": 0,
-          "max": 100
-        },
-        {
-          "id": "c1000",
-          "resourceId": 1000,
-          "label": "Picture:",
-          "defaultValue": 13,
-          "type": "popup",
-          "options": [
-            "Tie Dye",
-            "The Dome",
-            "Peacock",
-            "The Well",
-            "Jagged",
-            "Night Train",
-            "Splash",
-            "Head Cheese",
-            "Pinwheel",
-            "Gozar",
-            "Crop Circles",
-            "-",
-            "Random"
-          ]
-        }
-      ],
-      "about": "PSYCHO DELI\n\nAnd you thought Satori was trippy . . .\n\n“Picture” determines the underlying image. “Random” shows a sampling of all the pictures.\n\n“Speed” sets how dizzyingly fast you want the colors to move.\n\n“Number of Knots” indicates the complexity of the image.\n\nPressing “Caps-lock” at any time chooses a new set of colors.\n\nConcept and Windows Programming by Ben McCurtain\nMac Programming by Eric Pitcher and Jefferson Provost\n©1996 Berkeley Systems, Inc.",
-      "credits": "By B.McCurtain, E.Pitcher & J.Provost\n©1996 Berkeley Systems, Inc."
-    },
-    {
-      "id": "ppc-rock-paper-scissors",
-      "displayName": "Rock Paper Scissors",
-      "family": "PPC",
-      "host": "engine/adhost",
-      "workingDir": "engine",
-      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Rock Paper Scissors",
-      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Rock Paper Scissors/..namedfork/rsrc",
-      "argsTemplate": [
-        "ADShared40.pef",
-        "{COPY}",
-        "100000000"
-      ],
-      "env": {
-        "ADUSPERCALL": "100000",
-        "ADTICKSTEP": "10",
-        "ADSCREENW": "640",
-        "ADSCREENH": "480",
-        "ADDRAWSEL": "3"
-      },
-      "controlEnvVar": "ADCTRL",
-      "controls": [
-        {
-          "id": "c1000",
-          "resourceId": 1000,
-          "label": "Stars to Win:",
-          "defaultValue": 25,
-          "type": "slider",
-          "min": 0,
-          "max": 100
-        },
-        {
-          "id": "c1001",
-          "resourceId": 1001,
-          "label": "Display Score",
-          "defaultValue": 1,
-          "type": "toggle"
-        }
-      ],
-      "about": "ROCK PAPER SCISSORS\n\nRock people are steady and show little emotion.\nPaper people are smooth and striking.\nScissor people have a cutting personality.\n\n“Stars to Win” dictates how many rounds a fighter must win to be victorious.\n\n“Display Score” toggles the scoreboard on and off.\n\nPress “Caps-lock” to choose your fighter. Then, you and the computer play traditional Rock Paper Scissors.\n\nProgramming by Brock Wagenaar\nArt by Stephen Ekstrom\nAdditional art by Bob Ting\nScissor model by Viewpoint Datalabs International Inc.\nSound by P.J. Sonnichsen\n©1996 Berkeley Systems, Inc.",
-      "credits": "S.Ekstrom, B.Wagenaar & P.J. Sonnichsen\n©1996 Berkeley Systems, Inc."
-    },
-    {
-      "id": "ppc-rainforest",
-      "displayName": "Rainforest",
-      "family": "PPC",
-      "host": "engine/adhost",
-      "workingDir": "engine",
-      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Rainforest",
-      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Rainforest/..namedfork/rsrc",
-      "argsTemplate": [
-        "ADShared40.pef",
-        "{COPY}",
-        "100000000"
-      ],
-      "env": {
-        "ADUSPERCALL": "100000",
-        "ADTICKSTEP": "10",
-        "ADSCREENW": "640",
-        "ADSCREENH": "480",
-        "ADDRAWSEL": "3"
-      },
-      "controlEnvVar": "ADCTRL",
-      "controls": [
-        {
-          "id": "c1001",
-          "resourceId": 1001,
-          "label": "Number:",
-          "defaultValue": 50,
-          "type": "slider",
-          "min": 0,
-          "max": 100
-        },
-        {
-          "id": "c1002",
-          "resourceId": 1002,
-          "label": "Background:",
-          "defaultValue": 11,
-          "type": "popup",
-          "options": [
-            "Desktop",
-            "Black",
-            "-",
-            "Leaves",
-            "Wet Blue",
-            "Moss",
-            "Lichen",
-            "Rock",
-            "Mottled",
-            "Soft Green",
-            "Random"
-          ]
-        },
-        {
-          "id": "c1003",
-          "resourceId": 1003,
-          "label": "Foliage",
-          "defaultValue": 1,
-          "type": "toggle"
-        },
-        {
-          "id": "c1000",
-          "resourceId": 1000,
-          "label": "Creatures",
-          "defaultValue": 8,
-          "type": "button"
-        }
-      ],
-      "about": "RAINFOREST\n\nThis module features six creatures from Berkeley Systems’ Living Puzzles™ game, Triazzle: The Rainforest Edition.\n\n“Creatures” determines which creatures appear.\n\n“Number” determines the number of creatures.\n\n“Background” determines the background on which the creatures will frolic. The pattern will automatically switch after two hours to prevent burn-in.\n\nCheck “Foliage” to make rainforest foliage appear.\n\nProgramming by Vann Miller and Andrew Armstrong\nArt by L. Bustamante, B. White, R. Ho & K. Payne.\nOriginal art by Dan Gilbert\nTriazzle is a registered trademark of Dan Gilbert, Inc.\n©1996 Berkeley Systems, Inc.",
-      "credits": "By Vann Miller & Andrew Armstrong\n© 1996 Berkeley Systems, Inc."
-    },
-    {
-      "id": "ppc-rodger-dodger",
-      "displayName": "Rodger Dodger",
-      "family": "PPC",
-      "host": "engine/adhost",
-      "workingDir": "engine",
-      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Rodger Dodger",
-      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Rodger Dodger/..namedfork/rsrc",
-      "argsTemplate": [
-        "ADShared40.pef",
-        "{COPY}",
-        "100000000"
-      ],
-      "env": {
-        "ADUSPERCALL": "100000",
-        "ADTICKSTEP": "10",
-        "ADSCREENW": "640",
-        "ADSCREENH": "480",
-        "ADDRAWSEL": "3"
-      },
-      "controlEnvVar": "ADCTRL",
-      "controls": [
-        {
-          "id": "c1000",
-          "resourceId": 1000,
-          "label": "Load Saved Level",
-          "defaultValue": 1,
-          "type": "toggle"
-        }
-      ],
-      "about": "RODGER DODGER\n\nOnce upon a time there was a naughty programmer named Rodger who played games instead of doing his work. Unbeknownst to this programmer, his project manager was a witch. One day the project manager became so angry that he or she (we won't give that away) turned the naughty programmer into the ball in a game called Rodger Dodger. Will the programmer have a happy ending? You decide.\n\nCheck “Load Saved Level” to start the game at the beginning of the level that you last saved. You save a level by pressing “S” while playing the game.\n\n“Caps-lock” gets you in and out of interactive mode.\n\nProgramming by Peter A. Kemmer\nArt by Jarir Maani\nSound and music by P.J. Sonnichsen\n© 1996 Berkeley Systems, Inc.",
-      "credits": "By Jarir Maani, Peter A. Kemmer & P.J.\n©1996 Berkeley Systems Inc."
-    },
-    {
-      "id": "ppc-shadow-agents",
-      "displayName": "Shadow Agents",
-      "family": "PPC",
-      "host": "engine/adhost",
-      "workingDir": "engine",
-      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Shadow Agents",
-      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Shadow Agents/..namedfork/rsrc",
-      "argsTemplate": [
-        "ADShared40.pef",
-        "{COPY}",
-        "100000000"
-      ],
-      "env": {
-        "ADUSPERCALL": "100000",
-        "ADTICKSTEP": "10",
-        "ADSCREENW": "640",
-        "ADSCREENH": "480",
-        "ADDRAWSEL": "3"
-      },
-      "controlEnvVar": "ADCTRL",
-      "controls": [
-        {
-          "id": "c1000",
-          "resourceId": 1000,
-          "label": "Agents:",
-          "defaultValue": 50,
-          "type": "slider",
-          "min": 0,
-          "max": 100
-        },
-        {
-          "id": "c1003",
-          "resourceId": 1003,
-          "label": "Music:",
-          "defaultValue": 99,
-          "type": "slider",
-          "min": 0,
-          "max": 100
-        },
-        {
-          "id": "c1001",
-          "resourceId": 1001,
-          "label": "Clear Screen First",
-          "defaultValue": 0,
-          "type": "toggle"
-        }
-      ],
-      "about": "SHADOW AGENTS\n\nThese weasels are trained professionals. Please do not put trench coats on your pets. It will annoy them.\n\n“Agents” determines how many agents will be on the screen at once.\n\nCheck “Clear Screen First” for a black background.\n\nBackground automatically becomes black after 90 minutes for better screen saving.\n\nOriginal idea by Mike Dashow\nProgramming by Andrew Armstrong\nAdditional art by Craig Foster\nOriginal music by Jane Scolieri & Robert Johnson III\nNew music by P.J. Sonnichsen\n© 1996 Berkeley Systems, Inc.",
-      "credits": "By M.Dashow, A.Armstrong, C.Foster & P.J.\n© 1996 Berkeley Systems, Inc."
-    },
-    {
-      "id": "ppc-super-guy",
-      "displayName": "Super Guy",
-      "family": "PPC",
-      "host": "engine/adhost",
-      "workingDir": "engine",
-      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Super Guy",
-      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Super Guy/..namedfork/rsrc",
-      "argsTemplate": [
-        "ADShared40.pef",
-        "{COPY}",
-        "100000000"
-      ],
-      "env": {
-        "ADUSPERCALL": "100000",
-        "ADTICKSTEP": "10",
-        "ADSCREENW": "640",
-        "ADSCREENH": "480",
-        "ADDRAWSEL": "3"
-      },
-      "controlEnvVar": "ADCTRL",
-      "controls": [
-        {
-          "id": "c1000",
-          "resourceId": 1000,
-          "label": "Background Sound",
-          "defaultValue": 1,
-          "type": "toggle"
-        }
-      ],
-      "about": "SUPER GUY\n\nThere is a little super hero inside each of us just waiting to bust out.\n\nCheck “Background Sound” if you want to hear the constant backround sounds of children in a play yard.\n\n(Continued next issue)\n\nProgramming by Mark Palange\nArt by Bob Ting\nSound by P.J. Sonnichsen\n©1996 Berkeley Systems, Inc.",
-      "credits": "By Bob Ting, Mark Palange & P.J.\n©1996 Berkeley Systems Inc."
-    },
-    {
-      "id": "ppc-swirling-magic",
-      "displayName": "Swirling Magic",
-      "family": "PPC",
-      "host": "engine/adhost",
-      "workingDir": "engine",
-      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Swirling Magic",
-      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Swirling Magic/..namedfork/rsrc",
-      "argsTemplate": [
-        "ADShared40.pef",
-        "{COPY}",
-        "100000000"
-      ],
-      "env": {
-        "ADUSPERCALL": "100000",
-        "ADTICKSTEP": "10",
-        "ADSCREENW": "640",
-        "ADSCREENH": "480",
-        "ADDRAWSEL": "3"
-      },
-      "controlEnvVar": "ADCTRL",
-      "controls": [
-        {
-          "id": "c1000",
-          "resourceId": 1000,
-          "label": "# of Sea Pixies:",
-          "defaultValue": 70,
-          "type": "slider",
-          "min": 0,
-          "max": 100
-        },
-        {
-          "id": "c1001",
-          "resourceId": 1001,
-          "label": "Style:",
-          "defaultValue": 6,
-          "type": "popup",
-          "options": [
-            "Swirling Magic",
-            "Spaghetti Magic",
-            "Tiled Magic",
-            "Peacock Image",
-            "-",
-            "Random"
-          ]
-        },
-        {
-          "id": "c1002",
-          "resourceId": 1002,
-          "label": "Palette",
-          "defaultValue": 9,
-          "type": "popup",
-          "options": [
-            "BluesReds",
-            "Candy",
-            "Desert",
-            "Reds",
-            "Rainbow",
-            "Field",
-            "Sparkle",
-            "-",
-            "Random"
-          ]
-        },
-        {
-          "id": "c1002",
-          "resourceId": 1002,
-          "label": "Magnify Pixies",
-          "defaultValue": 1,
-          "type": "toggle"
-        },
-        {
-          "id": "c1003",
-          "resourceId": 1003,
-          "label": "Music Choice…",
-          "defaultValue": 8,
-          "type": "button"
-        }
-      ],
-      "about": "SWIRLING MAGIC\n\nSwirling Magic is based on an ancient Norse legend of underwater Sea Pixies who gathered by the thousands once a year in a massive reproductive frenzy. It is said that those who witnessed the event use their eyebrows more often in their facial expressions.\n\n“# of Sea Pixies” determines Pixie density.\n\n“Style” determines the pattern of the Pixies.\n\n“Palette” determines the colors of the Pixies.\n\n“Music Choice” controls the music.\n\nPress “Caps-lock” to change the colors.\n\nProgramming by Vann Miller and Rob Blair\nPixie dance lessons by Evan Harsha\nSound by P.J. Sonnichsen\n© 1996 Berkeley Systems, Inc.",
-      "credits": "By V. Miller, R. Blair, E. Harsha & P.J.\n©1996 Berkeley Systems, Inc."
-    },
-    {
-      "id": "ppc-time-flies",
-      "displayName": "Time Flies",
-      "family": "PPC",
-      "host": "engine/adhost",
-      "workingDir": "engine",
-      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Time Flies",
-      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Time Flies/..namedfork/rsrc",
-      "argsTemplate": [
-        "ADShared40.pef",
-        "{COPY}",
-        "100000000"
-      ],
-      "env": {
-        "ADUSPERCALL": "100000",
-        "ADTICKSTEP": "10",
-        "ADSCREENW": "640",
-        "ADSCREENH": "480",
-        "ADDRAWSEL": "3",
-        "ADREALCLOCK": "1"
-      },
-      "controlEnvVar": "ADCTRL",
-      "controls": [
-        {
-          "id": "c1002",
-          "resourceId": 1002,
-          "label": "Drift Speed:",
-          "defaultValue": 50,
-          "type": "slider",
-          "min": 0,
-          "max": 100
-        },
-        {
-          "id": "c1000",
-          "resourceId": 1000,
-          "label": "Type:",
-          "defaultValue": 4,
-          "type": "popup",
-          "options": [
-            "Liquid",
-            "Transformer",
-            "-",
-            "Random"
-          ]
-        },
-        {
-          "id": "c1001",
-          "resourceId": 1001,
-          "label": "Sounds:",
-          "defaultValue": 3,
-          "type": "popup",
-          "options": [
-            "Ticks",
-            "Chimes",
-            "Both",
-            "Neither"
-          ]
-        }
-      ],
-      "about": "TIME FLIES\n\nHere’s the latest in our Clocks series. Enjoy and don’t be late!\n\n“Type” determines which type of clock displays.\n\n“Sounds” allows you to choose what sounds, if any, you want to hear.\n\n“Drift Speed” selects how quickly the image will drift around your screen.\n\n“Caps-lock” changes the type of clock.\n\nProgramming by Mark Palange and Brock Wagenaar\nArt by Tony Gascon of Digital Delirium and Stuart Gold of Shadow and Light\nSound by P.J. Sonnichsen\n©1996 Berkeley Systems, Inc.",
-      "credits": "T.Gascon, S.Gold, M.Palange, PJ & B.Wagenaar\n©1996 Berkeley Systems, Inc."
-    },
-    {
-      "id": "68k-art-critic",
-      "displayName": "Art Critic",
-      "family": "68K",
-      "host": "engine/adhost68k",
-      "workingDir": "engine",
-      "lane": "l40",
-      "rsrcPath": "deluxe/extracted/dlx/After Dark Deluxe (4/Art Critic/..namedfork/rsrc",
-      "argsTemplate": [
-        "{RSRC}"
-      ],
-      "env": {},
-      "controlEnvVar": "ADCVSET",
-      "controls": [
-        {
-          "id": "c1001",
-          "resourceId": 1001,
-          "label": "Critic Appears:",
-          "defaultValue": 100,
-          "type": "slider",
-          "min": 0,
-          "max": 100
-        },
-        {
-          "id": "c1002",
-          "resourceId": 1002,
-          "label": "Duration:",
-          "defaultValue": 0,
-          "type": "slider",
-          "min": 0,
-          "max": 100
-        },
-        {
-          "id": "c1003",
-          "resourceId": 1003,
-          "label": "Display:",
-          "defaultValue": 2,
-          "type": "popup",
-          "options": [
-            "In order",
-            "Random"
-          ]
-        },
-        {
-          "id": "c1000",
-          "resourceId": 1000,
-          "label": "Pictures",
-          "defaultValue": 8,
-          "type": "button"
-        }
-      ],
-      "about": "ART CRITIC\n\nClick on “Pictures” and select the folder containing the gifs, jpegs and/or picts that you want. All images in the selected folder will be displayed. Images over a megabyte in size will not display. Large images may take a few seconds to display.\n\n“Critic Appears” determines how often the critic appears.\n\n“Duration” determines how long the images will remain on your screen.\n\n“Display” determines whether the images will display randomly or in order.\n\nProgramming by Jeff Mott\nArt by Bob Ting\nAdditional art by Craig Foster\nSound by P.J. Sonnichsen\n© 1996 Berkeley Systems, Inc.",
-      "credits": "By Bob Ting, Jeff Mott and P.J. Sonnichsen\n© 1996 Berkeley Systems, Inc."
     },
     {
       "id": "68k-bogglins",
@@ -1332,6 +428,47 @@
       "credits": "Confetti Factory by Paul Young & Mouse Herrell\n©1991-93 Berkeley Systems Inc."
     },
     {
+      "id": "ppc-cyb3r-w-t",
+      "displayName": "CYb3r W@t",
+      "family": "PPC",
+      "host": "engine/adhost",
+      "workingDir": "engine",
+      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/CYb3r W@t",
+      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/CYb3r W@t/..namedfork/rsrc",
+      "argsTemplate": [
+        "ADShared40.pef",
+        "{COPY}",
+        "100000000"
+      ],
+      "env": {
+        "ADUSPERCALL": "100000",
+        "ADTICKSTEP": "10",
+        "ADSCREENW": "640",
+        "ADSCREENH": "480",
+        "ADDRAWSEL": "3"
+      },
+      "controlEnvVar": "ADCTRL",
+      "controls": [
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "label": "Color:",
+          "defaultValue": 6,
+          "type": "popup",
+          "options": [
+            "Cyan",
+            "Blue",
+            "Amber",
+            "Green",
+            "-",
+            "Random"
+          ]
+        }
+      ],
+      "about": "CYb3r W@t\n\nCyber what?\n\n“Color” allows you to select your favorite color or choose random and see them all.\n\nProgramming by Mark Palange and Alan Kaiser\nArt by Jarir Maani and Craig Foster\nSound by P.J. Sonnichsen\n©1996 Berkeley Systems, Inc.",
+      "credits": "By J. Maani, C. Foster, M. Palange & P.J.\n©1996 Berkeley Systems Inc."
+    },
+    {
       "id": "68k-cyb3r-w-t",
       "displayName": "CYb3r W@t",
       "family": "68K",
@@ -1610,6 +747,46 @@
       "credits": "Blackboard by Mark Malamud and Susan Hautala.\n©1992 Berkeley Systems Inc."
     },
     {
+      "id": "ppc-fish-world",
+      "displayName": "Fish World",
+      "family": "PPC",
+      "host": "engine/adhost",
+      "workingDir": "engine",
+      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Fish World",
+      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Fish World/..namedfork/rsrc",
+      "argsTemplate": [
+        "ADShared40.pef",
+        "{COPY}",
+        "100000000"
+      ],
+      "env": {
+        "ADUSPERCALL": "100000",
+        "ADTICKSTEP": "10",
+        "ADSCREENW": "640",
+        "ADSCREENH": "480",
+        "ADDRAWSEL": "3"
+      },
+      "controlEnvVar": "ADCTRL",
+      "controls": [
+        {
+          "id": "c1001",
+          "resourceId": 1001,
+          "label": "Show Background",
+          "defaultValue": 1,
+          "type": "toggle"
+        },
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "label": "Select Fish…",
+          "defaultValue": 8,
+          "type": "button"
+        }
+      ],
+      "about": "FISH WORLD\n\nCats above, cats below\nCats pace to and fro\nCats will pounce, cats will play\nCats will circle ’round all day\nPaw gets wet, ooops slipped right in\nPoor fishies, the day looks grim!\n\n“Select Fish…” allows you to select the fish to view.\n\nCheck “Show Background” to see the sea floor.\n\nHit “Caps-lock” to tap on the glass and scare the fish.\n\nProgramming by Scott Garcia\nArt by Jarir Maani and Joe Kauffman\n3D Models by Viewpoint Datalabs International Inc.\nSound by P.J. Sonnichsen\nBased on Fish! by Tom & Ed’s Bogus Software.\n©1996 Berkeley Systems, Inc.",
+      "credits": "By J. Maani, J. Kauffman, S. Garcia & P.J.\n©1996 Berkeley Systems Inc."
+    },
+    {
       "id": "68k-fish-world",
       "displayName": "Fish World",
       "family": "68K",
@@ -1640,6 +817,102 @@
       ],
       "about": "FISH WORLD\n\nCats above, cats below\nCats pace to and fro\nCats will pounce, cats will play\nCats will circle ’round all day\nPaw gets wet, ooops slipped right in\nPoor fishies, the day looks grim!\n\n“Select Fish…” allows you to select the fish to view.\n\nCheck “Show Background” to see the sea floor.\n\nHit “Caps-lock” to tap on the glass and scare the fish.\n\nProgramming by Scott Garcia\nArt by Jarir Maani and Joe Kauffman\n3D Models by Viewpoint Datalabs International Inc.\nSound by P.J. Sonnichsen\nBased on Fish! by Tom & Ed’s Bogus Software.\n©1996 Berkeley Systems, Inc.",
       "credits": "By J. Maani, J. Kauffman, S. Garcia & P.J.\n©1996 Berkeley Systems Inc."
+    },
+    {
+      "id": "68k-fish-pro",
+      "displayName": "Fish! Pro",
+      "family": "68K",
+      "host": "engine/adhost68k",
+      "workingDir": "engine",
+      "rsrcPath": "deluxe/extracted/dlx/After Dark Deluxe (4/Fish! Pro/..namedfork/rsrc",
+      "argsTemplate": [
+        "{RSRC}"
+      ],
+      "env": {},
+      "controlEnvVar": "ADCVSET",
+      "lane": "std",
+      "controls": [
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "type": "slider",
+          "label": "Fish:",
+          "min": 0,
+          "max": 100,
+          "defaultValue": 50
+        },
+        {
+          "id": "c1003",
+          "resourceId": 1003,
+          "type": "toggle",
+          "label": "Show sea floor",
+          "defaultValue": 1
+        },
+        {
+          "id": "c1002",
+          "resourceId": 1002,
+          "type": "button",
+          "label": "Select Fish…",
+          "defaultValue": 0
+        }
+      ]
+    },
+    {
+      "id": "flying-toasters",
+      "displayName": "Flying Toasters!",
+      "family": "68K",
+      "host": "engine/adhost68k",
+      "workingDir": "engine",
+      "rsrcPath": "deluxe/extracted/dlx/After Dark Deluxe (4/Flying Toasters!/..namedfork/rsrc",
+      "argsTemplate": [
+        "{RSRC}"
+      ],
+      "env": {
+        "ADLIBPATH": "AD4Library.rsrc"
+      },
+      "controlEnvVar": "ADCVSET",
+      "controls": [
+        {
+          "id": "count",
+          "resourceId": 1000,
+          "type": "slider",
+          "label": "Objects:",
+          "min": 2,
+          "max": 100,
+          "defaultValue": 25
+        },
+        {
+          "id": "toaster",
+          "resourceId": 1001,
+          "type": "popup",
+          "label": "Toaster:",
+          "options": [
+            "Adults",
+            "Babies",
+            "-",
+            "Random"
+          ],
+          "defaultValue": 1
+        },
+        {
+          "id": "music",
+          "resourceId": 1002,
+          "type": "slider",
+          "label": "Music:",
+          "min": 0,
+          "max": 100,
+          "defaultValue": 80
+        },
+        {
+          "id": "karaoke",
+          "resourceId": 1003,
+          "type": "toggle",
+          "label": "Display Karaoke",
+          "defaultValue": 1
+        }
+      ],
+      "about": "FLYING TOASTERS!\n\nToaster meets toaster, toasters fall in love\nToasters get married,\nBaby Toasterettes!\nSo much toast, yet not enough dough for college.\n\n“Objects” determines how many objects are on screen.\n\n“Toaster” determines whether baby toasters or adult toasters fly across your screen. “Random” selects one of the two.\n\n“Music” determines the length of the music.\n\nCheck “Display Karaoke” to show the lyrics.\n\nProgramming by Brock Wagenaar\nArt by Bob Ting\nSound and music by P.J. Sonnichsen\n©1996 Berkeley Systems, Inc.",
+      "credits": "By B.Ting, B.Wagenaar, & P.J. Sonnichsen\n©1996 Berkeley Systems, Inc."
     },
     {
       "id": "68k-fractal-forest",
@@ -1855,6 +1128,63 @@
       "credits": "Globe by Jack Eastman.\n©1991-93 Berkeley Systems Inc."
     },
     {
+      "id": "ppc-guernsey-madness",
+      "displayName": "Guernsey Madness",
+      "family": "PPC",
+      "host": "engine/adhost",
+      "workingDir": "engine",
+      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Guernsey Madness",
+      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Guernsey Madness/..namedfork/rsrc",
+      "argsTemplate": [
+        "ADShared40.pef",
+        "{COPY}",
+        "100000000"
+      ],
+      "env": {
+        "ADUSPERCALL": "100000",
+        "ADTICKSTEP": "10",
+        "ADSCREENW": "640",
+        "ADSCREENH": "480",
+        "ADDRAWSEL": "3"
+      },
+      "controlEnvVar": "ADCTRL",
+      "controls": [
+        {
+          "id": "c1001",
+          "resourceId": 1001,
+          "label": "Music:",
+          "defaultValue": 99,
+          "type": "slider",
+          "min": 0,
+          "max": 100
+        },
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "label": "Flavor:",
+          "defaultValue": 13,
+          "type": "popup",
+          "options": [
+            "Vanilla",
+            "Chocolate",
+            "Strawberry",
+            "Blueberry",
+            "Grape",
+            "Banana",
+            "Lemon-Lime",
+            "Rainbow Splash",
+            "Bubble Gum",
+            "Cinnamon",
+            "Mint",
+            "-",
+            "Tutti-Frutti"
+          ]
+        }
+      ],
+      "about": "GUERNSEY MADNESS\n\nIt is a warm August evening and the sun starts to dip below a flat horizon. A warm wind travels across the plains and stirs a gentle rhythm from the prairie grass. You step out behind the grange hall with a large mug of cider in hand. Leaning against the porch railing you take a sip and watch the colors of the herd in the twilight.\n\n“Flavor” determines the colors of the cows. “Tutti Frutti” shows a random display of all the colors.\n\n“Music” determines how long the music plays while you ponder the meaning of cow-ness.\n\nProgramming by Andrew Armstrong\nArt by Stephen Ekstrom\n3D model from Viewpoint Datalabs International Inc.\nSound and music by P.J. Sonnichsen\n©1996 Berkeley Systems, Inc.",
+      "credits": "By S. Ekstrom, A. Armstrong & P.J.\n© 1996 Berkeley Systems, Inc."
+    },
+    {
       "id": "68k-guernsey-madness",
       "displayName": "Guernsey Madness",
       "family": "68K",
@@ -1904,6 +1234,81 @@
       "credits": "By S. Ekstrom, A. Armstrong & P.J.\n© 1996 Berkeley Systems, Inc."
     },
     {
+      "id": "68k-hula-twins",
+      "displayName": "Hula Twins",
+      "family": "68K",
+      "host": "engine/adhost68k",
+      "workingDir": "engine",
+      "rsrcPath": "deluxe/extracted/dlx/After Dark Deluxe (4/Hula Twins/..namedfork/rsrc",
+      "argsTemplate": [
+        "{RSRC}"
+      ],
+      "env": {},
+      "controlEnvVar": "ADCVSET",
+      "lane": "std",
+      "controls": [
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "type": "slider",
+          "label": "Music:",
+          "min": 0,
+          "max": 100,
+          "defaultValue": 99
+        }
+      ]
+    },
+    {
+      "id": "ppc-life-all",
+      "displayName": "Life & All",
+      "family": "PPC",
+      "host": "engine/adhost",
+      "workingDir": "engine",
+      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Life & All",
+      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Life & All/..namedfork/rsrc",
+      "argsTemplate": [
+        "ADShared40.pef",
+        "{COPY}",
+        "100000000"
+      ],
+      "env": {
+        "ADUSPERCALL": "100000",
+        "ADTICKSTEP": "10",
+        "ADSCREENW": "640",
+        "ADSCREENH": "480",
+        "ADDRAWSEL": "3"
+      },
+      "controlEnvVar": "ADCTRL",
+      "controls": [
+        {
+          "id": "c1001",
+          "resourceId": 1001,
+          "label": "Years:",
+          "defaultValue": 62,
+          "type": "slider",
+          "min": 0,
+          "max": 100
+        },
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "label": "Calculate:",
+          "defaultValue": 1,
+          "type": "popup",
+          "options": [
+            "Life",
+            "Universe",
+            "Everything",
+            "Nothing",
+            "Love",
+            "Money"
+          ]
+        }
+      ],
+      "about": "LIFE & ALL\n\nTake a moment to calculate the meaning of life.\n\n“Calculate” determines which of the complex questions of life you want to figure out.\n\n“Years” determines how many millions of years this calculation will take.\n\nThese controls are not real. They have no affect on the actual module. They’re just part of the joke.\n\nProgramming by Kendall J. Redburn\nImages provided by Image Club Graphics\nImage Club Web site: http://www.imageclub.com\nAdditional art by Craig Foster & Joe Kauffman\nSound by P.J. Sonnichsen\n©1996 Berkeley Systems, Inc.",
+      "credits": "By K.Redburn, Image Club Graphics & P.J.\n©1996 Berkeley Systems, Inc."
+    },
+    {
       "id": "68k-life-all",
       "displayName": "Life & All",
       "family": "68K",
@@ -1944,6 +1349,107 @@
       ],
       "about": "LIFE & ALL\n\nTake a moment to calculate the meaning of life.\n\n“Calculate” determines which of the complex questions of life you want to figure out.\n\n“Years” determines how many millions of years this calculation will take.\n\nThese controls are not real. They have no affect on the actual module. They’re just part of the joke.\n\nProgramming by Kendall J. Redburn\nImages provided by Image Club Graphics\nImage Club Web site: http://www.imageclub.com\nAdditional art by Craig Foster & Joe Kauffman\nSound by P.J. Sonnichsen\n©1996 Berkeley Systems, Inc.",
       "credits": "By K.Redburn, Image Club Graphics & P.J.\n©1996 Berkeley Systems, Inc."
+    },
+    {
+      "id": "68k-lunatic-fringe",
+      "displayName": "Lunatic Fringe",
+      "family": "68K",
+      "host": "engine/adhost68k",
+      "workingDir": "engine",
+      "rsrcPath": "deluxe/extracted/dlx/After Dark Deluxe (4/Lunatic Fringe/..namedfork/rsrc",
+      "argsTemplate": [
+        "{RSRC}"
+      ],
+      "env": {},
+      "controlEnvVar": "ADCVSET",
+      "lane": "std",
+      "controls": [
+        {
+          "id": "c1003",
+          "resourceId": 1003,
+          "type": "slider",
+          "label": "Starting Level:",
+          "min": 0,
+          "max": 90,
+          "defaultValue": 0
+        },
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "type": "button",
+          "label": "Clear Scores…",
+          "defaultValue": 0
+        },
+        {
+          "id": "c1001",
+          "resourceId": 1001,
+          "type": "button",
+          "label": "Keys…",
+          "defaultValue": 0
+        }
+      ]
+    },
+    {
+      "id": "ppc-magic-turtle",
+      "displayName": "Magic Turtle",
+      "family": "PPC",
+      "host": "engine/adhost",
+      "workingDir": "engine",
+      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Magic Turtle",
+      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Magic Turtle/..namedfork/rsrc",
+      "argsTemplate": [
+        "ADShared40.pef",
+        "{COPY}",
+        "100000000"
+      ],
+      "env": {
+        "ADUSPERCALL": "12000",
+        "ADTICKSTEP": "20",
+        "ADSCREENW": "640",
+        "ADSCREENH": "480",
+        "ADDRAWSEL": "3",
+        "ADCTRL": "255,0,255,255,255,255,255,255,255,255,255,255,255,255,255,255"
+      },
+      "controlEnvVar": "ADCTRL",
+      "controls": [
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "label": "Speed:",
+          "defaultValue": 100,
+          "type": "slider",
+          "min": 0,
+          "max": 100
+        },
+        {
+          "id": "c1001",
+          "resourceId": 1001,
+          "label": "Display:",
+          "defaultValue": 10,
+          "type": "popup",
+          "options": [
+            "Program 1",
+            "Program 2",
+            "Program 3",
+            "Program 4",
+            "Program 5",
+            "Program 6",
+            "Program 7",
+            "Program 8",
+            "-",
+            "Random"
+          ]
+        },
+        {
+          "id": "c1002",
+          "resourceId": 1002,
+          "label": "Show Edit Message",
+          "defaultValue": 1,
+          "type": "toggle"
+        }
+      ],
+      "about": "MAGIC TURTLE\n\nMagic Turtle makes turtle magic.\n\n“Speed” determines how fast the Turtle draws.\n\n“Display” determines which of the eight programs will be displayed.\n\nCheck “Show Edit Message” to be reminded how to edit or create your turtle program.\n\nPress “Caps-lock” to display the edit window where you can create your program.\n\nClick on “?” on the edit window to display the full help text.\n\nOriginal concept by Scott Kelley\nProgramming by Andrew Armstrong\nArt by Jarir Maani\n©1996 Berkeley Systems, Inc.",
+      "credits": "By Jarir Maani & Andrew Armstrong\n©1996 Berkeley Systems Inc."
     },
     {
       "id": "68k-magic-turtle",
@@ -2087,6 +1593,67 @@
       ],
       "about": "MARBLES\n\nMarbles simulates colorful spheres bouncing through an obstacle course of pins and magically stacking at the bottom. As with people, some marbles are more sensitive than others.\n\n\"Fill To\" determines how much of the screen will be filled.\n\"Pin Size\" chooses what size pins to use.\n\"# Pins\" determines the number of pins on the screen.\n\nOriginal concept by Kevin McLeod.\nProgramming by Mike Overlin, Andy Karn and Jonathan Dorfman of Cortland Computer, Inc.\nArtwork by Igor Gasowski and Dana Muise.\n©1992-94, Berkeley Systems, Inc.",
       "credits": "Marbles by M. Overlin, A. Karn & J. Dorfman.\n©1992-1994 Berkeley Systems, Inc."
+    },
+    {
+      "id": "ppc-marbles",
+      "displayName": "Marbles!",
+      "family": "PPC",
+      "host": "engine/adhost",
+      "workingDir": "engine",
+      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Marbles!",
+      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Marbles!/..namedfork/rsrc",
+      "argsTemplate": [
+        "ADShared40.pef",
+        "{COPY}",
+        "100000000"
+      ],
+      "env": {
+        "ADUSPERCALL": "100000",
+        "ADTICKSTEP": "10",
+        "ADSCREENW": "640",
+        "ADSCREENH": "480",
+        "ADDRAWSEL": "3"
+      },
+      "controlEnvVar": "ADCTRL",
+      "controls": [
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "label": "Marbles:",
+          "defaultValue": 50,
+          "type": "slider",
+          "min": 0,
+          "max": 100
+        },
+        {
+          "id": "c1001",
+          "resourceId": 1001,
+          "label": "Pattern:",
+          "defaultValue": 10,
+          "type": "popup",
+          "options": [
+            "Custom 1",
+            "Custom 2",
+            "Custom 3",
+            "Custom 4",
+            "Custom 5",
+            "Custom 6",
+            "Custom 7",
+            "Custom 8",
+            "-",
+            "Random"
+          ]
+        },
+        {
+          "id": "c1002",
+          "resourceId": 1002,
+          "label": "Show Edit Message",
+          "defaultValue": 1,
+          "type": "toggle"
+        }
+      ],
+      "about": "MARBLES!\n\nIf you didn’t have glass on your monitor, the marbles would jump out and bounce on your desk.\n\n“Marbles” determines how many marbles you want to appear.\n\n“Pattern” determines which setup of pins will display on your screen. “Random” displays the different setups randomly. To customize your pins, choose one of the “Custom” settings, run the module, press “Caps-lock” and click and drag the pins onto the screen. To delete a pin, drag it to the top of the screen.\n\nCheck “Show Edit Message” to be reminded how to customize your pins.\n\nProgramming by Andrew Armstrong\nArt by Joe Kauffman and Stephen Ekstrom\nSound by P.J. Sonnichsen\n©1996 Berkeley Systems, Inc.",
+      "credits": "By J.Kauffman, S.Ekstrom, A. Armstrong & PJ\n©1996 Berkeley Systems, Inc."
     },
     {
       "id": "68k-marbles-bang",
@@ -2538,6 +2105,41 @@
       "credits": "Major Metaphysical Appliances by G. Becker.\n©1992 Berkeley Systems Inc."
     },
     {
+      "id": "ppc-out-n-about",
+      "displayName": "Out ’n About",
+      "family": "PPC",
+      "host": "engine/adhost",
+      "workingDir": "engine",
+      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Out ’n About",
+      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Out ’n About/..namedfork/rsrc",
+      "argsTemplate": [
+        "ADShared40.pef",
+        "{COPY}",
+        "100000000"
+      ],
+      "env": {
+        "ADUSPERCALL": "100000",
+        "ADTICKSTEP": "10",
+        "ADSCREENW": "640",
+        "ADSCREENH": "480",
+        "ADDRAWSEL": "3"
+      },
+      "controlEnvVar": "ADCTRL",
+      "controls": [
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "label": "Crowd:",
+          "defaultValue": 40,
+          "type": "slider",
+          "min": 0,
+          "max": 100
+        }
+      ],
+      "about": "OUT ’N ABOUT\n\nComplaints about the service should be directed to the cafe management, not to the employees of Berkeley Systems or their families.\n\n“Crowd” controls the amount of activity.\n\nProgramming by Peter A. Kemmer\nArt by Craig Foster\nSound by P.J. Sonnichsen\n© 1996 Berkeley Systems, Inc.",
+      "credits": "By C. Foster, P. Kemmer & P.J.\n©1996 Berkeley Systems Inc."
+    },
+    {
       "id": "68k-pearls",
       "displayName": "Pearls",
       "family": "68K",
@@ -2653,6 +2255,135 @@
       ],
       "about": "PHOTON\n\nPhoton keeps things active (radioactive?) with bursts of various sorts - photons, sort of squiggly outward bursts; electrons, spinning around the center; protons, spiralling outwards; and neutrinos, bursting straight out the center.\n\n\"Length\" sets the length of the trails.\n\"Burst Delay\" sets the amount of time between bursts.\n\"Always Centered\" keeps the bursts always centered on the screen.\n\"Burst\" allows you to select the type of bursts.\n\nOriginal Concept by Brian Lowry.\nProgramming by Brian Lowry.\n©1994, Berkeley Systems, Inc.",
       "credits": "Photon by Brian Lowry.\n©1994 Berkeley Systems, Inc."
+    },
+    {
+      "id": "ppc-points-of-view",
+      "displayName": "Points of View",
+      "family": "PPC",
+      "host": "engine/adhost",
+      "workingDir": "engine",
+      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Points of View",
+      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Points of View/..namedfork/rsrc",
+      "argsTemplate": [
+        "ADShared40.pef",
+        "{COPY}",
+        "100000000"
+      ],
+      "env": {
+        "ADUSPERCALL": "100000",
+        "ADTICKSTEP": "10",
+        "ADSCREENW": "640",
+        "ADSCREENH": "480",
+        "ADDRAWSEL": "3",
+        "ADMAINCODE": "300074F4"
+      },
+      "controlEnvVar": "ADCTRL",
+      "controls": [
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "label": "New Shapes:",
+          "defaultValue": 10,
+          "type": "slider",
+          "min": 0,
+          "max": 100
+        },
+        {
+          "id": "c1001",
+          "resourceId": 1001,
+          "label": "Color:",
+          "defaultValue": 6,
+          "type": "popup",
+          "options": [
+            "White",
+            "Yellow",
+            "Green",
+            "Blue",
+            "-",
+            "Random"
+          ]
+        },
+        {
+          "id": "c1002",
+          "resourceId": 1002,
+          "label": "Bigger Dots",
+          "defaultValue": 1,
+          "type": "toggle"
+        },
+        {
+          "id": "c1003",
+          "resourceId": 1003,
+          "label": "Music Choice…",
+          "defaultValue": 8,
+          "type": "button"
+        }
+      ],
+      "about": "POINTS OF VIEW\n\nThey say that matter is made up of empty space and points of light. What does this say about our points of view?\n\n“New Shapes” determines how often the shapes change.\n\n“Color” chooses the color of the dots.\n\nCheck “Bigger Dots” for BIG dots.\n\n“Music Choice” allows you to control the music.\n\nMacintosh Programming by Arnold Kim\nPC Programming by Brock Wagenaar\nArt by Jarir Maani and Joe Kauffman\nMusic by P.J. Sonnichsen\n©1996 Berkeley Systems, Inc.",
+      "credits": "By J.Kauffman, A.Kim, B. Wagenaar & P.J.\n©1996 Berkeley Systems, Inc."
+    },
+    {
+      "id": "ppc-psycho-deli",
+      "displayName": "Psycho Deli",
+      "family": "PPC",
+      "host": "engine/adhost",
+      "workingDir": "engine",
+      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Psycho Deli",
+      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Psycho Deli/..namedfork/rsrc",
+      "argsTemplate": [
+        "ADShared40.pef",
+        "{COPY}",
+        "100000000"
+      ],
+      "env": {
+        "ADGM": "1",
+        "ADSCREENW": "640",
+        "ADSCREENH": "480"
+      },
+      "controlEnvVar": "ADCTRL",
+      "controls": [
+        {
+          "id": "c1001",
+          "resourceId": 1001,
+          "label": "Speed:",
+          "defaultValue": 100,
+          "type": "slider",
+          "min": 0,
+          "max": 100
+        },
+        {
+          "id": "c1002",
+          "resourceId": 1002,
+          "label": "Number of Knots:",
+          "defaultValue": 100,
+          "type": "slider",
+          "min": 0,
+          "max": 100
+        },
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "label": "Picture:",
+          "defaultValue": 13,
+          "type": "popup",
+          "options": [
+            "Tie Dye",
+            "The Dome",
+            "Peacock",
+            "The Well",
+            "Jagged",
+            "Night Train",
+            "Splash",
+            "Head Cheese",
+            "Pinwheel",
+            "Gozar",
+            "Crop Circles",
+            "-",
+            "Random"
+          ]
+        }
+      ],
+      "about": "PSYCHO DELI\n\nAnd you thought Satori was trippy . . .\n\n“Picture” determines the underlying image. “Random” shows a sampling of all the pictures.\n\n“Speed” sets how dizzyingly fast you want the colors to move.\n\n“Number of Knots” indicates the complexity of the image.\n\nPressing “Caps-lock” at any time chooses a new set of colors.\n\nConcept and Windows Programming by Ben McCurtain\nMac Programming by Eric Pitcher and Jefferson Provost\n©1996 Berkeley Systems, Inc.",
+      "credits": "By B.McCurtain, E.Pitcher & J.Provost\n©1996 Berkeley Systems, Inc."
     },
     {
       "id": "68k-punch-out",
@@ -2800,6 +2531,75 @@
       "credits": "Rain by Anthony Carlisle.\n©1990-93 Berkeley Systems Inc."
     },
     {
+      "id": "ppc-rainforest",
+      "displayName": "Rainforest",
+      "family": "PPC",
+      "host": "engine/adhost",
+      "workingDir": "engine",
+      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Rainforest",
+      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Rainforest/..namedfork/rsrc",
+      "argsTemplate": [
+        "ADShared40.pef",
+        "{COPY}",
+        "100000000"
+      ],
+      "env": {
+        "ADUSPERCALL": "100000",
+        "ADTICKSTEP": "10",
+        "ADSCREENW": "640",
+        "ADSCREENH": "480",
+        "ADDRAWSEL": "3"
+      },
+      "controlEnvVar": "ADCTRL",
+      "controls": [
+        {
+          "id": "c1001",
+          "resourceId": 1001,
+          "label": "Number:",
+          "defaultValue": 50,
+          "type": "slider",
+          "min": 0,
+          "max": 100
+        },
+        {
+          "id": "c1002",
+          "resourceId": 1002,
+          "label": "Background:",
+          "defaultValue": 11,
+          "type": "popup",
+          "options": [
+            "Desktop",
+            "Black",
+            "-",
+            "Leaves",
+            "Wet Blue",
+            "Moss",
+            "Lichen",
+            "Rock",
+            "Mottled",
+            "Soft Green",
+            "Random"
+          ]
+        },
+        {
+          "id": "c1003",
+          "resourceId": 1003,
+          "label": "Foliage",
+          "defaultValue": 1,
+          "type": "toggle"
+        },
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "label": "Creatures",
+          "defaultValue": 8,
+          "type": "button"
+        }
+      ],
+      "about": "RAINFOREST\n\nThis module features six creatures from Berkeley Systems’ Living Puzzles™ game, Triazzle: The Rainforest Edition.\n\n“Creatures” determines which creatures appear.\n\n“Number” determines the number of creatures.\n\n“Background” determines the background on which the creatures will frolic. The pattern will automatically switch after two hours to prevent burn-in.\n\nCheck “Foliage” to make rainforest foliage appear.\n\nProgramming by Vann Miller and Andrew Armstrong\nArt by L. Bustamante, B. White, R. Ho & K. Payne.\nOriginal art by Dan Gilbert\nTriazzle is a registered trademark of Dan Gilbert, Inc.\n©1996 Berkeley Systems, Inc.",
+      "credits": "By Vann Miller & Andrew Armstrong\n© 1996 Berkeley Systems, Inc."
+    },
+    {
       "id": "68k-rebound",
       "displayName": "Rebound",
       "family": "68K",
@@ -2853,6 +2653,48 @@
       "credits": "By R. Kemmer, D. Muise & J. Howlett.\n©1994 Berkeley Systems, Inc."
     },
     {
+      "id": "ppc-rock-paper-scissors",
+      "displayName": "Rock Paper Scissors",
+      "family": "PPC",
+      "host": "engine/adhost",
+      "workingDir": "engine",
+      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Rock Paper Scissors",
+      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Rock Paper Scissors/..namedfork/rsrc",
+      "argsTemplate": [
+        "ADShared40.pef",
+        "{COPY}",
+        "100000000"
+      ],
+      "env": {
+        "ADUSPERCALL": "100000",
+        "ADTICKSTEP": "10",
+        "ADSCREENW": "640",
+        "ADSCREENH": "480",
+        "ADDRAWSEL": "3"
+      },
+      "controlEnvVar": "ADCTRL",
+      "controls": [
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "label": "Stars to Win:",
+          "defaultValue": 25,
+          "type": "slider",
+          "min": 0,
+          "max": 100
+        },
+        {
+          "id": "c1001",
+          "resourceId": 1001,
+          "label": "Display Score",
+          "defaultValue": 1,
+          "type": "toggle"
+        }
+      ],
+      "about": "ROCK PAPER SCISSORS\n\nRock people are steady and show little emotion.\nPaper people are smooth and striking.\nScissor people have a cutting personality.\n\n“Stars to Win” dictates how many rounds a fighter must win to be victorious.\n\n“Display Score” toggles the scoreboard on and off.\n\nPress “Caps-lock” to choose your fighter. Then, you and the computer play traditional Rock Paper Scissors.\n\nProgramming by Brock Wagenaar\nArt by Stephen Ekstrom\nAdditional art by Bob Ting\nScissor model by Viewpoint Datalabs International Inc.\nSound by P.J. Sonnichsen\n©1996 Berkeley Systems, Inc.",
+      "credits": "S.Ekstrom, B.Wagenaar & P.J. Sonnichsen\n©1996 Berkeley Systems, Inc."
+    },
+    {
       "id": "68k-rock-paper-scissors",
       "displayName": "Rock Paper Scissors",
       "family": "68K",
@@ -2885,6 +2727,39 @@
       ],
       "about": "ROCK PAPER SCISSORS\n\nRock people are steady and show little emotion.\nPaper people are smooth and striking.\nScissor people have a cutting personality.\n\n“Stars to Win” dictates how many rounds a fighter must win to be victorious.\n\n“Display Score” toggles the scoreboard on and off.\n\nPress “Caps-lock” to choose your fighter. Then, you and the computer play traditional Rock Paper Scissors.\n\nProgramming by Brock Wagenaar\nArt by Stephen Ekstrom\nAdditional art by Bob Ting\nScissor model by Viewpoint Datalabs International Inc.\nSound by P.J. Sonnichsen\n©1996 Berkeley Systems, Inc.",
       "credits": "S.Ekstrom, B.Wagenaar & P.J. Sonnichsen\n©1996 Berkeley Systems, Inc."
+    },
+    {
+      "id": "ppc-rodger-dodger",
+      "displayName": "Rodger Dodger",
+      "family": "PPC",
+      "host": "engine/adhost",
+      "workingDir": "engine",
+      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Rodger Dodger",
+      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Rodger Dodger/..namedfork/rsrc",
+      "argsTemplate": [
+        "ADShared40.pef",
+        "{COPY}",
+        "100000000"
+      ],
+      "env": {
+        "ADUSPERCALL": "100000",
+        "ADTICKSTEP": "10",
+        "ADSCREENW": "640",
+        "ADSCREENH": "480",
+        "ADDRAWSEL": "3"
+      },
+      "controlEnvVar": "ADCTRL",
+      "controls": [
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "label": "Load Saved Level",
+          "defaultValue": 1,
+          "type": "toggle"
+        }
+      ],
+      "about": "RODGER DODGER\n\nOnce upon a time there was a naughty programmer named Rodger who played games instead of doing his work. Unbeknownst to this programmer, his project manager was a witch. One day the project manager became so angry that he or she (we won't give that away) turned the naughty programmer into the ball in a game called Rodger Dodger. Will the programmer have a happy ending? You decide.\n\nCheck “Load Saved Level” to start the game at the beginning of the level that you last saved. You save a level by pressing “S” while playing the game.\n\n“Caps-lock” gets you in and out of interactive mode.\n\nProgramming by Peter A. Kemmer\nArt by Jarir Maani\nSound and music by P.J. Sonnichsen\n© 1996 Berkeley Systems, Inc.",
+      "credits": "By Jarir Maani, Peter A. Kemmer & P.J.\n©1996 Berkeley Systems Inc."
     },
     {
       "id": "68k-rodger-dodger",
@@ -3037,6 +2912,57 @@
       ],
       "about": "SATORI\n\nSatori uses a technique called \"color animation\" which requires a monitor set to 256 colors or grays.\n\n“Display” sets the type of picture Satori draws.\n“Colors” sets the color scheme Satori uses. Hit the Caps Lock key to choose new sets of colors based on the color scheme selected.\n“End Resolution” determines how detailed a picture Satori draws. Satori draws a picture of increasing detail until it reaches the resolution you have set. 1x1 is the highest resolution.\n“Knots” sets the complexity of the picture.\n\nThanks to the Horseflies for inspiration.\n\nOriginal Concept by Ben Haller.\nProgramming by Ben Haller.\n©1990-94, Berkeley Systems, Inc.",
       "credits": "Satori by Ben Haller/Stick Software.\n©1990-94 Berkeley Systems Inc."
+    },
+    {
+      "id": "ppc-shadow-agents",
+      "displayName": "Shadow Agents",
+      "family": "PPC",
+      "host": "engine/adhost",
+      "workingDir": "engine",
+      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Shadow Agents",
+      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Shadow Agents/..namedfork/rsrc",
+      "argsTemplate": [
+        "ADShared40.pef",
+        "{COPY}",
+        "100000000"
+      ],
+      "env": {
+        "ADUSPERCALL": "100000",
+        "ADTICKSTEP": "10",
+        "ADSCREENW": "640",
+        "ADSCREENH": "480",
+        "ADDRAWSEL": "3"
+      },
+      "controlEnvVar": "ADCTRL",
+      "controls": [
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "label": "Agents:",
+          "defaultValue": 50,
+          "type": "slider",
+          "min": 0,
+          "max": 100
+        },
+        {
+          "id": "c1003",
+          "resourceId": 1003,
+          "label": "Music:",
+          "defaultValue": 99,
+          "type": "slider",
+          "min": 0,
+          "max": 100
+        },
+        {
+          "id": "c1001",
+          "resourceId": 1001,
+          "label": "Clear Screen First",
+          "defaultValue": 0,
+          "type": "toggle"
+        }
+      ],
+      "about": "SHADOW AGENTS\n\nThese weasels are trained professionals. Please do not put trench coats on your pets. It will annoy them.\n\n“Agents” determines how many agents will be on the screen at once.\n\nCheck “Clear Screen First” for a black background.\n\nBackground automatically becomes black after 90 minutes for better screen saving.\n\nOriginal idea by Mike Dashow\nProgramming by Andrew Armstrong\nAdditional art by Craig Foster\nOriginal music by Jane Scolieri & Robert Johnson III\nNew music by P.J. Sonnichsen\n© 1996 Berkeley Systems, Inc.",
+      "credits": "By M.Dashow, A.Armstrong, C.Foster & P.J.\n© 1996 Berkeley Systems, Inc."
     },
     {
       "id": "68k-shadow-agents",
@@ -3587,6 +3513,39 @@
       "credits": "SunBurst by Jean Tantra.\n©1992 Berkeley Systems Inc."
     },
     {
+      "id": "ppc-super-guy",
+      "displayName": "Super Guy",
+      "family": "PPC",
+      "host": "engine/adhost",
+      "workingDir": "engine",
+      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Super Guy",
+      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Super Guy/..namedfork/rsrc",
+      "argsTemplate": [
+        "ADShared40.pef",
+        "{COPY}",
+        "100000000"
+      ],
+      "env": {
+        "ADUSPERCALL": "100000",
+        "ADTICKSTEP": "10",
+        "ADSCREENW": "640",
+        "ADSCREENH": "480",
+        "ADDRAWSEL": "3"
+      },
+      "controlEnvVar": "ADCTRL",
+      "controls": [
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "label": "Background Sound",
+          "defaultValue": 1,
+          "type": "toggle"
+        }
+      ],
+      "about": "SUPER GUY\n\nThere is a little super hero inside each of us just waiting to bust out.\n\nCheck “Background Sound” if you want to hear the constant backround sounds of children in a play yard.\n\n(Continued next issue)\n\nProgramming by Mark Palange\nArt by Bob Ting\nSound by P.J. Sonnichsen\n©1996 Berkeley Systems, Inc.",
+      "credits": "By Bob Ting, Mark Palange & P.J.\n©1996 Berkeley Systems Inc."
+    },
+    {
       "id": "68k-super-guy",
       "displayName": "Super Guy",
       "family": "68K",
@@ -3610,6 +3569,150 @@
       ],
       "about": "SUPER GUY\n\nThere is a little super hero inside each of us just waiting to bust out.\n\nCheck “Background Sound” if you want to hear the constant backround sounds of children in a play yard.\n\n(Continued next issue)\n\nProgramming by Mark Palange\nArt by Bob Ting\nSound by P.J. Sonnichsen\n©1996 Berkeley Systems, Inc.",
       "credits": "By Bob Ting, Mark Palange & P.J.\n©1996 Berkeley Systems Inc."
+    },
+    {
+      "id": "ppc-swirling-magic",
+      "displayName": "Swirling Magic",
+      "family": "PPC",
+      "host": "engine/adhost",
+      "workingDir": "engine",
+      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Swirling Magic",
+      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Swirling Magic/..namedfork/rsrc",
+      "argsTemplate": [
+        "ADShared40.pef",
+        "{COPY}",
+        "100000000"
+      ],
+      "env": {
+        "ADUSPERCALL": "100000",
+        "ADTICKSTEP": "10",
+        "ADSCREENW": "640",
+        "ADSCREENH": "480",
+        "ADDRAWSEL": "3"
+      },
+      "controlEnvVar": "ADCTRL",
+      "controls": [
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "label": "# of Sea Pixies:",
+          "defaultValue": 70,
+          "type": "slider",
+          "min": 0,
+          "max": 100
+        },
+        {
+          "id": "c1001",
+          "resourceId": 1001,
+          "label": "Style:",
+          "defaultValue": 6,
+          "type": "popup",
+          "options": [
+            "Swirling Magic",
+            "Spaghetti Magic",
+            "Tiled Magic",
+            "Peacock Image",
+            "-",
+            "Random"
+          ]
+        },
+        {
+          "id": "c1002",
+          "resourceId": 1002,
+          "label": "Palette",
+          "defaultValue": 9,
+          "type": "popup",
+          "options": [
+            "BluesReds",
+            "Candy",
+            "Desert",
+            "Reds",
+            "Rainbow",
+            "Field",
+            "Sparkle",
+            "-",
+            "Random"
+          ]
+        },
+        {
+          "id": "c1002",
+          "resourceId": 1002,
+          "label": "Magnify Pixies",
+          "defaultValue": 1,
+          "type": "toggle"
+        },
+        {
+          "id": "c1003",
+          "resourceId": 1003,
+          "label": "Music Choice…",
+          "defaultValue": 8,
+          "type": "button"
+        }
+      ],
+      "about": "SWIRLING MAGIC\n\nSwirling Magic is based on an ancient Norse legend of underwater Sea Pixies who gathered by the thousands once a year in a massive reproductive frenzy. It is said that those who witnessed the event use their eyebrows more often in their facial expressions.\n\n“# of Sea Pixies” determines Pixie density.\n\n“Style” determines the pattern of the Pixies.\n\n“Palette” determines the colors of the Pixies.\n\n“Music Choice” controls the music.\n\nPress “Caps-lock” to change the colors.\n\nProgramming by Vann Miller and Rob Blair\nPixie dance lessons by Evan Harsha\nSound by P.J. Sonnichsen\n© 1996 Berkeley Systems, Inc.",
+      "credits": "By V. Miller, R. Blair, E. Harsha & P.J.\n©1996 Berkeley Systems, Inc."
+    },
+    {
+      "id": "ppc-time-flies",
+      "displayName": "Time Flies",
+      "family": "PPC",
+      "host": "engine/adhost",
+      "workingDir": "engine",
+      "dataForkPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Time Flies",
+      "rsrcPath": "extracted/After Dark 9 v1.0 (9:9:03)/After Dark Files/After Dark 4.0/Time Flies/..namedfork/rsrc",
+      "argsTemplate": [
+        "ADShared40.pef",
+        "{COPY}",
+        "100000000"
+      ],
+      "env": {
+        "ADUSPERCALL": "100000",
+        "ADTICKSTEP": "10",
+        "ADSCREENW": "640",
+        "ADSCREENH": "480",
+        "ADDRAWSEL": "3",
+        "ADREALCLOCK": "1"
+      },
+      "controlEnvVar": "ADCTRL",
+      "controls": [
+        {
+          "id": "c1002",
+          "resourceId": 1002,
+          "label": "Drift Speed:",
+          "defaultValue": 50,
+          "type": "slider",
+          "min": 0,
+          "max": 100
+        },
+        {
+          "id": "c1000",
+          "resourceId": 1000,
+          "label": "Type:",
+          "defaultValue": 4,
+          "type": "popup",
+          "options": [
+            "Liquid",
+            "Transformer",
+            "-",
+            "Random"
+          ]
+        },
+        {
+          "id": "c1001",
+          "resourceId": 1001,
+          "label": "Sounds:",
+          "defaultValue": 3,
+          "type": "popup",
+          "options": [
+            "Ticks",
+            "Chimes",
+            "Both",
+            "Neither"
+          ]
+        }
+      ],
+      "about": "TIME FLIES\n\nHere’s the latest in our Clocks series. Enjoy and don’t be late!\n\n“Type” determines which type of clock displays.\n\n“Sounds” allows you to choose what sounds, if any, you want to hear.\n\n“Drift Speed” selects how quickly the image will drift around your screen.\n\n“Caps-lock” changes the type of clock.\n\nProgramming by Mark Palange and Brock Wagenaar\nArt by Tony Gascon of Digital Delirium and Stuart Gold of Shadow and Light\nSound by P.J. Sonnichsen\n©1996 Berkeley Systems, Inc.",
+      "credits": "T.Gascon, S.Gold, M.Palange, PJ & B.Wagenaar\n©1996 Berkeley Systems, Inc."
     },
     {
       "id": "68k-time-flies",
