@@ -9,7 +9,11 @@ TP=$(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../third_party)
 RD=$(TP)/resource_dasm
 PH=$(TP)/local
 CXX=clang++
-CXXFLAGS=-std=c++20 -O2 -I$(RD)/src -I$(PH)/include
+# -Wno-invalid-constexpr: upstream ResourceFormats.hh (post-rebase) declares
+# constexpr helpers over phosg byteswap types that can never constant-evaluate;
+# clang makes that an error by default. Benign — nothing here uses them at
+# compile time.
+CXXFLAGS=-std=c++20 -O2 -Wno-invalid-constexpr -I$(RD)/src -I$(PH)/include
 # ApplicationServices provides CGEventSourceFlagsState (real Caps Lock state for modules that poll KeyMap).
 LIBS=$(RD)/build/libresource_file.a $(PH)/lib/libphosg.a -lz -framework ApplicationServices
 
