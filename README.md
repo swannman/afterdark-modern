@@ -14,8 +14,9 @@ saver for the 68K modules.
 Everything in this repo is original work. **No copyrighted After Dark bits are
 included** — first run downloads them from archive.org (you're responsible for
 sourcing After Dark legally). The CPU emulators come from
-[resource_dasm](https://github.com/fuzziqersoftware/resource_dasm), fetched at
-build time.
+[our fork](https://github.com/swannman/resource_dasm) of
+[resource_dasm](https://github.com/fuzziqersoftware/resource_dasm), which
+`build.sh` fetches at build time.
 
 ## Layout
 
@@ -65,11 +66,13 @@ or delete the checkout afterwards.
 
 ### Details
 
-- **Dependencies are pinned.** The emulators come from a
-  [resource_dasm](https://github.com/fuzziqersoftware/resource_dasm) fork plus
-  its support library phosg; neither keeps a stable API, so
-  `tools/build_deps.sh` checks out the exact pair of revisions the hosts are
-  written against. Change the pins there (and nowhere else) to try a newer
+- **Dependencies are pinned.** The emulators come from
+  [swannman/resource_dasm](https://github.com/swannman/resource_dasm) — a fork
+  of upstream resource_dasm with decode caches for both CPUs; the hosts do not
+  build against upstream — plus its support library phosg. Neither keeps a
+  stable API, so `tools/build_deps.sh` (which `build.sh` runs) checks out the
+  exact pair of revisions the hosts are written against. Don't clone either
+  one yourself; change the pins there (and nowhere else) to try a newer
   emulator.
 - **Individual steps**, if you'd rather not use `build.sh`:
   `tools/build_deps.sh`, then `make -C engine adhost adhost68k`, then
