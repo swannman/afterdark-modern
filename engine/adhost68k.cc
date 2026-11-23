@@ -246,6 +246,7 @@ static void pf_duty_dump(){ if(!getenv("ADPFDUTY")) return;
   for(int i=0;i<PFD_N;i++) fprintf(stderr,"[duty] %-16s %llu\n", g_duty_name[i],(unsigned long long)g_duty[i]); }
 
 static std::function<void()> g_pf_install_hook;   // [pf] installs the lean hook on demand (dynamic arming)
+static std::function<void()> g_pf_hook_every_insn;// [pf] a hook duty that COUNTS hook calls just armed: run the hook per instruction again
 static bool g_pf_hook_installed=false;            // is a hook currently attached?
 static bool g_pf_zero_hook=false;                 // this run started with NO hook at all
 static const uint16_t PF_SENT_TRAP=0xAFFE;        // host-owned A-line sentinel written at RET_SENT
@@ -6182,7 +6183,9 @@ int main(int argc, char** argv){
       if(r.a[0] && !getenv("ADNOTMFIRE")){ g_tm_tp=r.a[0]; try{ g_tm_addr=mem->read_u32b(r.a[0]+6); }catch(...){ g_tm_addr=0; } g_tm_primed=(g_tm_addr!=0);
         // [pf] dynamic arming: the Time Manager fire is the one semantic duty that arms at RUNTIME rather
         // than at load. A zero-hook run installs the hook here, the instant a task is actually primed.
-        if(g_tm_primed && !g_pf_hook_installed && g_pf_install_hook) g_pf_install_hook(); }
+        if(g_tm_primed && !g_pf_hook_installed && g_pf_install_hook) g_pf_install_hook();
+        // The fire is timed by counting hook calls, so from here the hook must run before every instruction.
+        if(g_tm_primed && g_pf_hook_every_insn) g_pf_hook_every_insn(); }
     } else if(opcode==0xA059){ // RmvTime(tmTaskPtr A0) — remove the task.
       g_tm_primed=false;
     } else if((opcode==0xA033||opcode==0xA06F) && getenv("ADVBLFIRE")){ // VInstall(A0=VBLTask) / SlotVInstall(A0=VBLTask, D0.w=slot)
@@ -6192,6 +6195,7 @@ int main(int argc, char** argv){
       if(r.a[0]){
         g_vbl_tp=r.a[0]; try{ g_vbl_addr=mem->read_u32b(r.a[0]+6); }catch(...){ g_vbl_addr=0; }
         if(g_vbl_addr && !g_pf_hook_installed && g_pf_install_hook) g_pf_install_hook();
+        if(g_vbl_addr && g_pf_hook_every_insn) g_pf_hook_every_insn();   // same reason as the Time Manager fire
         if(getenv("ADVBLLOG")) fprintf(stderr,"    [VBL] %s task=%08X vblAddr=%08X count=%u pc=%08X\n",
           opcode==0xA033?"VInstall":"SlotVInstall",g_vbl_tp,g_vbl_addr,
           (unsigned)mem->read_u16b(g_vbl_tp+0xA),r.pc);
@@ -10516,6 +10520,41 @@ int main(int argc, char** argv){
       if(pf_anyduty || getenv("ADPFFORCEHOOK")) g_pf_install_hook();
       else { g_pf_zero_hook = true;
              if(getenv("ADLEANLOG")) fprintf(stderr,"[pf] NO DEBUG HOOK INSTALLED (no duty armed for this run)\n"); }
+      // ===== [pf] CACHED BLOCK EXECUTION: decode each instruction once, run the hook at block entries =====
+      // The emulator's classic loop re-fetches and re-decodes every instruction through MemoryContext and
+      // calls the hook before each one. M68KEmulator::set_block_execution keeps a per-pc cache of decoded
+      // instructions (invalidated by MemoryContext's page write generations — every guest store and every
+      // host write here goes through the tracked write helpers; this file takes no raw at<T>() pointers)
+      // and calls the hook only where control flow can have changed: after a branch/jump/call/return/trap,
+      // at the start of each execute(), and at the pcs registered below.
+      // That is exact for this hook because every duty left in it is keyed on a PC:
+      //   - function entries and return landings are reached by a jump, so they are block entries already;
+      //   - a duty pc that may sit mid-function is registered as a boundary so the hook still runs there
+      //     (all of them are registered — cheaper than proving which are jump targets);
+      //   - the two duties that are NOT pc-keyed, the Time Manager and VBL fires, are timed by COUNTING
+      //     hook calls. The moment one arms (g_pf_hook_every_insn, called from PrimeTime / VInstall) the
+      //     hook goes back to running before every instruction for the rest of the run, which is the
+      //     classic cadence, so their counters see exactly the calls they always saw.
+      // The Ticks/budget timer needs nothing: it rides the interrupt manager, which the emulator still
+      // steps once per instruction, and cycles() still counts instructions.
+      // Every probe that inspects each instruction (the JT/island recorders, the duty census, the
+      // sentinel-compare A/B) also asks for the per-instruction cadence; the full RE hook below never
+      // enables block execution at all. ADPFNOBLOCKS=1 reverts to the classic loop (A/B).
+      if(!getenv("ADPFNOBLOCKS")){
+        if(g_slowburn || sb_gate) emu.add_block_boundary_pc(0x0103ED46);
+        if(sb_gate) emu.add_block_boundary_pc(0x0103ED44);
+        if(bugs_bucket){ emu.add_block_boundary_pc(0x0100C30E); emu.add_block_boundary_pc(0x01006900); }
+        if(g_sbReaderPC) emu.add_block_boundary_pc(g_sbReaderPC);
+        if(g_ddWalkFix) emu.add_block_boundary_pc(0x0102BB6C);
+        if(dllA5 && !k_nullrtstrap) for(uint32_t a=0; a<0x10; a++) emu.add_block_boundary_pc(a);
+        emu.add_block_boundary_pc(0x01037E20u + 0x53A6);   // RD key pump (arms whenever input is first seen)
+        g_pf_hook_every_insn = [&emu](){ emu.set_hook_every_instruction(true); };
+        const bool pf_perinsn = PFC || g_jtx || g_jtlive || g_sfx || !k_senttrap
+                             || g_tm_primed || g_tm_firing || g_vbl_firing || (g_vbl_period && g_vbl_addr && g_vbl_tp);
+        if(pf_perinsn) g_pf_hook_every_insn();
+        emu.set_block_execution(true);
+        if(getenv("ADLEANLOG")) fprintf(stderr,"[pf] cached block execution ON (hook cadence: %s)\n", pf_perinsn?"every instruction":"block entries");
+      } else if(getenv("ADLEANLOG")) fprintf(stderr,"[pf] cached block execution OFF (ADPFNOBLOCKS)\n");
     } else
     emu.set_debug_hook([lim,RET_SENT,watchA,pclogA,findpg,&mem,impTrace,modA5,modDataEnd,modA5End,modCodeBase,impMax,dllA5,dllTvBase,params,bugs_bucket,&g_ticks,&g_tm_addr,&g_tm_tp,&g_tm_ret,&g_tm_primed,&g_tm_firing,&g_dll_budget,&g_dll_used,g_slowburn,sb_gate](M68KEmulator& e){
       auto& rr=e.registers();

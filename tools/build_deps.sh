@@ -17,9 +17,10 @@
 set -euo pipefail
 
 # resource_dasm: our perf fork = upstream + the MemoryContext arena-refcount fix
-# + the PPC decode cache / basic-block engine the PPC host relies on.
+# + the PPC decode cache / basic-block engine the PPC host relies on + the 68K
+# decode cache with block-entry hooks the 68K host relies on.
 RD_URL="https://github.com/swannman/resource_dasm"
-RD_REV="02d8ea9a58eaf559a9194601b33d98723c9d4f60"     # afterdark-perf, 2026-09-05
+RD_REV="0ec311194097623ef6aa96fa0bf1ef105734b4c8"     # afterdark-perf, 2026-11-23
 # phosg: upstream, at the revision that fork was built against.
 PH_URL="https://github.com/fuzziqersoftware/phosg"
 PH_REV="782785d14d5fe19dda3af71d21d2792e71c5df1d"     # master, 2026-09-04
