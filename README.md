@@ -5,15 +5,17 @@ modern macOS. Two hosts (`engine/`) execute the original module code against a
 software QuickDraw and stream frames; a SwiftUI app and a real macOS screen
 saver present them.
 
-Prebuilt downloads are on the
-[Releases page](../../releases) — see `INSTALL.md` in the zip (or
-[docs/INSTALL.md](docs/INSTALL.md)). To build from source, read on.
+**There are no prebuilt downloads** — this is a build-from-source project (one
+command, below). If you just want After Dark running on a modern Mac without
+building anything, try [Afterglow](https://morphing.cloud/afterglow/), a
+separate, unaffiliated project that ships a signed, ready-to-run app and screen
+saver for the 68K modules.
 
 Everything in this repo is original work. **No copyrighted After Dark bits are
 included** — first run downloads them from archive.org (you're responsible for
 sourcing After Dark legally). The CPU emulators come from
-[resource_dasm](https://github.com/fuzziqersoftware/resource_dasm), cloned
-separately.
+[resource_dasm](https://github.com/fuzziqersoftware/resource_dasm), fetched at
+build time.
 
 ## Layout
 
@@ -27,30 +29,58 @@ separately.
 
 ## Build & run
 
+You need an Apple Silicon Mac on macOS 14 or later, the Xcode Command Line Tools
+(`xcode-select --install`), and three Homebrew packages:
+
 ```bash
-# dependencies: the CPU emulators (to test a rewrite, use your fork/branch here)
-git clone https://github.com/fuzziqersoftware/phosg         third_party/phosg
-git clone https://github.com/fuzziqersoftware/resource_dasm third_party/resource_dasm
-cd third_party/phosg && cmake -S . -B build -DCMAKE_INSTALL_PREFIX=../local \
-  && cmake --build build -j8 && cmake --install build && cd ../..
-cd third_party/resource_dasm && cmake -S . -B build -DCMAKE_PREFIX_PATH=../local \
-  && cmake --build build --target resource_file m68kdasm resource_dasm -j8 && cd ../..
-
-# hosts
-cd engine && make adhost adhost68k && cd ..
-
-# app — first launch shows the asset-download gate, then the module picker
-cd app/AfterDark && swift run AfterDark
-
-# screen saver bundle (install by double-clicking AfterDark.saver)
-bash app/saver/build_saver.sh
+brew install cmake unar hfsutils
 ```
 
-The `.app` bundle is self-contained — `make_app.sh` builds the extraction tools
-(via `tools/get_extractors.sh`) and bundles them, so a distributed app needs no
-Homebrew. For `swift run` / headless work, either run `tools/get_extractors.sh`
-once or `brew install unar hfsutils`; `tools/adfetch/adfetch.sh` does the same
-download the app does.
+Then:
+
+```bash
+git clone https://github.com/swannman/afterdark-modern.git
+cd afterdark-modern
+./build.sh
+```
+
+`build.sh` fetches and builds the CPU emulators at pinned revisions, builds the
+two hosts, the app and the screen saver (a few minutes the first time), and
+prints these two next steps:
+
+```bash
+# 1. the app — first launch downloads the original modules (~450 MB from
+#    archive.org, checksum-verified), then shows the module picker
+cd app/AfterDark && swift run AfterDark
+
+# 2. the screen saver — macOS offers to install it; then pick "After Dark" in
+#    System Settings > Screen Saver. Run the app once first: the saver uses the
+#    modules the app downloaded.
+open app/saver/AfterDark.saver
+```
+
+The saver bundle carries its own copy of the hosts and reads the modules from
+`~/Library/Application Support/AfterDarkModern`, so it keeps working if you move
+or delete the checkout afterwards.
+
+### Details
+
+- **Dependencies are pinned.** The emulators come from a
+  [resource_dasm](https://github.com/fuzziqersoftware/resource_dasm) fork plus
+  its support library phosg; neither keeps a stable API, so
+  `tools/build_deps.sh` checks out the exact pair of revisions the hosts are
+  written against. Change the pins there (and nowhere else) to try a newer
+  emulator.
+- **Individual steps**, if you'd rather not use `build.sh`:
+  `tools/build_deps.sh`, then `make -C engine adhost adhost68k`, then
+  `swift run` in `app/AfterDark`, then `bash app/saver/build_saver.sh`.
+- **A standalone `AfterDark.app`**: `app/AfterDark/make_app.sh` builds a
+  self-contained bundle that includes the extraction tools (so it needs no
+  Homebrew at run time). Building it requires full Xcode, not just the Command
+  Line Tools.
+- **Headless**: `tools/adfetch/adfetch.sh` does the same download the app does;
+  `swift run adrender --smoke <module-id> 6` drives one module through the full
+  pipeline without a window.
 
 ## License
 

@@ -15,9 +15,15 @@ Toolbox traps):
 
 ## Build
 
-`make` (see the Makefile header for the third_party dependency build). Plain
-resource_dasm master works — every emulator fix this project has needed is
-merged upstream.
+`../tools/build_deps.sh` first (it fetches and builds resource_dasm + phosg at
+the pinned revisions the hosts are written against), then `make adhost adhost68k`
+— or just `./build.sh` from the repo root, which does both.
+
+The pins matter: resource_dasm is a perf fork (upstream plus a MemoryContext
+arena-refcount fix and the PPC decode cache / basic-block engine), and neither
+it nor phosg keeps a stable API, so an unpinned clone of either stops building
+against this code. To move to a newer emulator, change the two revisions at the
+top of `tools/build_deps.sh` and re-validate the module corpus.
 
 ## Running
 

@@ -7,8 +7,10 @@ import Foundation
 //   rsrcPath / dataForkPath -> resolved against the assets root (original AD bits)
 //
 // There are TWO layouts (auto-detected, each env-overridable):
-//   DEV: a source checkout. Host binaries + shared libs both live in
-//        repoRoot/engine. This is the historical behavior.
+//   DEV: a source checkout. Host binaries live in repoRoot/engine. The shared
+//        libs are read from there too IF they were installed there (adfetch.sh
+//        --install-host-libs); otherwise from assetsRoot/shared, where the
+//        first-run download puts them.
 //   DISTRIBUTED: a shipped .app. The host binaries are BUNDLED in
 //        <App>.app/Contents/Helpers (self-contained: only system dylibs); the
 //        COPYRIGHTED shared libs (ADShared40.pef / AD4Library.rsrc) are NEVER
@@ -78,11 +80,23 @@ public enum ADPaths {
 
     // Directory holding the shared runtime libraries (ADShared40.pef, AD4Library.rsrc)
     // — the host's working directory / CWD. Override AD_SHARED_DIR; else in a
-    // distributed app the downloaded assetsRoot/shared, else the dev tree.
+    // distributed app the downloaded assetsRoot/shared. A dev checkout uses
+    // repoRoot/engine only when the libs were actually installed there
+    // (adfetch.sh --install-host-libs); otherwise it too reads assetsRoot/shared,
+    // which is where the first-run download puts them — so a fresh clone runs the
+    // PPC modules without an extra step.
     public static let sharedLibsRoot: String = {
         if let e = env("AD_SHARED_DIR") { return expand(e) }
-        return isDistributed ? "\(assetsRoot)/shared" : "\(repoRoot)/engine"
+        return resolveSharedLibsRoot(isDistributed: isDistributed, repoRoot: repoRoot, assetsRoot: assetsRoot)
     }()
+
+    // The decision above, parameterized so tests can pin it against temp dirs.
+    static func resolveSharedLibsRoot(isDistributed: Bool, repoRoot: String, assetsRoot: String) -> String {
+        let downloaded = "\(assetsRoot)/shared"
+        if isDistributed { return downloaded }
+        let dev = "\(repoRoot)/engine"
+        return FileManager.default.fileExists(atPath: "\(dev)/ADShared40.pef") ? dev : downloaded
+    }
 
     // Resolve a catalog host path to the host binary: takes only its basename
     // (adhost / adhost68k) and joins it under hostsDir, so the catalog's literal

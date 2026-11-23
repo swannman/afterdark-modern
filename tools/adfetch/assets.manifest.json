@@ -38,6 +38,14 @@
    "size": 1360621
   },
   {
+   "module": "68k-artist",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Artist/..namedfork/rsrc",
+   "md5": "2b9fcc4ff05e90275404470b8357e3c0",
+   "size": 16102
+  },
+  {
    "module": "68k-bogglins",
    "family": "68K",
    "kind": "rsrc",
@@ -134,12 +142,28 @@
    "size": 66171
   },
   {
+   "module": "68k-fish-pro",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Fish! Pro/..namedfork/rsrc",
+   "md5": "dc11c6c70bfaa8a5757f80e237b6f762",
+   "size": 194741
+  },
+  {
    "module": "68k-fish-world",
    "family": "68K",
    "kind": "rsrc",
    "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Fish World/..namedfork/rsrc",
    "md5": "e113d07f7c7cf928a5c04baf45a63de3",
    "size": 1689324
+  },
+  {
+   "module": "68k-flying-toasters-pro",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Flying Toasters Pro/..namedfork/rsrc",
+   "md5": "a171892eca3d192213afd29acca10b52",
+   "size": 101076
   },
   {
    "module": "68k-fractal-forest",
@@ -174,6 +198,14 @@
    "size": 61810
   },
   {
+   "module": "68k-gravity",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Gravity/..namedfork/rsrc",
+   "md5": "a662c45cfb6d3227f305b4596e585fe6",
+   "size": 27104
+  },
+  {
    "module": "68k-guernsey-madness",
    "family": "68K",
    "kind": "rsrc",
@@ -182,12 +214,28 @@
    "size": 952725
   },
   {
+   "module": "68k-hula-twins",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Hula Twins/..namedfork/rsrc",
+   "md5": "e643f8a08bf39ddcf298dac8485faec1",
+   "size": 2036787
+  },
+  {
    "module": "68k-life-all",
    "family": "68K",
    "kind": "rsrc",
    "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Life & All/..namedfork/rsrc",
    "md5": "7011f9059dc2103fc95d9a3213203d52",
    "size": 830216
+  },
+  {
+   "module": "68k-lunatic-fringe",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Lunatic Fringe/..namedfork/rsrc",
+   "md5": "aef4c0d0b7b64fcae95234ee0a946e59",
+   "size": 385673
   },
   {
    "module": "68k-magic-turtle",
@@ -244,6 +292,14 @@
    "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Modern Art/..namedfork/rsrc",
    "md5": "b764148e9a4d7d22993576c8cee28e89",
    "size": 39209
+  },
+  {
+   "module": "68k-mountains",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Mountains/..namedfork/rsrc",
+   "md5": "ac5cc31444e89cc1fdf68a6bae8cb379",
+   "size": 30358
   },
   {
    "module": "68k-mowin-man",
@@ -324,6 +380,14 @@
    "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Rain/..namedfork/rsrc",
    "md5": "564709186d536d506f61af2922c86a50",
    "size": 6173
+  },
+  {
+   "module": "68k-rat-race",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Rat Race/..namedfork/rsrc",
+   "md5": "bcdb03253c5e60f9a0bbef9b41f7bc4c",
+   "size": 128436
   },
   {
    "module": "68k-rebound",
@@ -502,6 +566,14 @@
    "size": 6204
   },
   {
+   "module": "68k-you-bet-your-head",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/You Bet Your Head/..namedfork/rsrc",
+   "md5": "faf203365637d53508cd8abd4c04be58",
+   "size": 268063
+  },
+  {
    "module": "68k-zooommm",
    "family": "68K",
    "kind": "rsrc",
@@ -516,6 +588,14 @@
    "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Zot!/..namedfork/rsrc",
    "md5": "3e050d113d0174a9b8a79603fe017242",
    "size": 16433
+  },
+  {
+   "module": "flying-toasters",
+   "family": "68K",
+   "kind": "rsrc",
+   "path": "deluxe/extracted/dlx/After Dark Deluxe (4/Flying Toasters!/..namedfork/rsrc",
+   "md5": "9e91ac8adfe72f2328d19174f2ca312a",
+   "size": 1885983
   },
   {
    "module": "ppc-art-critic",

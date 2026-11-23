@@ -1,6 +1,6 @@
 # Dependencies live in the repo (third_party/), NOT /private/tmp: the temp scratchpad
-# gets purged, which silently broke this build. Rebuild deps with the lines in
-# ../adhost/Makefile.
+# gets purged, which silently broke this build. Build deps with
+# ../build_deps.sh.
 TP=$(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../../third_party)
 RD=$(TP)/resource_dasm
 PH=$(TP)/local

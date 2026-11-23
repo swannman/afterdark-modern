@@ -39,9 +39,9 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# ../adhost only exists in a dev checkout; a bundled copy of this tool won't have
-# it. It's only read for --install-host-libs, so resolve it leniently.
-ADHOST_DIR="$(cd "$HERE/../adhost" 2>/dev/null && pwd || echo "$HERE/../adhost")"
+# <repo>/engine only exists in a dev checkout; a bundled copy of this tool won't
+# have it. It's only read for --install-host-libs, so resolve it leniently.
+ADHOST_DIR="$(cd "$HERE/../../engine" 2>/dev/null && pwd || echo "$HERE/../../engine")"
 CONF="$HERE/sources.conf"
 
 ASSETS="${AD_ASSETS_DIR:-$HOME/Library/Application Support/AfterDarkModern/assets}"
@@ -374,6 +374,7 @@ place_shared_libs(){
   else warn "missing 'After Dark 4.0 Library' rsrc — AD4Library.rsrc not placed"; fi
 
   if [ "$INSTALL_HOST_LIBS" = 1 ]; then
+    [ -d "$ADHOST_DIR" ] || die "--install-host-libs needs a source checkout (no engine/ dir at $ADHOST_DIR)"
     log "--install-host-libs: installing shared libs into $ADHOST_DIR (dev workflow)"
     local f
     for f in ADShared40.pef AD4Library.rsrc; do

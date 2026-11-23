@@ -22,7 +22,8 @@ Marbles!, and the AD4 Library.
 usage: verify_manifest.py <assets_root> [--adhost-dir DIR] [--quiet]
   <assets_root>      root the module forks live under (== AD_ASSETS_DIR)
   --adhost-dir DIR   where the shared libs (ADShared40.pef / AD4Library.rsrc)
-                     are expected (default: ../adhost relative to this script)
+                     are expected (default: <repo>/engine, i.e. ../../engine
+                     relative to this script)
 """
 import hashlib, json, os, sys
 
@@ -54,7 +55,7 @@ def md5_canonical(path):
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     quiet = "--quiet" in sys.argv
-    adhost_dir = os.path.normpath(os.path.join(HERE, "..", "adhost"))
+    adhost_dir = os.path.normpath(os.path.join(HERE, "..", "..", "engine"))
     if "--adhost-dir" in sys.argv:
         adhost_dir = sys.argv[sys.argv.index("--adhost-dir") + 1]
     if not args:

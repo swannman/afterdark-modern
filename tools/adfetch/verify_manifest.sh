@@ -25,7 +25,8 @@
 # usage: verify_manifest.sh <assets_root> [--adhost-dir DIR] [--quiet]
 #   <assets_root>      root the module forks live under (== AD_ASSETS_DIR)
 #   --adhost-dir DIR   where the shared libs (ADShared40.pef / AD4Library.rsrc)
-#                      are expected (default: ../adhost relative to this script)
+#                      are expected (default: <repo>/engine, i.e. ../../engine
+#                      relative to this script)
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,14 +34,14 @@ MANIFEST="$HERE/assets.manifest.json"
 # shellcheck source=manifest.sh
 source "$HERE/manifest.sh"
 
-ADHOST_DIR="$HERE/../adhost"
+ADHOST_DIR="$HERE/../../engine"
 QUIET=0
 ASSETS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --adhost-dir) ADHOST_DIR="$2"; shift 2;;
     --quiet) QUIET=1; shift;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0;;
+    -h|--help) sed -n '2,31p' "$0"; exit 0;;
     *) ASSETS="$1"; shift;;
   esac
 done

@@ -72,6 +72,57 @@ final class FirstRunTests: XCTestCase {
         XCTAssertTrue(mgr2.assetsPresent(), "sentinel is a sufficient present marker")
     }
 
+    func testDevCheckoutReadsSharedLibsFromDownloadUnlessInstalledInEngine() throws {
+        // A fresh clone has no shared libs in engine/ — the first-run download
+        // puts them under assetsRoot/shared, so that is where the PPC host's
+        // working directory must point. Only an explicit --install-host-libs
+        // (libs really present in engine/) switches a dev checkout back.
+        let fm = FileManager.default
+        let repo = fm.temporaryDirectory.appendingPathComponent("adrepo-\(UUID().uuidString)")
+        let engine = repo.appendingPathComponent("engine")
+        try fm.createDirectory(at: engine, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: repo) }
+        let assets = "/somewhere/assets"
+
+        XCTAssertEqual(ADPaths.resolveSharedLibsRoot(isDistributed: false, repoRoot: repo.path, assetsRoot: assets),
+                       "/somewhere/assets/shared")
+        fm.createFile(atPath: engine.appendingPathComponent("ADShared40.pef").path, contents: Data("x".utf8))
+        XCTAssertEqual(ADPaths.resolveSharedLibsRoot(isDistributed: false, repoRoot: repo.path, assetsRoot: assets),
+                       engine.path)
+        // A shipped app never reads the dev tree, whatever is lying around in it.
+        XCTAssertEqual(ADPaths.resolveSharedLibsRoot(isDistributed: true, repoRoot: repo.path, assetsRoot: assets),
+                       "/somewhere/assets/shared")
+    }
+
+    func testEveryCatalogModuleFileIsInTheDownloadManifest() throws {
+        // The first-run download only places files that assets.manifest.json
+        // lists. A module added to catalog.json without a manifest entry works
+        // on the machine it was developed on and is silently missing for
+        // everyone who downloads — so the catalog must stay a subset.
+        let repoRoot = URL(fileURLWithPath: #filePath)   // …/app/AfterDark/Tests/AfterDarkKitTests/X.swift
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        func json(_ rel: String) throws -> [String: Any] {
+            let data = try Data(contentsOf: repoRoot.appendingPathComponent(rel))
+            return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any], rel)
+        }
+        let catalog = try json("app/AfterDark/Sources/AfterDarkKit/Resources/catalog.json")
+        let manifest = try json("tools/adfetch/assets.manifest.json")
+        let modules = try XCTUnwrap(catalog["modules"] as? [[String: Any]])
+        let assets = try XCTUnwrap(manifest["moduleAssets"] as? [[String: Any]])
+        let listed = Set(assets.compactMap { $0["path"] as? String })
+        XCTAssertFalse(modules.isEmpty)
+
+        var missing: [String] = []
+        for m in modules {
+            for key in ["rsrcPath", "dataForkPath"] {
+                guard let path = m[key] as? String, !path.hasPrefix("/") else { continue }
+                if !listed.contains(path) { missing.append("\(m["id"] ?? "?"): \(path)") }
+            }
+        }
+        XCTAssertEqual(missing, [], "catalog modules the download would not fetch — add them to assets.manifest.json")
+    }
+
     func testBundledToolsDirFoundOnlyWhenItHoldsAnExecutableUnar() throws {
         // make_app.sh bundles the extraction tools at Contents/Helpers/bin, and
         // that path is what the downloader gets as AD_TOOLS_DIR — so a bundle

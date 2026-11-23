@@ -27,11 +27,12 @@ $AD_ASSETS_DIR/shared/AD4Library.rsrc     # rsrc fork of "After Dark 4.0 Library
 
 ### Dev workflow: `--install-host-libs`
 
-The **running hosts** (`engine/adhost` / `adhost68k`) read the two shared
-libraries from their own working directory, not from the assets root — so a
-live dev checkout needs copies at `engine/ADShared40.pef` and
-`engine/AD4Library.rsrc`. `adfetch.sh` does **not** write there by
-default: those two files are gitignored (so `git status` won't show a
+The PPC host reads the two shared libraries from its working directory. The app
+points that at `$AD_ASSETS_DIR/shared` (where a normal run puts them), so
+nothing more is needed to *use* a checkout. Running a host **by hand** from
+`engine/` is the case that wants copies at `engine/ADShared40.pef` and
+`engine/AD4Library.rsrc` — and once they exist there, the app in a dev checkout
+prefers them too. `adfetch.sh` does **not** write there by default: those two files are gitignored (so `git status` won't show a
 clobber), and a plain run used to silently overwrite a developer's existing
 copies on every invocation. Pass `--install-host-libs` to opt in — it copies
 the assets-root shared libs into `engine/`, printing the md5 of
@@ -80,7 +81,7 @@ exact resource/data forks the hosts read, plus the two shared libraries, plus
 the two reference StuffIt archives). A clean run ends with:
 
 ```
-=== manifest verify: 101/101 ok, 0 differ, 0 missing ===
+=== manifest verify: 111/111 ok, 0 differ, 0 missing ===
 ```
 
 If you fetched from an Internet Archive **disk image** rather than the reference
@@ -91,7 +92,7 @@ StuffIt whose md5 equals the manifest's `sourceArchives` entry.
 
 The two IA fallbacks, by direct comparison against the manifest:
 
-- **Deluxe (68K) IA ISO** — byte-identical to the reference build: all 61 68K
+- **Deluxe (68K) IA ISO** — byte-identical to the reference build: all 71 68K
   module rsrc forks + the shared "After Dark 4.0 Shared" data fork match `md5`
   exactly.
 - **AD9 (PPC) IA image** — content-identical to the reference build, confirmed

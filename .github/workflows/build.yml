@@ -13,38 +13,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The emulator dependency (resource_dasm + phosg) rarely changes; cache the
-      # built libraries keyed on the upstream revisions we build against.
-      # Plain upstream master: the 2026 M68KEmulator rewrite plus the fix PRs
-      # (#102, #103) is corpus-validated — 88/88 modules byte-identical to the
-      # previous emulator (two of them corrected: movem.w sign-extension and
-      # register shift counts mod 64).
-      - name: Resolve emulator revision
-        id: rd
-        run: |
-          key=$(git ls-remote https://github.com/swannman/resource_dasm \
-                  refs/heads/afterdark-perf | shasum | cut -c1-16)
-          echo "key=$key" >> "$GITHUB_OUTPUT"
-
+      # The emulator dependency (resource_dasm + phosg) is fetched and built at
+      # the revisions pinned in tools/build_deps.sh — the same script a source
+      # build uses, so CI and the README can't drift apart. Cache the built
+      # libraries keyed on that file: changing a pin is what invalidates them.
       - name: Cache third_party
         uses: actions/cache@v4
         with:
           path: third_party
-          key: third-party-${{ runner.os }}-${{ steps.rd.outputs.key }}-v1
+          key: third-party-${{ runner.os }}-${{ hashFiles('tools/build_deps.sh') }}-v2
 
       - name: Build emulator dependencies
-        run: |
-          if [ ! -f third_party/resource_dasm/build/libresource_file.a ]; then
-            git clone https://github.com/fuzziqersoftware/phosg third_party/phosg
-            # Our perf fork: upstream master + MemoryContext arena-refcount fix
-            # (upstream PR #104) + the PPC decode cache. Rebase-and-retire when
-            # upstream absorbs them.
-            git clone -b afterdark-perf https://github.com/swannman/resource_dasm third_party/resource_dasm
-            (cd third_party/phosg && cmake -S . -B build -DCMAKE_INSTALL_PREFIX=../local \
-              && cmake --build build -j4 && cmake --install build)
-            (cd third_party/resource_dasm && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=../local \
-              && cmake --build build --target resource_file m68kdasm resource_dasm -j4)
-          fi
+        run: tools/build_deps.sh
 
       - name: Build engine hosts
         run: cd engine && make adhost adhost68k
